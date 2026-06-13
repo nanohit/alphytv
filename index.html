@@ -276,6 +276,8 @@
         <option value="sandbox">Sandbox</option>
         <option value="sandbox-no-referrer">Sandbox + no referrer</option>
         <option value="sandbox-credentialless">Sandbox + credentialless</option>
+        <option value="cleanroom">Cleanroom</option>
+        <option value="cleanroom-block">Cleanroom + block ads</option>
       </select>
       <button id="iframeBtn" class="primary" type="button">Iframe</button>
       <button id="dashBtn" class="primary" type="button">DASH</button>
@@ -327,6 +329,7 @@
       cors: null,
       video: null,
       resources: {},
+      cleanroom: null,
       startedAt: new Date().toISOString(),
     };
 
@@ -345,7 +348,7 @@
       factObservation: document.getElementById('factObservation'),
     };
 
-    const adHostRe = /(vuegenesisvue|buzzoola|targetads|ufouxbwn|getaim|yandex|aidata|mts|mail\.ru)/i;
+    const adHostRe = /(vuegenesisvue|buzzoola|targetads|ufouxbwn|getaim|yandex|aidata|mts|mail\.ru|timing-js-menu)/i;
 
     function log(type, message, data) {
       const entry = {
@@ -450,10 +453,192 @@
       };
     }
 
+    function adBlockPrelude() {
+      return `
+<script data-cleanroom="ad-block-prelude">
+(() => {
+  const blocked = [
+    /vuegenesisvue\\.com/i,
+    /buzzoola/i,
+    /targetads\\.io/i,
+    /ufouxbwn\\.com/i,
+    /getaim\\.org/i,
+    /yandex\\.ru/i,
+    /aidata\\.io/i,
+    /a\\.mts\\.ru/i,
+    /cm\\.a\\.mts\\.ru/i,
+    /trk\\.mail\\.ru/i,
+    /timing-js-menu\\.xyz/i
+  ];
+  const isBlocked = (value) => {
+    try {
+      const url = typeof value === 'string' ? value : value && (value.url || value.src || value.href);
+      return !!url && blocked.some((re) => re.test(String(url)));
+    } catch (e) {
+      return false;
+    }
+  };
+  const report = (kind, url) => {
+    try { console.debug('[cleanroom blocked]', kind, String(url).slice(0, 160)); } catch (e) {}
+  };
+
+  const nativeFetch = window.fetch && window.fetch.bind(window);
+  if (nativeFetch) {
+    window.fetch = function(input, init) {
+      const url = typeof input === 'string' ? input : input && input.url;
+      if (isBlocked(url)) {
+        report('fetch', url);
+        return Promise.reject(new TypeError('cleanroom blocked fetch'));
+      }
+      return nativeFetch(input, init);
+    };
+  }
+
+  const nativeOpen = XMLHttpRequest && XMLHttpRequest.prototype.open;
+  const nativeSend = XMLHttpRequest && XMLHttpRequest.prototype.send;
+  if (nativeOpen && nativeSend) {
+    XMLHttpRequest.prototype.open = function(method, url) {
+      this.__cleanroomBlocked = isBlocked(url);
+      this.__cleanroomUrl = url;
+      if (this.__cleanroomBlocked) report('xhr', url);
+      return nativeOpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function() {
+      if (this.__cleanroomBlocked) {
+        setTimeout(() => {
+          try { this.dispatchEvent(new Event('error')); } catch (e) {}
+          try { this.dispatchEvent(new Event('loadend')); } catch (e) {}
+        }, 0);
+        return;
+      }
+      return nativeSend.apply(this, arguments);
+    };
+  }
+
+  const nativeCreate = Document.prototype.createElement;
+  Document.prototype.createElement = function(name, options) {
+    const element = nativeCreate.call(this, name, options);
+    if (String(name).toLowerCase() === 'script') {
+      const nativeSetAttribute = element.setAttribute;
+      element.setAttribute = function(attr, value) {
+        if (String(attr).toLowerCase() === 'src' && isBlocked(value)) {
+          report('script', value);
+          return;
+        }
+        return nativeSetAttribute.call(this, attr, value);
+      };
+      try {
+        Object.defineProperty(element, 'src', {
+          set(value) {
+            if (isBlocked(value)) {
+              report('script', value);
+              return;
+            }
+            nativeSetAttribute.call(this, 'src', value);
+          },
+          get() {
+            return this.getAttribute('src') || '';
+          },
+          configurable: true
+        });
+      } catch (e) {}
+    }
+    return element;
+  };
+})();
+<\/script>`;
+    }
+
+    function sanitizeOrtifiedHtml(html, mode) {
+      let out = String(html || '');
+      const stats = {
+        mode,
+        inputBytes: out.length,
+        adScriptBlocks: (out.match(/<script\s+data-name=["']ad["'][\s\S]*?<\/script>/gi) || []).length,
+        adsConfigRefs: (out.match(/ads:\s*adsConfig\s*,/g) || []).length,
+        makePlayerRefs: (out.match(/makePlayer\s*\(/g) || []).length,
+        preludeInjected: mode === 'cleanroom-block',
+      };
+
+      out = out.replace(
+        /<script\s+data-name=["']ad["'][\s\S]*?<\/script>/i,
+        '<script data-name="ad">var middleCount = 0, adsConfig = {};<\/script>'
+      );
+      out = out.replace(/ads:\s*adsConfig\s*,/g, 'ads: {},');
+      if (!/<base\s/i.test(out) && /<head([^>]*)>/i.test(out)) {
+        out = out.replace(/<head([^>]*)>/i, '<head$1><base href="https://api.ortified.ws/">');
+      }
+      if (!/<base\s/i.test(out)) {
+        out = out.replace(/<html([^>]*)>/i, '<html$1><head><base href="https://api.ortified.ws/"></head>');
+      }
+      if (mode === 'cleanroom-block') {
+        out = out.replace(/<head([^>]*)>/i, `<head$1>${adBlockPrelude()}`);
+      }
+      stats.outputBytes = out.length;
+      return { html: out, stats };
+    }
+
+    async function showCleanroom(mode) {
+      destroyPlayer();
+      state.iframeMode = mode;
+      state.cleanroom = null;
+      const url = el.embedUrl.value.trim();
+      log('cleanroom', 'fetching embed HTML in browser', { urlHost: new URL(url).host, mode });
+      setStatus(`cleanroom fetch (${mode})`, 'warn');
+      const response = await fetch(url, {
+        cache: 'no-store',
+        credentials: 'omit',
+        mode: 'cors',
+      });
+      const html = await response.text();
+      log(response.ok ? 'cleanroom' : 'cleanroom-error', 'embed HTML fetch completed', {
+        ok: response.ok,
+        status: response.status,
+        bytes: html.length,
+        contentType: response.headers.get('content-type'),
+      });
+      if (!response.ok || !html.includes('makePlayer')) {
+        state.cleanroom = {
+          mode,
+          ok: false,
+          status: response.status,
+          bytes: html.length,
+          hasMakePlayer: html.includes('makePlayer'),
+        };
+        setStatus(`cleanroom fetch failed ${response.status}`, 'bad-text');
+        return;
+      }
+
+      const sanitized = sanitizeOrtifiedHtml(html, mode);
+      state.cleanroom = {
+        mode,
+        ok: true,
+        status: response.status,
+        contentType: response.headers.get('content-type'),
+        ...sanitized.stats,
+      };
+      const iframe = document.createElement('iframe');
+      iframe.allow = 'autoplay; fullscreen; encrypted-media; picture-in-picture';
+      iframe.allowFullscreen = true;
+      iframe.referrerPolicy = 'no-referrer';
+      iframe.srcdoc = sanitized.html;
+      el.viewer.replaceChildren(iframe);
+      log('cleanroom', 'loaded sanitized srcdoc player', state.cleanroom);
+      setStatus(`cleanroom loaded (${mode}); watch for ad behavior`, 'warn');
+    }
+
     function showIframe() {
       destroyPlayer();
       const options = iframeOptions(el.iframeMode.value);
+      if (options.mode.startsWith('cleanroom')) {
+        showCleanroom(options.mode).catch((error) => {
+          log('cleanroom-error', error.message);
+          setStatus(error.message, 'bad-text');
+        });
+        return;
+      }
       state.iframeMode = options.mode;
+      state.cleanroom = null;
       const iframe = document.createElement('iframe');
       iframe.allow = 'autoplay; fullscreen; encrypted-media; picture-in-picture';
       iframe.allowFullscreen = true;
@@ -618,6 +803,7 @@
           } : null,
         },
         iframeMode: state.iframeMode,
+        cleanroom: state.cleanroom,
         codecSupport: codecSupport(),
         observation: state.observation,
         cors: state.cors,

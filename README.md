@@ -8,8 +8,19 @@ Latest result:
 - the iframe wrapper is the promising MVP path;
 - CORS to `cdnr.interkh.com` returns `200` from the Vercel origin;
 - direct Shaka/DASH loads the manifest but segment requests return `410`.
-- one rare iframe ad was observed in desktop incognito, so the wrapper is lower-ad,
-  not guaranteed ad-free.
+- desktop incognito later showed the same visible ad across every black-box
+  iframe privacy variant, so iframe wrapping alone is not guaranteed ad-free.
+
+Current experiment:
+
+- `Cleanroom` fetches the Ortified embed HTML from the viewer's browser, removes
+  the Ortified ad config before the player initializes, then loads the sanitized
+  player into a `srcdoc` iframe.
+- `Cleanroom + block ads` does the same thing and also injects a small diagnostic
+  blocker for known ad hosts seen in the captures.
+
+These modes must be tested from a Russian IP because the embed HTML fetch still
+depends on the same RU-only Ortified gate.
 
 This repo intentionally contains only:
 
@@ -42,17 +53,17 @@ Use the production URL from a Russian IP.
 
 ## Test Sequence
 
-On the deployed page:
+On the deployed page from a Russian IP:
 
-1. Pick an iframe mode.
+1. Pick `Cleanroom`.
 2. Click `Iframe`.
-3. Wait 60-90 seconds.
+3. If the player loads, start/switch an episode and wait 90-120 seconds.
 4. Click `Clean` if no ad appears, or `Ad` if an ad appears.
-5. Click `CORS`.
-6. Click `Copy Report`.
-7. Paste the copied report into the Codex thread.
+5. Click `Copy Report`.
+6. Paste the copied report into the Codex thread.
+7. Repeat the same test with `Cleanroom + block ads`.
 
-Recommended iframe mode order:
+Only retest these older modes as controls if needed:
 
 1. `Baseline`
 2. `No referrer`
@@ -67,18 +78,28 @@ If a mode breaks playback, note that and move to the next one.
 
 Best result:
 
-- iframe is clean on Vercel;
+- `Cleanroom` or `Cleanroom + block ads` is clean on Vercel;
 - CORS returns `200`;
-- iframe video plays.
+- video plays.
 
 Still workable:
 
-- iframe has ads, but CORS returns `200`.
+- black-box iframe has ads, but cleanroom removes them.
 
 Bad:
 
+- cleanroom fetch returns `422` or does not contain `makePlayer`;
+- cleanroom loads but the provider player no longer plays video;
 - CORS fails on Vercel;
 - direct DASH fails even though localhost works.
+
+Important cleanroom report fields:
+
+- `cleanroom.ok` - whether the browser fetched and sanitized Ortified HTML.
+- `cleanroom.adScriptBlocks` - should usually be at least `1`.
+- `cleanroom.adsConfigRefs` - should usually be at least `1`.
+- `cleanroom.makePlayerRefs` - should usually be at least `1`.
+- `cleanroom.preludeInjected` - true only for `Cleanroom + block ads`.
 
 Expected current DASH behavior:
 
