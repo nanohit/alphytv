@@ -65,7 +65,7 @@
 
     .toolbar {
       display: grid;
-      grid-template-columns: minmax(210px, 360px) minmax(160px, 240px) repeat(5, auto) minmax(0, 1fr);
+      grid-template-columns: minmax(180px, 280px) minmax(210px, 360px) minmax(160px, 240px) repeat(5, auto) minmax(0, 1fr);
       gap: 10px;
       align-items: center;
       padding: 14px 20px;
@@ -268,6 +268,7 @@
 
   <main>
     <section class="toolbar">
+      <select id="targetSelect" aria-label="Target"></select>
       <select id="episodeSelect" aria-label="Episode"></select>
       <select id="iframeMode" aria-label="Iframe mode">
         <option value="baseline">Baseline</option>
@@ -321,6 +322,8 @@
     const state = {
       config: null,
       current: null,
+      targetKey: 'captured',
+      customTarget: null,
       iframeMode: 'baseline',
       player: null,
       shakaReady: false,
@@ -337,6 +340,7 @@
       origin: document.getElementById('origin'),
       status: document.getElementById('status'),
       viewer: document.getElementById('viewer'),
+      targetSelect: document.getElementById('targetSelect'),
       episodeSelect: document.getElementById('episodeSelect'),
       iframeMode: document.getElementById('iframeMode'),
       embedUrl: document.getElementById('embedUrl'),
@@ -349,6 +353,18 @@
     };
 
     const adHostRe = /(vuegenesisvue|buzzoola|targetads|ufouxbwn|getaim|yandex|aidata|mts|mail\.ru|timing-js-menu)/i;
+    const LIVE_PRESETS = {
+      captured: {
+        label: 'Captured config',
+        kind: 'captured',
+      },
+      'rick-morty-s1': {
+        label: 'Rick and Morty S1',
+        kind: 'live-ortified',
+        embedUrl: 'https://api.ortified.ws/embed/movie/301?season=1&episode=1&episode=1',
+        note: 'live Ortified seed from Newdeaf page 5073',
+      },
+    };
 
     function log(type, message, data) {
       const entry = {
@@ -387,11 +403,71 @@
 
     function updateCurrent(episode) {
       state.current = episode;
+      state.targetKey = 'captured';
       el.embedUrl.value = state.config.embedUrl;
       el.dashUrl.value = episode.dash || '';
       el.factEpisode.textContent = episodeLabel(episode);
       el.factExpires.textContent = episode.expiresAtIso || '-';
       setStatus(`ready · ${location.origin}`, 'ok');
+    }
+
+    function populateTargets() {
+      el.targetSelect.textContent = '';
+      for (const [key, preset] of Object.entries(LIVE_PRESETS)) {
+        const option = document.createElement('option');
+        option.value = key;
+        option.textContent = preset.label;
+        el.targetSelect.append(option);
+      }
+
+      const params = new URLSearchParams(location.search);
+      const embed = params.get('embed');
+      if (embed) {
+        state.customTarget = {
+          label: params.get('title') || 'Custom Ortified URL',
+          kind: 'live-ortified',
+          embedUrl: embed,
+          note: 'custom URL parameter',
+        };
+        const option = document.createElement('option');
+        option.value = 'custom';
+        option.textContent = state.customTarget.label;
+        el.targetSelect.append(option);
+        option.selected = true;
+      } else {
+        const preset = params.get('preset');
+        if (preset && LIVE_PRESETS[preset]) {
+          el.targetSelect.value = preset;
+        }
+      }
+    }
+
+    function getTargetPreset(key) {
+      if (key === 'custom') return state.customTarget;
+      return LIVE_PRESETS[key] || LIVE_PRESETS.captured;
+    }
+
+    function applyTarget(key) {
+      const preset = getTargetPreset(key);
+      state.targetKey = key;
+      state.cleanroom = null;
+      if (!preset || preset.kind === 'captured') {
+        updateCurrent(currentFromSelect());
+        log('target', 'selected captured config target');
+        return;
+      }
+
+      el.embedUrl.value = preset.embedUrl;
+      el.dashUrl.value = '';
+      el.factEpisode.textContent = preset.label;
+      el.factExpires.textContent = 'live Ortified fetch';
+      setStatus(`ready · ${preset.label}`, 'ok');
+      log('target', 'selected live Ortified seed', {
+        key,
+        label: preset.label,
+        host: new URL(preset.embedUrl).host,
+        note: preset.note || '',
+      });
     }
 
     function populateEpisodes() {
@@ -803,6 +879,12 @@
           } : null,
         },
         iframeMode: state.iframeMode,
+        target: {
+          key: state.targetKey,
+          label: getTargetPreset(state.targetKey)?.label || '',
+          kind: getTargetPreset(state.targetKey)?.kind || '',
+          embedHost: el.embedUrl.value ? new URL(el.embedUrl.value).host : null,
+        },
         cleanroom: state.cleanroom,
         codecSupport: codecSupport(),
         observation: state.observation,
@@ -829,6 +911,8 @@
       if (!response.ok) throw new Error(`config.generated.json ${response.status}`);
       state.config = await response.json();
       populateEpisodes();
+      populateTargets();
+      applyTarget(el.targetSelect.value || 'captured');
       el.viewer.replaceChildren(Object.assign(document.createElement('div'), {
         className: 'fallback',
         textContent: 'Ready',
@@ -840,7 +924,11 @@
       });
     }
 
-    el.episodeSelect.addEventListener('change', () => updateCurrent(currentFromSelect()));
+    el.targetSelect.addEventListener('change', () => applyTarget(el.targetSelect.value));
+    el.episodeSelect.addEventListener('change', () => {
+      el.targetSelect.value = 'captured';
+      updateCurrent(currentFromSelect());
+    });
     el.iframeMode.addEventListener('change', () => {
       state.iframeMode = el.iframeMode.value;
       log('iframe-mode', 'selected iframe mode', { mode: state.iframeMode });

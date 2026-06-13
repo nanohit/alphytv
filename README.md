@@ -26,6 +26,15 @@ Current experiment:
 These modes must be tested from a Russian IP because the embed HTML fetch still
 depends on the same RU-only Ortified gate.
 
+Extra live seed target:
+
+- `Rick and Morty S1` uses
+  `https://api.ortified.ws/embed/movie/301?season=1&episode=1&episode=1`.
+- Open `https://alphytv.vercel.app/?preset=rick-morty-s1` from a Russian IP,
+  choose `Cleanroom`, then click `Iframe`.
+- Or use `?embed=<api.ortified.ws embed URL>` for any static Newdeaf Ortified
+  seed discovered by the scanner.
+
 This repo intentionally contains only:
 
 - `index.html` - browser test UI;
@@ -59,13 +68,16 @@ Use the production URL from a Russian IP.
 
 On the deployed page from a Russian IP:
 
-1. Pick `Cleanroom`.
-2. Click `Iframe`.
-3. If the player loads, start/switch an episode and wait 90-120 seconds.
-4. Click `No Ad Seen` if no ad appears, or `Ad Seen` if an ad appears.
-5. Click `Copy Report`.
-6. Paste the copied report into the Codex thread.
-7. Repeat the same test with `Cleanroom + block ads`.
+1. Pick a target: `Captured config`, `Rick and Morty S1`, or a custom `embed`
+   query URL.
+2. Pick `Cleanroom`.
+3. Click `Iframe`.
+4. If the player loads, start/switch an episode and wait 90-120 seconds.
+5. Click `No Ad Seen` if no ad appears, or `Ad Seen` if an ad appears.
+6. Click `Copy Report`.
+7. Paste the copied report into the Codex thread.
+8. Repeat the same test with `Cleanroom + block ads` only if plain
+   `Cleanroom` fails or shows ads.
 
 Only retest these older modes as controls if needed:
 
