@@ -5,11 +5,15 @@ Temporary Vercel probe for the `api.ortified.ws` / `cdnr.interkh.com` playback p
 Latest result:
 
 - iframe playback works from Russian IP;
-- the iframe wrapper is the promising MVP path;
+- the plain iframe wrapper proves the low-bandwidth path but not the ad-free
+  path;
 - CORS to `cdnr.interkh.com` returns `200` from the Vercel origin;
 - direct Shaka/DASH loads the manifest but segment requests return `410`.
 - desktop incognito later showed the same visible ad across every black-box
   iframe privacy variant, so iframe wrapping alone is not guaranteed ad-free.
+- `Cleanroom` and `Cleanroom + block ads` fetched the RU-only Ortified HTML,
+  removed one visible ad config block, preserved `makePlayer(...)`, and played
+  without the visible ad in the reported run.
 
 Current experiment:
 
@@ -58,7 +62,7 @@ On the deployed page from a Russian IP:
 1. Pick `Cleanroom`.
 2. Click `Iframe`.
 3. If the player loads, start/switch an episode and wait 90-120 seconds.
-4. Click `Clean` if no ad appears, or `Ad` if an ad appears.
+4. Click `No Ad Seen` if no ad appears, or `Ad Seen` if an ad appears.
 5. Click `Copy Report`.
 6. Paste the copied report into the Codex thread.
 7. Repeat the same test with `Cleanroom + block ads`.
@@ -79,12 +83,15 @@ If a mode breaks playback, note that and move to the next one.
 Best result:
 
 - `Cleanroom` or `Cleanroom + block ads` is clean on Vercel;
-- CORS returns `200`;
+- `cleanroom.adScriptBlocks` is at least `1`;
+- `cleanroom.adsConfigRefs` is at least `1`;
+- `cleanroom.makePlayerRefs` is at least `1`;
 - video plays.
 
 Still workable:
 
-- black-box iframe has ads, but cleanroom removes them.
+- black-box iframe has ads, but cleanroom removes them. This is the current
+  result to beat.
 
 Bad:
 

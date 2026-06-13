@@ -282,8 +282,8 @@
       <button id="iframeBtn" class="primary" type="button">Iframe</button>
       <button id="dashBtn" class="primary" type="button">DASH</button>
       <button id="corsBtn" type="button">CORS</button>
-      <button id="cleanBtn" class="good" type="button">Clean</button>
-      <button id="adBtn" class="bad" type="button">Ad</button>
+      <button id="cleanBtn" class="good" type="button">No Ad Seen</button>
+      <button id="adBtn" class="bad" type="button">Ad Seen</button>
       <button id="copyBtn" type="button">Copy Report</button>
       <div id="status" class="status">loading config</div>
     </section>
@@ -854,7 +854,7 @@
       log('cors-error', error.message);
       setStatus(error.message, 'bad-text');
     }));
-    document.getElementById('cleanBtn').addEventListener('click', () => markObservation('clean'));
+    document.getElementById('cleanBtn').addEventListener('click', () => markObservation('no-ad-seen'));
     document.getElementById('adBtn').addEventListener('click', () => markObservation('ad-seen'));
     document.getElementById('copyBtn').addEventListener('click', () => copyReport().catch((error) => log('copy-error', error.message)));
 
