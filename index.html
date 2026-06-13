@@ -65,7 +65,7 @@
 
     .toolbar {
       display: grid;
-      grid-template-columns: minmax(210px, 360px) repeat(5, auto) minmax(0, 1fr);
+      grid-template-columns: minmax(210px, 360px) minmax(160px, 240px) repeat(5, auto) minmax(0, 1fr);
       gap: 10px;
       align-items: center;
       padding: 14px 20px;
@@ -269,6 +269,14 @@
   <main>
     <section class="toolbar">
       <select id="episodeSelect" aria-label="Episode"></select>
+      <select id="iframeMode" aria-label="Iframe mode">
+        <option value="baseline">Baseline</option>
+        <option value="no-referrer">No referrer</option>
+        <option value="credentialless">Credentialless</option>
+        <option value="sandbox">Sandbox</option>
+        <option value="sandbox-no-referrer">Sandbox + no referrer</option>
+        <option value="sandbox-credentialless">Sandbox + credentialless</option>
+      </select>
       <button id="iframeBtn" class="primary" type="button">Iframe</button>
       <button id="dashBtn" class="primary" type="button">DASH</button>
       <button id="corsBtn" type="button">CORS</button>
@@ -311,6 +319,7 @@
     const state = {
       config: null,
       current: null,
+      iframeMode: 'baseline',
       player: null,
       shakaReady: false,
       events: [],
@@ -326,6 +335,7 @@
       status: document.getElementById('status'),
       viewer: document.getElementById('viewer'),
       episodeSelect: document.getElementById('episodeSelect'),
+      iframeMode: document.getElementById('iframeMode'),
       embedUrl: document.getElementById('embedUrl'),
       dashUrl: document.getElementById('dashUrl'),
       log: document.getElementById('log'),
@@ -429,16 +439,41 @@
       return checks;
     }
 
+    function iframeOptions(mode) {
+      return {
+        mode,
+        referrerPolicy: mode.includes('no-referrer') ? 'no-referrer' : 'strict-origin-when-cross-origin',
+        sandbox: mode.includes('sandbox')
+          ? 'allow-scripts allow-same-origin allow-forms allow-presentation allow-pointer-lock'
+          : '',
+        credentialless: mode.includes('credentialless'),
+      };
+    }
+
     function showIframe() {
       destroyPlayer();
+      const options = iframeOptions(el.iframeMode.value);
+      state.iframeMode = options.mode;
       const iframe = document.createElement('iframe');
       iframe.allow = 'autoplay; fullscreen; encrypted-media; picture-in-picture';
       iframe.allowFullscreen = true;
-      iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+      iframe.referrerPolicy = options.referrerPolicy;
+      if (options.sandbox) iframe.sandbox = options.sandbox;
+      if (options.credentialless) {
+        iframe.credentialless = true;
+        iframe.setAttribute('credentialless', '');
+      }
       iframe.src = el.embedUrl.value.trim();
       el.viewer.replaceChildren(iframe);
-      log('iframe', 'loaded embed under parent origin', { origin: location.origin, srcHost: new URL(iframe.src).host });
-      setStatus('iframe loaded; watch for ad behavior', 'warn');
+      log('iframe', 'loaded embed under parent origin', {
+        origin: location.origin,
+        srcHost: new URL(iframe.src).host,
+        mode: options.mode,
+        referrerPolicy: options.referrerPolicy,
+        sandbox: options.sandbox || null,
+        credentialless: options.credentialless,
+      });
+      setStatus(`iframe loaded (${options.mode}); watch for ad behavior`, 'warn');
     }
 
     function destroyPlayer() {
@@ -582,6 +617,7 @@
             voices: state.current.audio?.names || [],
           } : null,
         },
+        iframeMode: state.iframeMode,
         codecSupport: codecSupport(),
         observation: state.observation,
         cors: state.cors,
@@ -619,6 +655,10 @@
     }
 
     el.episodeSelect.addEventListener('change', () => updateCurrent(currentFromSelect()));
+    el.iframeMode.addEventListener('change', () => {
+      state.iframeMode = el.iframeMode.value;
+      log('iframe-mode', 'selected iframe mode', { mode: state.iframeMode });
+    });
     document.getElementById('iframeBtn').addEventListener('click', showIframe);
     document.getElementById('dashBtn').addEventListener('click', () => startDash().catch((error) => {
       log('dash-error', error.message);
