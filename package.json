@@ -1,0 +1,9 @@
+{
+  "name": "alphytv-domain-probe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Temporary Vercel probe for the Ortified/Newdeaf playback path.",
+  "scripts": {
+    "deploy": "npx vercel@latest --prod"
+  }
+}

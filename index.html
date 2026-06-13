@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ortified Domain Probe</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0c0f;
+      --panel: #15171c;
+      --line: #2b3038;
+      --text: #eef1f4;
+      --muted: #9aa4b2;
+      --accent: #37d3b7;
+      --warn: #f4bf5f;
+      --bad: #ff6a6a;
+      --ok: #68df8f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: center;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--line);
+      background: #101217;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.2;
+      font-weight: 680;
+    }
+
+    .origin {
+      color: var(--muted);
+      font-size: 13px;
+      max-width: 48vw;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    main {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      min-height: calc(100vh - 65px);
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(210px, 360px) repeat(5, auto) minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--line);
+      background: #11141a;
+    }
+
+    select,
+    button,
+    input {
+      height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #1b1f27;
+      color: var(--text);
+      font: inherit;
+      font-size: 14px;
+    }
+
+    select,
+    input {
+      min-width: 0;
+      padding: 0 10px;
+    }
+
+    button {
+      padding: 0 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    button:hover {
+      border-color: #4b5564;
+      background: #222832;
+    }
+
+    button.primary {
+      border-color: #2b8d80;
+      background: #173a37;
+    }
+
+    button.good {
+      border-color: #34794a;
+      background: #183522;
+    }
+
+    button.bad {
+      border-color: #984b4b;
+      background: #3c1d1f;
+    }
+
+    .status {
+      color: var(--muted);
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      justify-self: end;
+      max-width: 100%;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 440px);
+      min-height: 0;
+    }
+
+    .stage {
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) auto;
+      min-width: 0;
+      min-height: 0;
+      background: #050608;
+    }
+
+    .viewer {
+      position: relative;
+      min-height: 0;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+
+    iframe,
+    video {
+      width: 100%;
+      height: 100%;
+      min-height: 380px;
+      border: 0;
+      background: black;
+    }
+
+    video {
+      object-fit: contain;
+    }
+
+    .fallback {
+      color: var(--muted);
+      font-size: 14px;
+      padding: 20px;
+      text-align: center;
+    }
+
+    .fields {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 12px;
+      border-top: 1px solid var(--line);
+      background: #101217;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    aside {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      min-height: 0;
+      border-left: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    .facts {
+      display: grid;
+      gap: 8px;
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .facts strong {
+      color: var(--text);
+      font-weight: 620;
+    }
+
+    .log {
+      margin: 0;
+      padding: 14px;
+      min-height: 0;
+      overflow: auto;
+      color: #d7dde6;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .ok {
+      color: var(--ok);
+    }
+
+    .warn {
+      color: var(--warn);
+    }
+
+    .bad-text {
+      color: var(--bad);
+    }
+
+    @media (max-width: 920px) {
+      header,
+      .toolbar,
+      .layout,
+      .fields {
+        grid-template-columns: 1fr;
+      }
+
+      .status {
+        justify-self: start;
+      }
+
+      aside {
+        border-left: 0;
+        border-top: 1px solid var(--line);
+        min-height: 360px;
+      }
+
+      .origin {
+        max-width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Ortified Domain Probe</h1>
+    <div id="origin" class="origin"></div>
+  </header>
+
+  <main>
+    <section class="toolbar">
+      <select id="episodeSelect" aria-label="Episode"></select>
+      <button id="iframeBtn" class="primary" type="button">Iframe</button>
+      <button id="dashBtn" class="primary" type="button">DASH</button>
+      <button id="corsBtn" type="button">CORS</button>
+      <button id="cleanBtn" class="good" type="button">Clean</button>
+      <button id="adBtn" class="bad" type="button">Ad</button>
+      <button id="copyBtn" type="button">Copy Report</button>
+      <div id="status" class="status">loading config</div>
+    </section>
+
+    <section class="layout">
+      <section class="stage">
+        <div id="viewer" class="viewer">
+          <div class="fallback">Waiting for config.generated.json</div>
+        </div>
+        <div class="fields">
+          <div class="field">
+            <label for="embedUrl">Embed URL</label>
+            <input id="embedUrl" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="dashUrl">DASH URL</label>
+            <input id="dashUrl" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
+      </section>
+
+      <aside>
+        <div class="facts">
+          <div><strong>Episode</strong> <span id="factEpisode">-</span></div>
+          <div><strong>Expires</strong> <span id="factExpires">-</span></div>
+          <div><strong>Codec</strong> <span id="factCodec">checking</span></div>
+          <div><strong>Observation</strong> <span id="factObservation">unset</span></div>
+        </div>
+        <pre id="log" class="log"></pre>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      config: null,
+      current: null,
+      player: null,
+      shakaReady: false,
+      events: [],
+      observation: null,
+      cors: null,
+      video: null,
+      resources: {},
+      startedAt: new Date().toISOString(),
+    };
+
+    const el = {
+      origin: document.getElementById('origin'),
+      status: document.getElementById('status'),
+      viewer: document.getElementById('viewer'),
+      episodeSelect: document.getElementById('episodeSelect'),
+      embedUrl: document.getElementById('embedUrl'),
+      dashUrl: document.getElementById('dashUrl'),
+      log: document.getElementById('log'),
+      factEpisode: document.getElementById('factEpisode'),
+      factExpires: document.getElementById('factExpires'),
+      factCodec: document.getElementById('factCodec'),
+      factObservation: document.getElementById('factObservation'),
+    };
+
+    const adHostRe = /(vuegenesisvue|buzzoola|targetads|ufouxbwn|getaim|yandex|aidata|mts|mail\.ru)/i;
+
+    function log(type, message, data) {
+      const entry = {
+        at: new Date().toISOString(),
+        type,
+        message,
+        data: data || null,
+      };
+      state.events.push(entry);
+      if (state.events.length > 220) state.events.shift();
+      renderLog();
+    }
+
+    function renderLog() {
+      el.log.textContent = state.events.map((entry) => {
+        const suffix = entry.data ? ` ${JSON.stringify(entry.data)}` : '';
+        return `[${entry.at.slice(11, 19)}] ${entry.type}: ${entry.message}${suffix}`;
+      }).join('\n');
+      el.log.scrollTop = el.log.scrollHeight;
+    }
+
+    function setStatus(message, cls) {
+      el.status.className = `status ${cls || ''}`;
+      el.status.textContent = message;
+    }
+
+    function episodeLabel(episode) {
+      return `S${state.config.playlist.current.season}E${episode.episode} · ${episode.title || episode.id}`;
+    }
+
+    function currentFromSelect() {
+      const [seasonValue, episodeValue] = el.episodeSelect.value.split(':');
+      const season = state.config.playlist.seasons.find((item) => String(item.season) === seasonValue);
+      return season.episodes.find((item) => String(item.episode) === episodeValue);
+    }
+
+    function updateCurrent(episode) {
+      state.current = episode;
+      el.embedUrl.value = state.config.embedUrl;
+      el.dashUrl.value = episode.dash || '';
+      el.factEpisode.textContent = episodeLabel(episode);
+      el.factExpires.textContent = episode.expiresAtIso || '-';
+      setStatus(`ready · ${location.origin}`, 'ok');
+    }
+
+    function populateEpisodes() {
+      el.episodeSelect.textContent = '';
+      for (const season of state.config.playlist.seasons) {
+        for (const episode of season.episodes) {
+          const option = document.createElement('option');
+          option.value = `${season.season}:${episode.episode}`;
+          option.textContent = `S${season.season}E${episode.episode} · ${episode.title || episode.id}`;
+          el.episodeSelect.append(option);
+          if (
+            String(season.season) === String(state.config.playlist.current.season)
+            && String(episode.episode) === String(state.config.playlist.current.episode)
+          ) {
+            option.selected = true;
+          }
+        }
+      }
+      updateCurrent(currentFromSelect());
+    }
+
+    function installResourceObserver() {
+      const add = (entry) => {
+        try {
+          const host = new URL(entry.name).host;
+          const row = state.resources[host] || { count: 0, transfer: 0, adLike: false };
+          row.count += 1;
+          row.transfer += Math.round(entry.transferSize || 0);
+          row.adLike = row.adLike || adHostRe.test(host);
+          state.resources[host] = row;
+        } catch {
+          // ignore non-URL resources
+        }
+      };
+      performance.getEntriesByType('resource').forEach(add);
+      if ('PerformanceObserver' in window) {
+        new PerformanceObserver((list) => list.getEntries().forEach(add)).observe({ type: 'resource', buffered: true });
+      }
+    }
+
+    function codecSupport() {
+      const mediaSource = window.MediaSource || window.WebKitMediaSource;
+      const checks = {
+        av1: !!mediaSource && mediaSource.isTypeSupported('video/webm; codecs="av01.0.05M.08"'),
+        opus: !!mediaSource && mediaSource.isTypeSupported('audio/webm; codecs="opus"'),
+      };
+      el.factCodec.textContent = `AV1 ${checks.av1 ? 'yes' : 'no'} · Opus ${checks.opus ? 'yes' : 'no'}`;
+      return checks;
+    }
+
+    function showIframe() {
+      destroyPlayer();
+      const iframe = document.createElement('iframe');
+      iframe.allow = 'autoplay; fullscreen; encrypted-media; picture-in-picture';
+      iframe.allowFullscreen = true;
+      iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+      iframe.src = el.embedUrl.value.trim();
+      el.viewer.replaceChildren(iframe);
+      log('iframe', 'loaded embed under parent origin', { origin: location.origin, srcHost: new URL(iframe.src).host });
+      setStatus('iframe loaded; watch for ad behavior', 'warn');
+    }
+
+    function destroyPlayer() {
+      if (state.player) {
+        state.player.destroy().catch(() => {});
+        state.player = null;
+      }
+      state.video = null;
+    }
+
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const existing = document.querySelector(`script[src="${src}"]`);
+        if (existing) {
+          existing.addEventListener('load', resolve, { once: true });
+          existing.addEventListener('error', reject, { once: true });
+          if (window.shaka) resolve();
+          return;
+        }
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = true;
+        script.onload = resolve;
+        script.onerror = () => reject(new Error(`failed to load ${src}`));
+        document.head.append(script);
+      });
+    }
+
+    async function ensureShaka() {
+      if (!window.shaka) {
+        await loadScript('https://cdn.jsdelivr.net/npm/shaka-player@4.15.9/dist/shaka-player.compiled.js');
+      }
+      shaka.polyfill.installAll();
+      if (!shaka.Player.isBrowserSupported()) throw new Error('Shaka reports unsupported browser');
+      state.shakaReady = true;
+    }
+
+    async function runCorsProbe() {
+      const url = el.dashUrl.value.trim();
+      if (!url) throw new Error('missing DASH URL');
+      const started = performance.now();
+      const response = await fetch(url, { cache: 'no-store', mode: 'cors' });
+      const text = await response.text();
+      const duration = Math.round(performance.now() - started);
+      const adaptationSets = (text.match(/<AdaptationSet\b/g) || []).length;
+      const representations = (text.match(/<Representation\b/g) || []).length;
+      const mpdDuration = text.match(/mediaPresentationDuration="([^"]+)"/)?.[1] || '';
+      state.cors = {
+        ok: response.ok,
+        status: response.status,
+        contentType: response.headers.get('content-type'),
+        bytes: text.length,
+        ms: duration,
+        adaptationSets,
+        representations,
+        mpdDuration,
+      };
+      log(response.ok ? 'cors' : 'cors-error', 'manifest fetch completed', state.cors);
+      setStatus(response.ok ? 'CORS manifest ok' : `CORS status ${response.status}`, response.ok ? 'ok' : 'bad-text');
+      return state.cors;
+    }
+
+    async function startDash() {
+      destroyPlayer();
+      await ensureShaka();
+      const video = document.createElement('video');
+      video.controls = true;
+      video.autoplay = true;
+      video.playsInline = true;
+      el.viewer.replaceChildren(video);
+      state.video = video;
+
+      const videoEvents = ['loadedmetadata', 'canplay', 'playing', 'pause', 'waiting', 'stalled', 'error'];
+      for (const name of videoEvents) {
+        video.addEventListener(name, () => {
+          log('video', name, {
+            currentTime: Number(video.currentTime || 0).toFixed(2),
+            duration: Number(video.duration || 0).toFixed(2),
+            readyState: video.readyState,
+            size: `${video.videoWidth || 0}x${video.videoHeight || 0}`,
+          });
+        });
+      }
+
+      const player = new shaka.Player(video);
+      player.addEventListener('error', (event) => {
+        log('shaka-error', event.detail?.message || 'player error', event.detail || null);
+        setStatus('DASH error', 'bad-text');
+      });
+      state.player = player;
+
+      await player.load(el.dashUrl.value.trim());
+      log('dash', 'loaded manifest in Shaka', {
+        origin: location.origin,
+        audioTracks: player.getVariantTracks().filter((track) => track.type === 'variant').length,
+      });
+      setStatus('DASH loaded; press play if blocked', 'ok');
+    }
+
+    function markObservation(value) {
+      state.observation = {
+        value,
+        at: new Date().toISOString(),
+        origin: location.origin,
+      };
+      el.factObservation.textContent = value;
+      log('observation', value);
+    }
+
+    function report() {
+      const hosts = Object.entries(state.resources)
+        .sort((a, b) => b[1].count - a[1].count)
+        .slice(0, 20)
+        .map(([host, data]) => ({ host, ...data }));
+      const video = state.video ? {
+        currentTime: state.video.currentTime,
+        duration: state.video.duration,
+        readyState: state.video.readyState,
+        videoWidth: state.video.videoWidth,
+        videoHeight: state.video.videoHeight,
+        paused: state.video.paused,
+      } : null;
+
+      return {
+        origin: location.origin,
+        href: location.href,
+        startedAt: state.startedAt,
+        userAgent: navigator.userAgent,
+        config: {
+          runId: state.config?.runId,
+          generatedAt: state.config?.generatedAt,
+          mintedAtIso: state.config?.mintedAtIso,
+          expiresAtIso: state.current?.expiresAtIso,
+          embedHost: state.config?.embedUrl ? new URL(state.config.embedUrl).host : null,
+          dashHost: state.current?.dash ? new URL(state.current.dash).host : null,
+          episode: state.current ? {
+            title: state.current.title,
+            id: state.current.id,
+            videoKey: state.current.videoKey,
+            duration: state.current.duration,
+            voices: state.current.audio?.names || [],
+          } : null,
+        },
+        codecSupport: codecSupport(),
+        observation: state.observation,
+        cors: state.cors,
+        shakaReady: state.shakaReady,
+        video,
+        resourceHosts: hosts,
+        recentEvents: state.events.slice(-80),
+      };
+    }
+
+    async function copyReport() {
+      const text = `ORTIFIED_DOMAIN_PROBE_REPORT\n${JSON.stringify(report(), null, 2)}`;
+      await navigator.clipboard.writeText(text);
+      log('report', 'copied to clipboard', { chars: text.length });
+      setStatus('report copied', 'ok');
+    }
+
+    async function loadConfig() {
+      el.origin.textContent = location.origin;
+      codecSupport();
+      installResourceObserver();
+      const response = await fetch('config.generated.json', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`config.generated.json ${response.status}`);
+      state.config = await response.json();
+      populateEpisodes();
+      el.viewer.replaceChildren(Object.assign(document.createElement('div'), {
+        className: 'fallback',
+        textContent: 'Ready',
+      }));
+      log('config', 'loaded generated config', {
+        runId: state.config.runId,
+        mintedAtIso: state.config.mintedAtIso,
+        expiresAtIso: state.current?.expiresAtIso,
+      });
+    }
+
+    el.episodeSelect.addEventListener('change', () => updateCurrent(currentFromSelect()));
+    document.getElementById('iframeBtn').addEventListener('click', showIframe);
+    document.getElementById('dashBtn').addEventListener('click', () => startDash().catch((error) => {
+      log('dash-error', error.message);
+      setStatus(error.message, 'bad-text');
+    }));
+    document.getElementById('corsBtn').addEventListener('click', () => runCorsProbe().catch((error) => {
+      log('cors-error', error.message);
+      setStatus(error.message, 'bad-text');
+    }));
+    document.getElementById('cleanBtn').addEventListener('click', () => markObservation('clean'));
+    document.getElementById('adBtn').addEventListener('click', () => markObservation('ad-seen'));
+    document.getElementById('copyBtn').addEventListener('click', () => copyReport().catch((error) => log('copy-error', error.message)));
+
+    loadConfig().catch((error) => {
+      log('config-error', error.message);
+      setStatus(error.message, 'bad-text');
+      el.viewer.replaceChildren(Object.assign(document.createElement('div'), {
+        className: 'fallback',
+        textContent: 'config.generated.json missing or invalid',
+      }));
+    });
+  </script>
+</body>
+</html>
