@@ -2,6 +2,13 @@
 
 Temporary Vercel probe for the `api.ortified.ws` / `cdnr.interkh.com` playback path.
 
+Latest result:
+
+- iframe playback works from Russian IP;
+- the iframe wrapper is the promising MVP path;
+- CORS to `cdnr.interkh.com` returns `200` from the Vercel origin;
+- direct Shaka/DASH loads the manifest but segment requests return `410`.
+
 This repo intentionally contains only:
 
 - `index.html` - browser test UI;
@@ -49,13 +56,23 @@ Best result:
 
 - iframe is clean on Vercel;
 - CORS returns `200`;
-- direct DASH plays.
+- iframe video plays.
 
 Still workable:
 
-- iframe has ads, but direct DASH plays cleanly.
+- iframe has ads, but CORS returns `200`.
 
 Bad:
 
 - CORS fails on Vercel;
 - direct DASH fails even though localhost works.
+
+Expected current DASH behavior:
+
+```text
+manifest: 200
+segments: 410
+```
+
+That means the provider iframe/player is doing extra segment signing or renewal
+that a plain Shaka player does not reproduce.
