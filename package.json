@@ -1,8 +1,8 @@
 {
-  "name": "alphytv-domain-probe",
+  "name": "alphytv-mvp",
   "version": "0.1.0",
   "private": true,
-  "description": "Temporary Vercel probe for the Ortified/Newdeaf playback path.",
+  "description": "Static AlphyTV MVP with Newdeaf/Ortified and Zona/Zenith playback flow.",
   "scripts": {
     "deploy": "npx vercel@latest --prod"
   }

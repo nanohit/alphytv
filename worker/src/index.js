@@ -1,0 +1,371 @@
+import { getZonaLib, zonaUserAgent } from "./zona-runtime-and-loader.js";
+
+const DEFAULT_POISKKINO_BASE_URL = "https://api.poiskkino.dev";
+
+let zonaResolveQueue = Promise.resolve();
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders(request, env) });
+    }
+
+    try {
+      if (url.pathname === "/" || url.pathname === "/health") {
+        return json(request, env, { ok: true, service: "alphy-resolver" });
+      }
+
+      if (url.pathname === "/search") {
+        return await handleSearch(request, env, url);
+      }
+
+      if (url.pathname === "/movie") {
+        return await handleMovie(request, env, url);
+      }
+
+      if (url.pathname === "/resolve-zona") {
+        return await handleZonaResolve(request, env, url);
+      }
+
+      if (url.pathname === "/zenith") {
+        return await handleZenith(request, env, url);
+      }
+
+      return json(request, env, { ok: false, error: "not_found" }, 404);
+    } catch (error) {
+      return json(request, env, {
+        ok: false,
+        error: "internal_error",
+        message: String(error?.message || error),
+      }, 500);
+    }
+  },
+};
+
+async function handleSearch(request, env, url) {
+  const query = (url.searchParams.get("q") || "").trim();
+  const year = (url.searchParams.get("year") || "").trim();
+  const limit = clampInt(url.searchParams.get("limit"), 1, 20, 10);
+
+  if (!query) {
+    return json(request, env, { ok: false, error: "missing_q" }, 400);
+  }
+
+  const apiUrl = new URL("/v1.4/movie/search", poiskkinoBase(env));
+  apiUrl.searchParams.set("query", query);
+  apiUrl.searchParams.set("limit", String(limit));
+
+  const raw = await poiskkinoFetch(env, apiUrl);
+  const docs = Array.isArray(raw.docs) ? raw.docs : [];
+  const filtered = year ? docs.filter((item) => String(item.year || "") === year) : docs;
+
+  return json(request, env, {
+    ok: true,
+    query,
+    year: year || null,
+    total: raw.total ?? docs.length,
+    results: filtered.map(normalizeMovie),
+  });
+}
+
+async function handleMovie(request, env, url) {
+  const id = (url.searchParams.get("id") || url.searchParams.get("kpId") || "").trim();
+  if (!/^\d+$/.test(id)) {
+    return json(request, env, { ok: false, error: "missing_or_invalid_id" }, 400);
+  }
+
+  const apiUrl = new URL(`/v1.4/movie/${id}`, poiskkinoBase(env));
+  const raw = await poiskkinoFetch(env, apiUrl);
+  return json(request, env, { ok: true, movie: normalizeMovie(raw) });
+}
+
+async function handleZonaResolve(request, env, url) {
+  const kpId = (url.searchParams.get("kpId") || url.searchParams.get("id") || "").trim();
+  if (!/^\d+$/.test(kpId)) {
+    return json(request, env, { ok: false, error: "missing_or_invalid_kpId" }, 400);
+  }
+
+  const resolved = await enqueueZonaResolve(() => resolveZonaInPureJs(kpId));
+  return json(request, env, { ok: true, ...resolved });
+}
+
+async function handleZenith(request, env, url) {
+  const idOrUrl = (url.searchParams.get("id") || url.searchParams.get("url") || "").trim();
+  const id = idOrUrl.match(/(?:^|\/)(\d+)(?:$|[/?#])/)?.[1] || idOrUrl.match(/^\d+$/)?.[0] || "";
+  if (!id) {
+    return json(request, env, { ok: false, error: "missing_or_invalid_zenith_id" }, 400);
+  }
+
+  const embedUrl = `https://api.zenithjs.ws/embed/movie/${id}`;
+  const response = await fetch(embedUrl, {
+    headers: {
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Origin": "https://kinoserial.online",
+      "Referer": "https://kinoserial.online/",
+      "User-Agent": zonaUserAgent(),
+    },
+  });
+  const html = await response.text();
+  if (!response.ok) {
+    throw new Error(`Zenith ${response.status}: ${html.slice(0, 200)}`);
+  }
+
+  const parsed = parseZenithEmbed(html);
+  return json(request, env, {
+    ok: true,
+    id,
+    embedUrl,
+    status: response.status,
+    bytes: html.length,
+    sources: parsed.sources,
+    meta: parsed.meta,
+    hasSources: !!(parsed.sources.dash || parsed.sources.dasha || parsed.sources.hls),
+  });
+}
+
+async function poiskkinoFetch(env, apiUrl) {
+  if (!env.POISKKINO_TOKEN) {
+    throw new Error("POISKKINO_TOKEN secret is not configured");
+  }
+
+  const response = await fetch(apiUrl, {
+    headers: {
+      "Accept": "application/json",
+      "X-API-KEY": env.POISKKINO_TOKEN,
+    },
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`PoiskKino ${response.status}: ${text.slice(0, 300)}`);
+  }
+
+  return JSON.parse(text);
+}
+
+function normalizeMovie(item) {
+  return {
+    kpId: item.id ?? null,
+    name: item.name ?? null,
+    alternativeName: item.alternativeName ?? null,
+    enName: item.enName ?? null,
+    type: item.type ?? null,
+    year: item.year ?? null,
+    isSeries: item.isSeries ?? false,
+    movieLength: item.movieLength ?? null,
+    description: item.description ?? null,
+    shortDescription: item.shortDescription ?? null,
+    poster: item.poster?.url || item.poster?.previewUrl || null,
+    rating: {
+      kp: item.rating?.kp ?? null,
+      imdb: item.rating?.imdb ?? null,
+    },
+    votes: {
+      kp: item.votes?.kp ?? null,
+      imdb: item.votes?.imdb ?? null,
+    },
+  };
+}
+
+function poiskkinoBase(env) {
+  return env.POISKKINO_BASE_URL || DEFAULT_POISKKINO_BASE_URL;
+}
+
+function json(request, env, body, status = 200) {
+  return new Response(JSON.stringify(body, null, 2), {
+    status,
+    headers: {
+      ...corsHeaders(request, env),
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
+function corsHeaders(request, env) {
+  const requestOrigin = request.headers.get("origin") || "";
+  const allowed = (env.ALLOWED_ORIGIN || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const allowOrigin = allowed.length === 0
+    ? "*"
+    : allowed.includes(requestOrigin)
+      ? requestOrigin
+      : allowed[0];
+
+  return {
+    "access-control-allow-origin": allowOrigin,
+    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-headers": "content-type, authorization",
+    "vary": "Origin",
+  };
+}
+
+function clampInt(value, min, max, fallback) {
+  const parsed = Number.parseInt(value || "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function enqueueZonaResolve(task) {
+  const run = zonaResolveQueue.then(task, task);
+  zonaResolveQueue = run.catch(() => {});
+  return run;
+}
+
+async function resolveZonaInPureJs(kpId) {
+  const lib = getZonaLib();
+  if (!lib?.createStreamsProvider) {
+    throw new Error("Zona stream library did not expose createStreamsProvider");
+  }
+
+  const requests = [];
+  const callbacks = [];
+  const previousFetch = globalThis.fetch;
+  const previousConsole = globalThis.console;
+
+  globalThis.fetch = async (input, init = {}) => {
+    const targetUrl = String(input?.url || input);
+    if (isZonaResolverRequest(targetUrl)) {
+      requests.push({ method: init?.method || "GET", url: targetUrl });
+    }
+
+    const headers = new Headers(init.headers || {});
+    if (/\.mzona\.net\//i.test(targetUrl)) {
+      headers.set("Origin", "https://kinoserial.online");
+      headers.set("Referer", "https://kinoserial.online/");
+      headers.set("User-Agent", zonaUserAgent());
+      headers.set("Accept", "*/*");
+    }
+
+    return previousFetch(input, { ...init, headers });
+  };
+
+  try {
+    globalThis.console = {
+      ...previousConsole,
+      debug() {},
+      error() {},
+      info() {},
+      log() {},
+      warn() {},
+    };
+
+    const provider = lib.createStreamsProvider({
+      getStreamDurationInMicroseconds: () => "0",
+    });
+
+    provider.getStreams(Number(kpId), null, null, {
+      onStreamsReceived(payload) {
+        callbacks.push(parseMaybeJson(payload));
+      },
+      onCompletion() {},
+    });
+
+    await waitFor(() => extractZenithIds(requests).length > 0, 20000);
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.console = previousConsole;
+  }
+
+  const zenithIds = extractZenithIds(requests);
+  return {
+    kpId,
+    zenithId: zenithIds[0] || null,
+    zenithIds,
+    embedUrl: zenithIds[0] ? `https://api.zenithjs.ws/embed/movie/${zenithIds[0]}` : null,
+    callbacks: callbacks.map(summarizeZonaCallback),
+    requests: requests.slice(0, 50),
+  };
+}
+
+function isZonaResolverRequest(url) {
+  return /mzona\.net|api\.zenithjs\.ws|fotpro|vibio/i.test(url);
+}
+
+function extractZenithIds(requests) {
+  return [...new Set(
+    requests
+      .map((request) => request.url.match(/api\.zenithjs\.ws\/embed\/movie\/(\d+)/i)?.[1])
+      .filter(Boolean)
+  )];
+}
+
+function parseMaybeJson(value) {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return { raw: value.slice(0, 1000) };
+  }
+}
+
+function summarizeZonaCallback(value) {
+  const streams = Array.isArray(value?.videoStreams) ? value.videoStreams : [];
+  return {
+    extractorType: value?.extractorType?.name || value?.extractorType || null,
+    count: streams.length,
+    streams: streams.slice(0, 5).map((stream) => ({
+      url: stream?.source?.url || stream?.url || null,
+      translation: stream?.translation || null,
+      language: stream?.language || null,
+      resolution: stream?.resolution || null,
+      quality: stream?.quality || null,
+      subtitles: Array.isArray(stream?.subtitles) ? stream.subtitles.length : null,
+    })),
+  };
+}
+
+function parseZenithEmbed(html) {
+  const text = String(html || "");
+  const sources = {};
+  for (const match of text.matchAll(/\b(dash|dasha|hls)\s*:\s*("(?:(?:\\.|[^"\\])*)"|'(?:(?:\\.|[^'\\])*)')/g)) {
+    sources[match[1]] = decodeJsQuoted(match[2]).replace(/&amp;/g, "&");
+  }
+
+  const fallbackText = text.replace(/\\\//g, "/").replace(/&amp;/g, "&");
+  if (!sources.dash) sources.dash = firstUrl(fallbackText, /\.mpd(?:\?|$)/i);
+  if (!sources.hls) sources.hls = firstUrl(fallbackText, /(?:\.m3u8|master\.m3u8)(?:\?|$)/i);
+
+  const titleMatch = text.match(/\btitle\s*:\s*("(?:(?:\\.|[^"\\])*)"|'(?:(?:\\.|[^'\\])*)')/);
+  const audioMatch = text.match(/\baudio\s*:\s*\{\s*["']?names["']?\s*:\s*\[([^\]]*)\]/);
+  return {
+    sources,
+    meta: {
+      title: titleMatch ? decodeJsQuoted(titleMatch[1]) : "",
+      audioNames: audioMatch ? [...audioMatch[1].matchAll(/"([^"]+)"|'([^']+)'/g)].map((match) => match[1] || match[2]) : [],
+    },
+  };
+}
+
+function firstUrl(text, kindRe) {
+  for (const match of String(text || "").matchAll(/https?:\/\/[^"'<>\s\\]+/g)) {
+    const url = match[0].replace(/[),.;]+$/, "");
+    if (kindRe.test(url)) return url;
+  }
+  return "";
+}
+
+function decodeJsQuoted(raw) {
+  const body = String(raw || "").slice(1, -1);
+  return body
+    .replace(/\\u([0-9a-f]{4})/gi, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/\\x([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/\\([\\/"'bfnrt])/g, (_, char) => {
+      if (char === "b") return "\b";
+      if (char === "f") return "\f";
+      if (char === "n") return "\n";
+      if (char === "r") return "\r";
+      if (char === "t") return "\t";
+      return char;
+    });
+}
+
+async function waitFor(predicate, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
+}

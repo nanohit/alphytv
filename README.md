@@ -1,131 +1,101 @@
-# AlphyTV Domain Probe
+# AlphyTV MVP
 
-Temporary Vercel probe for the `api.ortified.ws` / `cdnr.interkh.com` playback path.
+Lightweight static MVP for the current playback flow:
 
-Latest result:
+1. Search or paste a Newdeaf page URL.
+2. Prefer Newdeaf -> Ortified when the page exposes `api.ortified.ws`.
+3. If Newdeaf exposes only `allo.cdnlbox.club`, fall back to Zona -> Zenith.
+4. Play Zenith DASH/HLS in a local Shaka player.
 
-- iframe playback works from Russian IP;
-- the plain iframe wrapper proves the low-bandwidth path but not the ad-free
-  path;
-- CORS to `cdnr.interkh.com` returns `200` from the Vercel origin;
-- direct Shaka/DASH loads the manifest but segment requests return `410`.
-- desktop incognito later showed the same visible ad across every black-box
-  iframe privacy variant, so iframe wrapping alone is not guaranteed ad-free.
-- `Cleanroom` and `Cleanroom + block ads` fetched the RU-only Ortified HTML,
-  removed one visible ad config block, preserved `makePlayer(...)`, and played
-  without the visible ad in the reported run.
+The Vercel app remains static. The included Cloudflare Worker only resolves
+metadata and IDs; it does not proxy video bytes.
 
-Current experiment:
+## Deploy Shape
 
-- `Cleanroom` fetches the Ortified embed HTML from the viewer's browser, removes
-  the Ortified ad config before the player initializes, then loads the sanitized
-  player into a `srcdoc` iframe.
-- `Cleanroom + block ads` does the same thing and also injects a small diagnostic
-  blocker for known ad hosts seen in the captures.
+- `index.html`, `styles.css`, `app.js` - Vercel static frontend.
+- `worker/` - Cloudflare Worker source for PoiskKino search and
+  `kpId -> Zenith` resolution.
+- No legacy SOAP frontend code is included here.
 
-These modes must be tested from a Russian IP because the embed HTML fetch still
-depends on the same RU-only Ortified gate.
+## Frontend
 
-Extra live seed target:
-
-- `Rick and Morty S1` uses
-  `https://api.ortified.ws/embed/movie/301?season=1&episode=1&episode=1`.
-- Open `https://alphytv.vercel.app/?preset=rick-morty-s1` from a Russian IP,
-  choose `Cleanroom`, then click `Iframe`.
-- Or use `?embed=<api.ortified.ws embed URL>` for any static Newdeaf Ortified
-  seed discovered by the scanner.
-
-This repo intentionally contains only:
-
-- `index.html` - browser test UI;
-- `config.generated.json` - signed URLs from a Russian-IP mint;
-- `vercel.json` - static deploy config;
-- `package.json` - optional Vercel CLI helper.
-
-## Important
-
-`config.generated.json` contains signed media URLs from the latest RU capture.
-They expire at:
+Vercel auto-deploys this repo to:
 
 ```text
-2026-06-22T23:52:55.000Z
+https://alphytv.vercel.app
 ```
 
-After that, regenerate the config from a fresh RU capture before testing again.
+After the Worker is deployed, open:
 
-## Deploy
+```text
+https://alphytv.vercel.app/?resolver=https://alphy-resolver.<account>.workers.dev
+```
 
-Connect this GitHub repo to Vercel, or run:
+The page saves the Worker URL in `localStorage`. You can also click `Worker` and
+paste/change it manually.
+
+## Worker Setup
 
 ```bash
+cd worker
 npm install
+npx wrangler login
+npx wrangler secret put POISKKINO_TOKEN
 npm run deploy
 ```
 
-Use the production URL from a Russian IP.
+Paste the PoiskKino key when Wrangler asks. The key is intentionally not
+committed.
 
-## Test Sequence
+Current Worker vars live in `worker/wrangler.toml`:
 
-On the deployed page from a Russian IP:
-
-1. Pick a target: `Captured config`, `Rick and Morty S1`, or a custom `embed`
-   query URL.
-2. Pick `Cleanroom`.
-3. Click `Iframe`.
-4. If the player loads, start/switch an episode and wait 90-120 seconds.
-5. Click `No Ad Seen` if no ad appears, or `Ad Seen` if an ad appears.
-6. Click `Copy Report`.
-7. Paste the copied report into the Codex thread.
-8. Repeat the same test with `Cleanroom + block ads` only if plain
-   `Cleanroom` fails or shows ads.
-
-Only retest these older modes as controls if needed:
-
-1. `Baseline`
-2. `No referrer`
-3. `Credentialless`
-4. `Sandbox`
-5. `Sandbox + no referrer`
-6. `Sandbox + credentialless`
-
-If a mode breaks playback, note that and move to the next one.
-
-## Result Meaning
-
-Best result:
-
-- `Cleanroom` or `Cleanroom + block ads` is clean on Vercel;
-- `cleanroom.adScriptBlocks` is at least `1`;
-- `cleanroom.adsConfigRefs` is at least `1`;
-- `cleanroom.makePlayerRefs` is at least `1`;
-- video plays.
-
-Still workable:
-
-- black-box iframe has ads, but cleanroom removes them. This is the current
-  result to beat.
-
-Bad:
-
-- cleanroom fetch returns `422` or does not contain `makePlayer`;
-- cleanroom loads but the provider player no longer plays video;
-- CORS fails on Vercel;
-- direct DASH fails even though localhost works.
-
-Important cleanroom report fields:
-
-- `cleanroom.ok` - whether the browser fetched and sanitized Ortified HTML.
-- `cleanroom.adScriptBlocks` - should usually be at least `1`.
-- `cleanroom.adsConfigRefs` - should usually be at least `1`.
-- `cleanroom.makePlayerRefs` - should usually be at least `1`.
-- `cleanroom.preludeInjected` - true only for `Cleanroom + block ads`.
-
-Expected current DASH behavior:
-
-```text
-manifest: 200
-segments: 410
+```toml
+ALLOWED_ORIGIN = "https://alphytv.vercel.app,http://127.0.0.1:5177,http://localhost:5177"
+POISKKINO_BASE_URL = "https://api.poiskkino.dev"
 ```
 
-That means the provider iframe/player is doing extra segment signing or renewal
-that a plain Shaka player does not reproduce.
+If the Vercel domain changes, update `ALLOWED_ORIGIN` and redeploy the Worker.
+
+## Local Smoke Test
+
+Terminal 1:
+
+```bash
+cd worker
+npm install
+printf 'POISKKINO_TOKEN=<your key>\n' > .dev.vars
+npm run dev -- --ip 127.0.0.1 --port 8787
+```
+
+Terminal 2:
+
+```bash
+python3 -m http.server 5177
+```
+
+Open:
+
+```text
+http://127.0.0.1:5177/?resolver=http://127.0.0.1:8787
+```
+
+From a Russian IP, search a title or paste a Newdeaf URL.
+
+## Expected Behavior
+
+- Ortified path: fetches provider HTML from the browser with a null-origin
+  sandbox, strips the known ad config, and loads a `srcdoc` player.
+- Allo-only Newdeaf path: does not embed Allo by default; it uses the title to
+  resolve PoiskKino `kpId`, then Zona/Zenith.
+- Zona path: Worker resolves `kpId -> api.zenithjs.ws/embed/movie/<id>`, then
+  the browser fetches the Zenith embed and plays DASH/HLS directly.
+- Diagnostics are hidden by default. Click `Диагностика` to copy logs.
+
+## Known Limits
+
+- `api.zenithjs.ws` may return `422` outside the working region/origin context.
+  The production test must be done from the Russian browser path where Zenith
+  was previously confirmed.
+- Zona currently has no usable built-in subtitles in our captures.
+- Allo remains black-box: baseline iframe can play but may force audible ads;
+  cleanroom/rehost fails because Allo API calls are origin/CORS gated.
