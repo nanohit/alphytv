@@ -33,6 +33,7 @@
 
   const state = {
     resolverBaseUrl: "",
+    playerPlaceholder: "",
     logs: [],
     facts: {},
     player: null,
@@ -45,6 +46,7 @@
   };
 
   function boot() {
+    state.playerPlaceholder = el.playerHost.innerHTML;
     const resolverFromUrl = params.get("resolver");
     if (resolverFromUrl) localStorage.setItem(STORE_RESOLVER, cleanBaseUrl(resolverFromUrl));
     const defaultResolver = isLocal ? "http://127.0.0.1:8787" : "https://alphy-resolver.p-tikhonin.workers.dev";
@@ -108,6 +110,9 @@
     const value = el.queryInput.value.trim();
     if (!value) throw new Error("Введите название или URL");
     clearResults();
+    // Any new resolve immediately clears the previous player so the user never
+    // sees stale content while the new lookup (or a failing one) is in flight.
+    await destroyPlayer();
     setBusy(true);
     try {
       if (forceZona) {
@@ -374,6 +379,9 @@
     el.trackPanel.classList.add("hidden");
     el.sourcePanel.replaceChildren();
     el.sourcePanel.classList.add("hidden");
+    // Reset the player area to its idle placeholder so a torn-down player never
+    // leaves stale content (e.g. an old iframe) visible during the next resolve.
+    if (state.playerPlaceholder) el.playerHost.innerHTML = state.playerPlaceholder;
   }
 
   function renderTracks() {
@@ -757,13 +765,25 @@ addEventListener('message', async (event) => {
   }
 
   function dailyMirrorCandidates(explicitOrigin) {
-    const dates = [0, -1, 1].map((offset) => new Date(Date.now() + offset * 86400000));
-    const generated = dates.map((date) => `https://${date.getDate()}${monthSlug(date)}.newdeaf.co`);
+    // Newdeaf rolls its {DD}{mon}.newdeaf.co mirror over at ~05:00 Moscow time,
+    // so before 5am MSK the current calendar day's mirror does not exist yet —
+    // the live one is still the previous day's. Read Moscow wall-clock (UTC+3,
+    // no DST) shifted back past the rollover, then probe only [effective day,
+    // day before] as an overlap fallback. Never probe a future-dated mirror
+    // (that was wasting a fetch on e.g. 17jun at noon on the 16th).
+    const MSK_OFFSET_MS = 3 * 3600000;
+    const ROLLOVER_MS = 5 * 3600000;
+    const effective = Date.now() + MSK_OFFSET_MS - ROLLOVER_MS;
+    const slug = (offsetDays) => {
+      const date = new Date(effective + offsetDays * 86400000);
+      return `https://${date.getUTCDate()}${monthSlug(date)}.newdeaf.co`;
+    };
+    const generated = [slug(0), slug(-1)];
     return unique([explicitOrigin, ...generated].filter(Boolean).map((value) => cleanBaseUrl(value)));
   }
 
   function monthSlug(date) {
-    return ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"][date.getMonth()];
+    return ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"][date.getUTCMonth()];
   }
 
   function isNewdeafPage(href, base) {
