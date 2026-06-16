@@ -765,14 +765,14 @@ addEventListener('message', async (event) => {
   }
 
   function dailyMirrorCandidates(explicitOrigin) {
-    // Newdeaf rolls its {DD}{mon}.newdeaf.co mirror over at ~05:00 Moscow time,
-    // so before 5am MSK the current calendar day's mirror does not exist yet —
-    // the live one is still the previous day's. Read Moscow wall-clock (UTC+3,
-    // no DST) shifted back past the rollover, then probe only [effective day,
-    // day before] as an overlap fallback. Never probe a future-dated mirror
-    // (that was wasting a fetch on e.g. 17jun at noon on the 16th).
+    // Newdeaf rolls its {DD}{mon}.newdeaf.co mirror over during ~02:00-05:00
+    // Moscow time. From 02:00 MSK we try the new day's mirror first (it may
+    // already be up) and fall back to the previous day's; the first that parses
+    // wins, so once the new one is live the old one is no longer hit. Read
+    // Moscow wall-clock (UTC+3, no DST) shifted back past the 02:00 threshold,
+    // then probe only [effective day, day before]. Never probe a future date.
     const MSK_OFFSET_MS = 3 * 3600000;
-    const ROLLOVER_MS = 5 * 3600000;
+    const ROLLOVER_MS = 2 * 3600000;
     const effective = Date.now() + MSK_OFFSET_MS - ROLLOVER_MS;
     const slug = (offsetDays) => {
       const date = new Date(effective + offsetDays * 86400000);
