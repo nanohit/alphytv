@@ -59,7 +59,18 @@ async function handleSearch(request, env, url) {
 
   const raw = await poiskkinoFetch(env, apiUrl);
   const docs = Array.isArray(raw.docs) ? raw.docs : [];
-  const filtered = year ? docs.filter((item) => String(item.year || "") === year) : docs;
+  // Year is a soft hint: providers (e.g. Newdeaf) and PoiskKino often disagree
+  // by a year on the same title, so match within +/-1 and never let the year
+  // filter zero out an otherwise-valid result.
+  const yearNum = Number.parseInt(year, 10);
+  let filtered = docs;
+  if (Number.isFinite(yearNum)) {
+    const near = docs.filter((item) => {
+      const y = Number.parseInt(item.year, 10);
+      return Number.isFinite(y) && Math.abs(y - yearNum) <= 1;
+    });
+    filtered = near.length ? near : docs;
+  }
 
   return json(request, env, {
     ok: true,

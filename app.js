@@ -47,7 +47,8 @@
   function boot() {
     const resolverFromUrl = params.get("resolver");
     if (resolverFromUrl) localStorage.setItem(STORE_RESOLVER, cleanBaseUrl(resolverFromUrl));
-    state.resolverBaseUrl = cleanBaseUrl(localStorage.getItem(STORE_RESOLVER) || (isLocal ? "http://127.0.0.1:8787" : ""));
+    const defaultResolver = isLocal ? "http://127.0.0.1:8787" : "https://alphy-resolver.p-tikhonin.workers.dev";
+    state.resolverBaseUrl = cleanBaseUrl(localStorage.getItem(STORE_RESOLVER) || defaultResolver);
     el.resolverInput.value = state.resolverBaseUrl;
     updateResolverState();
     bindEvents();
