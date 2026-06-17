@@ -163,6 +163,14 @@
       progress: existing?.progress || 0,
     });
   }
+  // Recover title/poster/year for a target that carries no kpId (Ortified), e.g.
+  // when reopened from Continue/Bookmarks where the URL is just the embed. Falls
+  // back to whatever the history/bookmark entry kept so the watch tab is never bare.
+  function storedMeta(key) {
+    const entry = loadList(STORE_HISTORY).find((x) => x.key === key) || loadList(STORE_BOOKMARKS).find((x) => x.key === key);
+    return entry ? { title: entry.title, poster: entry.poster, year: entry.year } : null;
+  }
+
   function resumePosition(key) {
     const e = loadList(STORE_HISTORY).find((h) => h.key === key);
     if (!e || !e.duration) return 0;
@@ -559,11 +567,16 @@
   }
 
   async function playOrt(embedUrl, token, ndMeta) {
-    const target = { kind: "ort", embedUrl, title: ndMeta?.title, poster: ndMeta?.poster, year: ndMeta?.year };
+    // ndMeta is only present on the first resolve (search -> newdeaf -> ortified).
+    // On reopen (Continue/Bookmarks/direct URL) recover it from the persisted
+    // newdeaf meta, then from the history/bookmark entry, so the sidebar + title
+    // look the same as right after search instead of a bare "Ortified" player.
+    const meta = ndMeta || cacheGet("ortmeta", embedUrl) || storedMeta(`ort:${embedUrl}`);
+    const target = { kind: "ort", embedUrl, title: meta?.title, poster: meta?.poster, year: meta?.year };
     state.currentTarget = target;
     setWatchHead(target.title || "Ortified", target);
-    if (ndMeta && (ndMeta.title || ndMeta.poster || ndMeta.description)) {
-      renderMeta({ name: ndMeta.title, poster: ndMeta.poster, year: ndMeta.year, description: ndMeta.description }, target);
+    if (meta && (meta.title || meta.poster || meta.description)) {
+      renderMeta({ name: meta.title, poster: meta.poster, year: meta.year, description: meta.description }, target);
     } else {
       el.metaPanel.classList.add("hidden");
     }
@@ -579,6 +592,10 @@
 
     if (parsed.ortified.length) {
       const embedUrl = parsed.ortified[0];
+      // Persist the newdeaf meta keyed by the embed so a later reopen (which goes
+      // straight to /watch/ort/<embedUrl>, never touching newdeaf again) can still
+      // show poster/description/title in the sidebar.
+      cacheSet("ortmeta", embedUrl, ndMeta, TTL.meta);
       // Upgrade the URL to the resolved Ortified target so this title never
       // touches newdeaf again (re-open / share / history all go direct).
       replaceHash(`/watch/ort/${encodeURIComponent(embedUrl)}`);
