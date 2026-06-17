@@ -45,6 +45,14 @@
     audioNames: [],
   };
 
+  // Monotonic token for user-initiated resolves. Every fresh user action bumps
+  // it; any async chain whose token is no longer the active one must bail out
+  // before mounting a player, tearing one down, or rewriting meta, so a slow
+  // earlier request can never stomp a newer one (the "плеер не туда" bug).
+  let resolveToken = 0;
+  const nextToken = () => (resolveToken += 1);
+  const isStale = (token) => token !== resolveToken;
+
   function boot() {
     state.playerPlaceholder = el.playerHost.innerHTML;
     const resolverFromUrl = params.get("resolver");
@@ -109,6 +117,9 @@
   async function resolveInput(forceZona) {
     const value = el.queryInput.value.trim();
     if (!value) throw new Error("Введите название или URL");
+    // Supersede any resolve already in flight; its chain will see a stale token
+    // and bail before touching the UI.
+    const token = nextToken();
     clearResults();
     // Any new resolve immediately clears the previous player so the user never
     // sees stale content while the new lookup (or a failing one) is in flight.
@@ -116,45 +127,54 @@
     setBusy(true);
     try {
       if (forceZona) {
-        await searchByTitle(value, { autoZona: false, skipNewdeaf: true });
+        await searchByTitle(value, { autoZona: false, skipNewdeaf: true }, token);
         return;
       }
       if (/^https?:\/\//i.test(value)) {
         const url = new URL(value);
         if (/api\.ortified\.ws$/i.test(url.host)) {
-          await playOrtifiedCleanroom(url.href, { title: "Ortified direct" });
+          await playOrtifiedCleanroom(url.href, { title: "Ortified direct" }, token);
           return;
         }
         if (/api\.zenithjs\.ws$/i.test(url.host)) {
-          await playZenithEmbed(url.href, { name: "Zenith direct" });
+          await playZenithEmbed(url.href, { name: "Zenith direct" }, {}, token);
           return;
         }
         if (/newdeaf\.co$/i.test(url.host)) {
-          await resolveNewdeafUrl(url.href);
+          await resolveNewdeafUrl(url.href, token);
           return;
         }
       }
-      await searchByTitle(value, { autoZona: false, skipNewdeaf: false });
+      await searchByTitle(value, { autoZona: false, skipNewdeaf: false }, token);
     } finally {
-      setBusy(false);
+      // Only the still-current resolve may release the busy state; a newer one
+      // owns it now.
+      if (!isStale(token)) setBusy(false);
     }
   }
 
-  async function searchByTitle(query, options = {}) {
+  async function searchByTitle(query, options = {}, token = nextToken()) {
     setMeta("Поиск", query, "warn");
     setBadge("Search", "warn");
-    const tasks = [];
-    if (!options.skipNewdeaf) tasks.push(searchNewdeaf(query).catch((error) => ({ error })));
-    tasks.push(searchPoiskkino(query).catch((error) => ({ error })));
-    const results = await Promise.all(tasks);
-    const newdeaf = options.skipNewdeaf ? { candidates: [] } : results[0];
-    const poisk = options.skipNewdeaf ? results[0] : results[1];
+    // Run both lookups in parallel but do NOT wait for the slowest. PoiskKino
+    // (via the Worker) is fast and reliable, so render it the moment it lands;
+    // the Newdeaf scrape — which can hang up to its timeout on a slow/blocked
+    // mirror — merges in afterwards instead of blocking the whole result list.
+    const poiskPromise = searchPoiskkino(query).catch((error) => ({ error }));
+    const newdeafPromise = options.skipNewdeaf
+      ? Promise.resolve({ candidates: [] })
+      : searchNewdeaf(query).catch((error) => ({ error }));
 
-    if (newdeaf?.error) log("newdeaf-error", newdeaf.error.message);
+    const poisk = await poiskPromise;
+    if (isStale(token)) return;
     if (poisk?.error) log("poisk-error", poisk.error.message);
-
-    const ndCandidates = newdeaf?.candidates || [];
     const pkResults = poisk?.results || [];
+    renderSearchResults([], pkResults, query);
+
+    const newdeaf = await newdeafPromise;
+    if (isStale(token)) return;
+    if (newdeaf?.error) log("newdeaf-error", newdeaf.error.message);
+    const ndCandidates = newdeaf?.candidates || [];
     renderSearchResults(ndCandidates, pkResults, query);
     log("search", "search complete", { newdeaf: ndCandidates.length, poiskkino: pkResults.length });
     if (!ndCandidates.length && !pkResults.length) throw new Error("Ничего не найдено");
@@ -172,7 +192,7 @@
     for (const mirror of mirrors) {
       const searchUrl = `${mirror}/index.php?do=search&subaction=search&story=${encodeURIComponent(query)}`;
       try {
-        const html = await fetchThirdPartyText(searchUrl, { preferSandbox: true, directFallback: false, label: "newdeaf-search" });
+        const html = await fetchThirdPartyText(searchUrl, { preferSandbox: true, directFallback: false, label: "newdeaf-search", timeoutMs: 12000 });
         const candidates = parseNewdeafSearch(html, searchUrl);
         log("newdeaf", "mirror parsed", { mirror, candidates: candidates.length });
         if (candidates.length) return { mirror, candidates };
@@ -183,7 +203,7 @@
     return { mirror: mirrors[0], candidates: [] };
   }
 
-  async function resolveNewdeafUrl(pageUrl) {
+  async function resolveNewdeafUrl(pageUrl, token = nextToken()) {
     setMeta("Newdeaf", pageUrl, "warn");
     setBadge("Newdeaf", "warn");
     const candidates = pageUrlCandidates(pageUrl);
@@ -206,6 +226,7 @@
       }
     }
     if (!parsed) throw new Error("Newdeaf page fetch failed");
+    if (isStale(token)) return;
     state.selectedNewdeaf = { pageUrl: resolvedUrl, ...parsed };
     state.facts.newdeaf = {
       pageUrl: resolvedUrl,
@@ -216,7 +237,7 @@
     renderFacts();
 
     if (parsed.ortified.length) {
-      await playOrtifiedCleanroom(parsed.ortified[0], parsed);
+      await playOrtifiedCleanroom(parsed.ortified[0], parsed, token);
       return;
     }
 
@@ -225,24 +246,25 @@
         title: parsed.title,
         alloUrl: parsed.allo[0],
       });
-      await fallbackZonaFromNewdeaf(parsed);
+      await fallbackZonaFromNewdeaf(parsed, token);
       return;
     }
 
     log("decision", "Newdeaf page has no supported player; using Zona fallback", { title: parsed.title });
-    await fallbackZonaFromNewdeaf(parsed);
+    await fallbackZonaFromNewdeaf(parsed, token);
   }
 
-  async function fallbackZonaFromNewdeaf(parsed) {
+  async function fallbackZonaFromNewdeaf(parsed, token = nextToken()) {
     const title = cleanMovieTitle(parsed.title || "");
     if (!title) throw new Error("Не удалось извлечь название для Zona fallback");
     const found = await searchPoiskkino(title, parsed.year);
+    if (isStale(token)) return;
     const movie = chooseMovie(found.results || [], title, parsed.year);
     if (!movie) throw new Error("PoiskKino did not return a kpId for Zona fallback");
-    await playZonaMovie(movie, { reason: "newdeaf-allo-only", newdeafTitle: parsed.title });
+    await playZonaMovie(movie, { reason: "newdeaf-allo-only", newdeafTitle: parsed.title }, token);
   }
 
-  async function playZonaMovie(movie, context = {}) {
+  async function playZonaMovie(movie, context = {}, token = nextToken()) {
     if (!movie?.kpId) throw new Error("Missing kpId for Zona resolver");
     state.activeProvider = "zona";
     state.selectedMovie = movie;
@@ -250,6 +272,7 @@
     setBadge("Zona resolve", "warn");
     log("zona", "resolving kpId to Zenith", { kpId: movie.kpId, context });
     const resolved = await resolverJson(`/resolve-zona?kpId=${encodeURIComponent(movie.kpId)}`);
+    if (isStale(token)) return;
     if (!resolved.embedUrl) throw new Error("Zona resolver did not return a Zenith embed");
     state.facts.zona = {
       kpId: movie.kpId,
@@ -258,10 +281,11 @@
       requestCount: (resolved.requests || []).length,
     };
     renderFacts();
-    await playZenithEmbed(resolved.embedUrl, movie, resolved);
+    await playZenithEmbed(resolved.embedUrl, movie, resolved, token);
   }
 
-  async function playZenithEmbed(embedUrl, movie = {}, resolved = {}) {
+  async function playZenithEmbed(embedUrl, movie = {}, resolved = {}, token = nextToken()) {
+    if (isStale(token)) return;
     await destroyPlayer();
     state.activeProvider = "zona";
     state.zenith = { embedUrl, resolved };
@@ -269,6 +293,7 @@
     setBadge("Zona/Zenith", "ok");
     log("zenith", "fetching embed", { embedUrl });
     const html = await fetchThirdPartyText(embedUrl, { preferSandbox: false, label: "zenith" });
+    if (isStale(token)) return;
     let parsed = parseZenithEmbed(html);
     if (!parsed.sources.dash && !parsed.sources.hls && !parsed.sources.dasha) {
       log("zenith-warn", "browser embed fetch returned no sources; trying Worker metadata fallback");
@@ -290,7 +315,7 @@
     const bestUrl = parsed.sources.dash || parsed.sources.hls || parsed.sources.dasha;
     const kind = parsed.sources.dash ? "dash" : parsed.sources.hls ? "hls" : "dasha";
     if (!bestUrl) throw new Error("Zenith embed did not expose dash/hls");
-    await playShaka(bestUrl, kind);
+    await playShaka(bestUrl, kind, token);
   }
 
   async function resolveZenithThroughWorker(embedUrl) {
@@ -307,13 +332,15 @@
     return { sources: data.sources || {}, meta: data.meta || {} };
   }
 
-  async function playOrtifiedCleanroom(embedUrl, meta = {}) {
+  async function playOrtifiedCleanroom(embedUrl, meta = {}, token = nextToken()) {
+    if (isStale(token)) return;
     await destroyPlayer();
     state.activeProvider = "ortified";
     setMeta(meta.title || "Ortified", "Cleanroom iframe · ad config stripped before player init", "ok");
     setBadge("Ortified Cleanroom", "ok");
     log("ortified", "fetching embed HTML", { embedUrl, mode: "cleanroom-block" });
     const html = await fetchThirdPartyText(embedUrl, { preferSandbox: true, label: "ortified" });
+    if (isStale(token)) return;
     const sanitized = sanitizeOrtifiedHtml(html, embedUrl, "cleanroom-block");
     state.facts.ortified = sanitized.stats;
     state.facts.ortified.embedUrl = embedUrl;
@@ -330,7 +357,8 @@
     log("ortified", "cleanroom loaded", sanitized.stats);
   }
 
-  async function playShaka(url, kind) {
+  async function playShaka(url, kind, token = nextToken()) {
+    if (isStale(token)) return;
     if (state.player) {
       await state.player.destroy().catch(() => {});
       state.player = null;
@@ -342,6 +370,7 @@
     video.playsInline = true;
     video.autoplay = true;
     video.crossOrigin = "anonymous";
+    if (isStale(token)) return;
     el.playerHost.replaceChildren(video);
 
     if (!window.shaka) throw new Error("Shaka did not load");
@@ -361,6 +390,14 @@
     player.addEventListener("textchanged", renderTracks);
     log("play", `loading ${kind}`, { url });
     await player.load(url);
+    if (isStale(token)) {
+      // A newer resolve took over while this manifest was loading; tear our
+      // player down so it never plays audio behind the new content.
+      log("stale", "shaka load superseded; tearing down", { url });
+      await player.destroy().catch(() => {});
+      if (state.player === player) state.player = null;
+      return;
+    }
     renderTracks();
     try {
       await video.play();
@@ -656,7 +693,7 @@
     const preferSandbox = !!options.preferSandbox;
     if (preferSandbox) {
       try {
-        return await sandboxFetchText(url, options.label);
+        return await sandboxFetchText(url, options.label, options.timeoutMs);
       } catch (error) {
         if (options.directFallback === false) throw error;
         log("fetch-warn", "sandbox fetch failed; trying direct CORS", { url, message: error.message });
@@ -682,18 +719,18 @@
       if (!response.ok) throw new Error(`Fetch ${response.status}`);
       return text;
     } catch (error) {
-      if (!preferSandbox) return sandboxFetchText(url, options.label);
+      if (!preferSandbox) return sandboxFetchText(url, options.label, options.timeoutMs);
       throw error;
     }
   }
 
-  function sandboxFetchText(url, label) {
+  function sandboxFetchText(url, label, timeoutMs) {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     return new Promise((resolve, reject) => {
       const iframe = document.createElement("iframe");
       iframe.sandbox = "allow-scripts";
       iframe.style.cssText = "position:absolute;width:1px;height:1px;left:-9999px;top:-9999px;border:0";
-      const timer = setTimeout(() => cleanup(new Error(`Sandbox fetch timeout for ${url}`)), 30000);
+      const timer = setTimeout(() => cleanup(new Error(`Sandbox fetch timeout for ${url}`)), timeoutMs || 30000);
       const cleanup = (error, value) => {
         clearTimeout(timer);
         window.removeEventListener("message", onMessage);
