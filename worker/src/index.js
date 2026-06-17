@@ -224,6 +224,69 @@ function enqueueZonaResolve(task) {
   return run;
 }
 
+// The Zona runtime drives all its network I/O through globalThis.fetch, so we
+// intercept fetch to (a) capture which api.zenithjs.ws embed it resolves to and
+// (b) inject the headers mzona.net requires. The naive approach — swap
+// globalThis.fetch per call and restore after — leaks across calls in a
+// long-lived process (Deno Deploy / Render / reused Vercel instances): getStreams
+// fires background requests that keep running after we return, and they land in
+// the NEXT call's capture, so every resolve returns the previous title's Zenith
+// id. Cloudflare hid this only because it discards an isolate's background work
+// once the response is sent. Fix: an AsyncLocalStorage store so each fetch
+// attributes itself to the resolve that actually started it, no matter when it
+// lands. If async_hooks is unavailable (e.g. a Cloudflare Worker without the
+// flag) we fall back to the per-call swap, which is correct on ephemeral isolates.
+let zonaCapture;
+let zonaCaptureInstalled = false;
+
+async function ensureZonaCapture() {
+  if (zonaCapture !== undefined) return zonaCapture;
+  try {
+    const { AsyncLocalStorage } = await import("node:async_hooks");
+    zonaCapture = new AsyncLocalStorage();
+  } catch {
+    zonaCapture = null;
+  }
+  if (zonaCapture && !zonaCaptureInstalled) {
+    zonaCaptureInstalled = true;
+    const realFetch = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = (input, init = {}) => {
+      const store = zonaCapture.getStore();
+      if (!store) return realFetch(input, init);
+      return capturedFetch(realFetch, store, input, init);
+    };
+  }
+  return zonaCapture;
+}
+
+function capturedFetch(realFetch, store, input, init = {}) {
+  const targetUrl = String(input?.url || input);
+  if (isZonaResolverRequest(targetUrl)) {
+    store.requests.push({ method: init?.method || "GET", url: targetUrl });
+  }
+  const headers = new Headers(init.headers || {});
+  if (/\.mzona\.net\//i.test(targetUrl)) {
+    headers.set("Origin", "https://kinoserial.online");
+    headers.set("Referer", "https://kinoserial.online/");
+    headers.set("User-Agent", zonaUserAgent());
+    headers.set("Accept", "*/*");
+  }
+  return realFetch(input, { ...init, headers });
+}
+
+function runZonaProvider(lib, kpId, requests, callbacks) {
+  const provider = lib.createStreamsProvider({
+    getStreamDurationInMicroseconds: () => "0",
+  });
+  provider.getStreams(Number(kpId), null, null, {
+    onStreamsReceived(payload) {
+      callbacks.push(parseMaybeJson(payload));
+    },
+    onCompletion() {},
+  });
+  return waitFor(() => extractZenithIds(requests).length > 0, 20000);
+}
+
 async function resolveZonaInPureJs(kpId) {
   const lib = getZonaLib();
   if (!lib?.createStreamsProvider) {
@@ -232,50 +295,30 @@ async function resolveZonaInPureJs(kpId) {
 
   const requests = [];
   const callbacks = [];
-  const previousFetch = globalThis.fetch;
+  const als = await ensureZonaCapture();
   const previousConsole = globalThis.console;
-
-  globalThis.fetch = async (input, init = {}) => {
-    const targetUrl = String(input?.url || input);
-    if (isZonaResolverRequest(targetUrl)) {
-      requests.push({ method: init?.method || "GET", url: targetUrl });
-    }
-
-    const headers = new Headers(init.headers || {});
-    if (/\.mzona\.net\//i.test(targetUrl)) {
-      headers.set("Origin", "https://kinoserial.online");
-      headers.set("Referer", "https://kinoserial.online/");
-      headers.set("User-Agent", zonaUserAgent());
-      headers.set("Accept", "*/*");
-    }
-
-    return previousFetch(input, { ...init, headers });
+  globalThis.console = {
+    ...previousConsole,
+    debug() {},
+    error() {},
+    info() {},
+    log() {},
+    warn() {},
   };
 
   try {
-    globalThis.console = {
-      ...previousConsole,
-      debug() {},
-      error() {},
-      info() {},
-      log() {},
-      warn() {},
-    };
-
-    const provider = lib.createStreamsProvider({
-      getStreamDurationInMicroseconds: () => "0",
-    });
-
-    provider.getStreams(Number(kpId), null, null, {
-      onStreamsReceived(payload) {
-        callbacks.push(parseMaybeJson(payload));
-      },
-      onCompletion() {},
-    });
-
-    await waitFor(() => extractZenithIds(requests).length > 0, 20000);
+    if (als) {
+      await als.run({ requests, callbacks }, () => runZonaProvider(lib, kpId, requests, callbacks));
+    } else {
+      const previousFetch = globalThis.fetch;
+      globalThis.fetch = (input, init = {}) => capturedFetch(previousFetch, { requests }, input, init);
+      try {
+        await runZonaProvider(lib, kpId, requests, callbacks);
+      } finally {
+        globalThis.fetch = previousFetch;
+      }
+    }
   } finally {
-    globalThis.fetch = previousFetch;
     globalThis.console = previousConsole;
   }
 
