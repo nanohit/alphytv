@@ -57,8 +57,17 @@
     state.playerPlaceholder = el.playerHost.innerHTML;
     const resolverFromUrl = params.get("resolver");
     if (resolverFromUrl) localStorage.setItem(STORE_RESOLVER, cleanBaseUrl(resolverFromUrl));
-    const defaultResolver = isLocal ? "http://127.0.0.1:8787" : "https://alphy-resolver.p-tikhonin.workers.dev";
-    state.resolverBaseUrl = cleanBaseUrl(localStorage.getItem(STORE_RESOLVER) || defaultResolver);
+    // The resolver moved off Cloudflare (workers.dev is rate-limited/empty from
+    // Russia) to Deno Deploy. Migrate any saved legacy Worker URL to the new
+    // default so returning visitors stop hitting the dead Cloudflare endpoint.
+    const defaultResolver = isLocal ? "http://127.0.0.1:8787" : "https://alphytv.alphy.deno.net";
+    const legacyResolvers = ["https://alphy-resolver.p-tikhonin.workers.dev"];
+    let storedResolver = cleanBaseUrl(localStorage.getItem(STORE_RESOLVER) || "");
+    if (!storedResolver || legacyResolvers.includes(storedResolver)) {
+      storedResolver = defaultResolver;
+      localStorage.setItem(STORE_RESOLVER, storedResolver);
+    }
+    state.resolverBaseUrl = storedResolver;
     el.resolverInput.value = state.resolverBaseUrl;
     updateResolverState();
     bindEvents();

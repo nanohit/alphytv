@@ -284,7 +284,7 @@ function runZonaProvider(lib, kpId, requests, callbacks) {
     },
     onCompletion() {},
   });
-  return waitFor(() => extractZenithIds(requests).length > 0, 20000);
+  return waitFor(() => extractZenithIds(requests).length > 0, 12000);
 }
 
 async function resolveZonaInPureJs(kpId) {
