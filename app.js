@@ -885,14 +885,18 @@ addEventListener('message', async (event) => {
   }
 
   function dailyMirrorCandidates(explicitOrigin) {
-    const MSK_OFFSET_MS = 3 * 3600000;
-    const ROLLOVER_MS = 2 * 3600000;
-    const effective = Date.now() + MSK_OFFSET_MS - ROLLOVER_MS;
+    // newdeaf serves a {DD}{mon}.newdeaf.co mirror for the current Moscow date and
+    // rolls it over around midnight–02:00 MSK, killing the previous day's host.
+    // Probe today's MSK date first, then yesterday and tomorrow so we can't miss
+    // the live host whichever side of midnight it is (the earlier code shifted the
+    // clock back 2h and probed a dead yesterday-mirror when today's was already up).
+    // First host that parses wins, so the others aren't hit.
+    const mskNow = Date.now() + 3 * 3600000;
     const slug = (offsetDays) => {
-      const date = new Date(effective + offsetDays * 86400000);
+      const date = new Date(mskNow + offsetDays * 86400000);
       return `https://${date.getUTCDate()}${monthSlug(date)}.newdeaf.co`;
     };
-    const generated = [slug(0), slug(-1)];
+    const generated = [slug(0), slug(-1), slug(1)];
     return unique([explicitOrigin, ...generated].filter(Boolean).map((value) => cleanBaseUrl(value)));
   }
   function monthSlug(date) {
