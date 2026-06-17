@@ -1,0 +1,10 @@
+# Vercel serves ONLY the static frontend (index.html, app.js, styles.css, Logo.png).
+# The resolver runs on Deno Deploy, not here — keep its 888KB Zona runtime and
+# Node bits out of the Vercel deploy so the production bundle stays tiny.
+worker/
+resolver-deno/
+docs/
+node_modules/
+*.md
+package.json
+package-lock.json

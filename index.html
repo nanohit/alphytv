@@ -3,70 +3,88 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AlphyTV MVP</title>
+  <!-- Keep Referer off third-party CDN requests (some segment hosts 404 otherwise). -->
+  <meta name="referrer" content="no-referrer">
+  <title>alphy</title>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
   <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.11.17/dist/shaka-player.compiled.js"></script>
 </head>
 <body>
-  <header class="topbar">
-    <div>
-      <h1>AlphyTV MVP</h1>
-      <p id="statusLine">Newdeaf first, Zona fallback when Newdeaf only exposes Allo.</p>
-    </div>
-    <div class="top-actions">
-      <button id="settingsToggle" type="button">Worker</button>
-      <button id="diagToggle" type="button">Диагностика</button>
-    </div>
-  </header>
+  <div class="container">
+    <header>
+      <div class="brand">
+        <button class="logo-btn" id="logoBtn" type="button" aria-label="На главную">
+          <img class="logo-image" src="/Logo.png" alt="alphy">
+        </button>
+      </div>
+      <div class="search-box">
+        <input type="text" id="searchInput" spellcheck="false" autocomplete="off"
+               placeholder="Название, или ссылка newdeaf / ortified / zenith…">
+        <button class="search-button" id="searchBtn" type="button" aria-label="Поиск">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"></circle>
+            <line x1="16.65" y1="16.65" x2="21" y2="21"></line>
+          </svg>
+        </button>
+        <button class="icon-btn" id="settingsToggle" type="button" aria-label="Настройки">⚙</button>
+      </div>
+    </header>
 
-  <section id="settingsPanel" class="settings hidden" aria-label="Resolver Worker settings">
-    <label for="resolverInput">Cloudflare Worker URL</label>
-    <input id="resolverInput" spellcheck="false" autocomplete="off" placeholder="https://alphy-resolver.<account>.workers.dev">
-    <button id="saveResolverBtn" type="button">Save</button>
-    <button id="healthBtn" type="button">Test</button>
-    <span id="resolverState">not configured</span>
-  </section>
-
-  <section class="searchbar">
-    <form id="searchForm">
-      <input id="queryInput" spellcheck="false" autocomplete="off" placeholder="Название, Newdeaf URL, api.ortified.ws URL, api.zenithjs.ws URL">
-      <button id="goBtn" type="submit">Найти</button>
-      <button id="zonaOnlyBtn" type="button">Zona fallback</button>
-    </form>
-    <p class="hint">Для Newdeaf URL: сначала ищем Ortified и запускаем Cleanroom. Если найден только Allo, уходим через Zona/Zenith.</p>
-  </section>
-
-  <main class="layout">
-    <section class="mainpane">
-      <section id="metaPanel" class="meta-panel">
-        <div>
-          <h2 id="metaTitle">Готово к тесту</h2>
-          <p id="metaSubtitle">Вставь Newdeaf URL или введи название фильма.</p>
-        </div>
-        <div id="providerBadge" class="badge">idle</div>
-      </section>
-
-      <section id="playerHost" class="player-host" aria-label="Player">
-        <div class="placeholder">
-          <strong>Плеер появится здесь</strong>
-          <span>Ortified Cleanroom iframe или Shaka custom player для Zenith.</span>
-        </div>
-      </section>
-
-      <section id="trackPanel" class="track-panel hidden" aria-label="Player tracks"></section>
-      <section id="sourcePanel" class="source-panel hidden" aria-label="Playback sources"></section>
-      <section id="resultsPanel" class="results-panel" aria-label="Search results"></section>
+    <!-- Resolver settings (hidden by default) -->
+    <section id="settingsPanel" class="settings hidden">
+      <label for="resolverInput">Resolver URL</label>
+      <input id="resolverInput" spellcheck="false" autocomplete="off" placeholder="https://alphytv.alphy.deno.net">
+      <button id="saveResolverBtn" type="button">Сохранить</button>
+      <button id="healthBtn" type="button">Проверить</button>
+      <span id="resolverState" class="muted">—</span>
     </section>
 
-    <aside id="diagnostics" class="diagnostics hidden" aria-label="Diagnostics">
-      <div class="diag-head">
-        <strong>Diagnostics</strong>
-        <button id="copyReportBtn" type="button">Copy report</button>
+    <!-- HOME -->
+    <section id="homeView" class="view">
+      <div id="continueSection" class="row hidden">
+        <h3 id="continueHeader">Продолжить просмотр</h3>
+        <div id="continueGrid" class="card-grid"></div>
       </div>
-      <div id="facts" class="facts"></div>
-      <pre id="log"></pre>
-    </aside>
-  </main>
+      <div id="bookmarksSection" class="row hidden">
+        <h3>Закладки</h3>
+        <div id="bookmarksGrid" class="card-grid"></div>
+      </div>
+      <div id="homeEmpty" class="home-empty hidden">
+        <strong>Тут появится твоя история и закладки</strong>
+        <span>Найди фильм или сериал в поиске — и продолжай с того места, где остановился.</span>
+      </div>
+    </section>
+
+    <!-- SEARCH RESULTS -->
+    <section id="searchView" class="view hidden">
+      <h2 id="resultsTitle" class="results-title">Результаты</h2>
+      <div id="resultsGrid" class="card-grid"></div>
+    </section>
+
+    <!-- WATCH -->
+    <section id="watchView" class="view hidden">
+      <div class="watch-head">
+        <button class="back-btn" id="backBtn" type="button">← Назад</button>
+        <h2 id="watchTitle" class="watch-title"></h2>
+        <div class="watch-actions">
+          <button class="bookmark-btn" id="bookmarkBtn" type="button" aria-label="В закладки">☆</button>
+        </div>
+      </div>
+      <div class="watch-layout">
+        <div class="watch-main">
+          <div id="playerHost" class="player-host">
+            <div class="placeholder"><div class="spinner"></div><span>Загрузка плеера…</span></div>
+          </div>
+          <div id="trackPanel" class="track-panel hidden"></div>
+        </div>
+        <aside id="metaPanel" class="meta-panel hidden"></aside>
+      </div>
+    </section>
+
+    <div id="loading" class="loading hidden"><div class="spinner"></div><div>Загрузка…</div></div>
+    <div id="error" class="error hidden"></div>
+  </div>
 
   <script src="/app.js"></script>
 </body>
