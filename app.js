@@ -277,7 +277,12 @@
     for (const mirror of mirrors) {
       const searchUrl = `${mirror}/index.php?do=search&subaction=search&story=${encodeURIComponent(query)}`;
       try {
-        const html = await fetchThirdPartyText(searchUrl, { preferSandbox: true, directFallback: false, label: "newdeaf-search", timeoutMs: 12000 });
+        // Direct CORS fetch — newdeaf returns `access-control-allow-origin: *`, so a
+        // fetch from the real page origin works. The sandboxed iframe sends
+        // `Origin: null`, which newdeaf rejects/hangs, so it must NOT be the only
+        // path (it stays as the fallback). This is why newdeaf results were silently
+        // empty before.
+        const html = await fetchThirdPartyText(searchUrl, { preferSandbox: false, label: "newdeaf-search", timeoutMs: 12000 });
         const candidates = parseNewdeafSearch(html, searchUrl);
         if (candidates.length) {
           cacheSet("ndsearch", query, candidates, TTL.ndsearch);
@@ -298,7 +303,7 @@
     let parsed = null;
     for (const candidate of candidates) {
       try {
-        const html = await fetchThirdPartyText(candidate, { preferSandbox: true, directFallback: false, label: "newdeaf-page" });
+        const html = await fetchThirdPartyText(candidate, { preferSandbox: false, label: "newdeaf-page" });
         parsed = parseNewdeafPage(html, candidate);
         if (parsed.ortified.length || parsed.allo.length) break;
       } catch (error) {
@@ -404,16 +409,38 @@
     if (isStale(token)) return;
     renderResults([], pk, query);
 
+    // newdeaf indexes Russian titles only. If the query has no Cyrillic, search
+    // newdeaf with the Russian name from the top PoiskKino hit so English queries
+    // ("Scavengers Reign") still surface the newdeaf pages ("Царство падальщиков").
+    const ndQuery = pickNewdeafQuery(query, pk);
     let nd = [];
-    try { nd = await searchNewdeaf(query); } catch (error) { log("newdeaf-error", error.message); }
+    try { nd = await searchNewdeaf(ndQuery); } catch (error) { log("newdeaf-error", error.message); }
     if (isStale(token)) return;
     renderResults(nd, pk, query);
     if (!pk.length && !nd.length) el.resultsTitle.textContent = "Ничего не найдено";
   }
 
+  function pickNewdeafQuery(query, pkResults) {
+    if (/[а-яё]/i.test(query)) return query;
+    const ru = (pkResults || []).map((m) => m.name).find((name) => /[а-яё]/i.test(name || ""));
+    return ru || query;
+  }
+
   function renderResults(ndCandidates, pkResults, query) {
     el.resultsGrid.replaceChildren();
     el.resultsTitle.textContent = "Результаты";
+    // newdeaf first and prioritized: when a title is in both sources, the ad-free
+    // Ortified path (newdeaf, with the embedded season/episode player) is the
+    // preferred choice, so it leads the grid — same ordering as the old MVP.
+    for (const item of ndCandidates) {
+      const card = makeCard({
+        title: item.title || "Newdeaf",
+        sub: "Newdeaf · субтитры",
+        poster: item.poster,
+        onClick: () => go(`/watch/nd/${encodeURIComponent(item.url)}`),
+      });
+      el.resultsGrid.appendChild(card);
+    }
     for (const movie of pkResults) {
       if (movie.kpId == null) continue;
       const kp = movie.rating?.kp;
@@ -423,15 +450,6 @@
         poster: movie.poster,
         ratingPill: kp ? Number(kp).toFixed(1) : "",
         onClick: () => go(`/watch/kp/${encodeURIComponent(movie.kpId)}`),
-      });
-      el.resultsGrid.appendChild(card);
-    }
-    for (const item of ndCandidates) {
-      const card = makeCard({
-        title: item.title || "Newdeaf",
-        sub: "Newdeaf",
-        poster: item.poster,
-        onClick: () => go(`/watch/nd/${encodeURIComponent(item.url)}`),
       });
       el.resultsGrid.appendChild(card);
     }
@@ -907,8 +925,12 @@ addEventListener('message', async (event) => {
     const url = cleanUrl(href, base);
     if (!url) return null;
     const parsed = new URL(url);
-    const baseHost = new URL(base).host;
-    if (parsed.host !== baseHost) return null;
+    // Daily-mirror hosts (17jun.newdeaf.co) 301-redirect to the apex newdeaf.co, so
+    // result links come back on EITHER the mirror host or the apex (and which one is
+    // geo-dependent). Accept the whole newdeaf.co family instead of demanding an
+    // exact match with the mirror we requested — that strict check silently dropped
+    // every result after the redirect.
+    if (!/(^|\.)newdeaf\.co$/i.test(parsed.host)) return null;
     if (!/\.html(?:$|[?#])/i.test(parsed.href)) return null;
     if (!/(\/film\/|\/serial\/|\/multfilm\/|\/anime\/|\/multserial\/|\/multserialy\/)/i.test(parsed.pathname)) return null;
     return parsed.href;
@@ -918,13 +940,36 @@ addEventListener('message', async (event) => {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const seen = new Set();
     const out = [];
+    // newdeaf's DLE "card" layout: <article class="card"> wraps a poster anchor
+    // (a.card__img with img[data-src]) AND a title anchor (h2.card__title a).
+    // Iterate the card containers and pull the title from the title element so we
+    // get a clean name ("Рик и Морти (1 сезон) - русские субтитры") instead of the
+    // whole card's text blob. The poster lives in img[data-src] (src is a 1x1
+    // lazy-load placeholder). Fall back to a generic anchor scan for other skins.
+    for (const card of doc.querySelectorAll("article.card, .card, .th-item, .short, .shortstory")) {
+      const titleLink = card.querySelector(".card__title a, h2 a, .th-title a, .short_header a, h3 a");
+      const anyLink = titleLink || card.querySelector("a[href]");
+      if (!anyLink) continue;
+      const href = isNewdeafPage(anyLink.getAttribute("href"), base);
+      if (!href || seen.has(href)) continue;
+      const titleEl = card.querySelector(".card__title, .th-title, .short_header, h2, h3");
+      let title = compact(titleEl ? titleEl.textContent : (titleLink ? titleLink.textContent : ""));
+      if (!title) title = compact(anyLink.getAttribute("title")) || new URL(href).pathname.split("/").pop();
+      const img = card.querySelector("img[data-src], img[data-original], img[src]");
+      const poster = img ? cleanUrl(img.getAttribute("data-src") || img.getAttribute("data-original") || img.getAttribute("src"), base) : null;
+      seen.add(href);
+      out.push({ url: href, title, poster });
+      if (out.length >= 20) break;
+    }
+    if (out.length) return out;
+
     for (const a of doc.querySelectorAll("a[href]")) {
       const href = isNewdeafPage(a.getAttribute("href"), base);
       if (!href || seen.has(href)) continue;
       seen.add(href);
       const card = a.closest("article, .short, .shortstory, .story, .item, .th-item, .movie-item") || a.parentElement;
       const title = compact(a.textContent) || compact(card && card.textContent).slice(0, 140) || new URL(href).pathname.split("/").pop();
-      const img = card && card.querySelector && card.querySelector("img[src], img[data-src], img[data-original]");
+      const img = card && card.querySelector && card.querySelector("img[data-src], img[data-original], img[src]");
       const poster = img ? cleanUrl(img.getAttribute("data-src") || img.getAttribute("data-original") || img.getAttribute("src"), base) : null;
       out.push({ url: href, title, poster });
       if (out.length >= 20) break;
