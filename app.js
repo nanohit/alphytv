@@ -380,9 +380,15 @@
     if (!entries.length) { section.classList.add("hidden"); return; }
     section.classList.remove("hidden");
     entries.slice(0, 20).forEach((entry) => {
+      let sub = entry.year ? String(entry.year) : "";
+      if (opts.withProgress && entry.duration > 0) {
+        const pct = Math.round((entry.progress || 0) * 100);
+        const left = Math.max(0, Math.ceil((entry.duration - (entry.position || 0)) / 60));
+        sub = `${pct}% · ост. ${left} мин`;
+      }
       const card = makeCard({
         title: entry.title || "(без названия)",
-        sub: entry.year ? String(entry.year) : "",
+        sub,
         poster: entry.poster,
         progress: opts.withProgress && entry.duration > 0 ? entry.progress || 0 : null,
         onClick: () => go(hashFor(entry.target)),
@@ -435,7 +441,7 @@
     for (const item of ndCandidates) {
       const card = makeCard({
         title: item.title || "Newdeaf",
-        sub: "Newdeaf · субтитры",
+        sub: "NF",
         poster: item.poster,
         onClick: () => go(`/watch/nd/${encodeURIComponent(item.url)}`),
       });
@@ -734,6 +740,29 @@
     if (state.trackInterval) { clearInterval(state.trackInterval); state.trackInterval = null; }
   }
 
+  // Position reports from the Ortified cleanroom iframe (see progressHook). We can't
+  // resume the embedded player, but we record where the viewer stopped so the
+  // homepage card shows progress for Ortified titles too.
+  function onOrtProgress(event) {
+    const data = event.data || {};
+    if (!data.alphyOrtProgress) return;
+    const target = state.currentTarget;
+    if (!target || target.kind !== "ort") return;
+    const { position, duration } = data;
+    if (!duration || !isFinite(duration) || duration <= 0) return;
+    recordHistory({
+      key: keyFor(target),
+      kind: "ort",
+      target: cleanTarget(target),
+      title: target.title || "",
+      poster: target.poster || "",
+      year: target.year || "",
+      position,
+      duration,
+      progress: position / duration,
+    });
+  }
+
   async function teardownPlayer(keepView) {
     stopTracking();
     if (state.player) {
@@ -830,6 +859,33 @@
   // Engine: third-party fetch, newdeaf parsing, Zenith/Ortified parsing
   // (ported verbatim from the proven MVP — do not "simplify".)
   // =====================================================================
+  function progressHook() {
+    // We build the Ortified cleanroom srcdoc ourselves, so a script we inject runs
+    // in the SAME document as the player's <video> and can read its position even
+    // though the parent page can't reach a cross-origin iframe. We can't stop the
+    // player resetting on reload, but we can report where the viewer stopped so the
+    // homepage shows progress. Posts {alphyOrtProgress, position, duration} out.
+    return `<script data-cleanroom="progress-hook">
+(() => {
+  const hooked = new WeakSet();
+  let lastSent = 0;
+  const send = (v) => {
+    const now = Date.now();
+    if (now - lastSent < 4000) return;
+    if (!v.duration || !isFinite(v.duration) || v.duration <= 0) return;
+    lastSent = now;
+    try { parent.postMessage({ alphyOrtProgress: true, position: v.currentTime, duration: v.duration }, '*'); } catch (e) {}
+  };
+  const hook = (v) => {
+    if (hooked.has(v)) return; hooked.add(v);
+    v.addEventListener('timeupdate', () => send(v));
+    v.addEventListener('pause', () => { lastSent = 0; send(v); });
+  };
+  setInterval(() => { try { document.querySelectorAll('video').forEach(hook); } catch (e) {} }, 1500);
+})();
+<\/script>`;
+  }
+
   async function fetchThirdPartyText(url, options = {}) {
     const preferSandbox = !!options.preferSandbox;
     if (preferSandbox) {
@@ -953,8 +1009,8 @@ addEventListener('message', async (event) => {
       const href = isNewdeafPage(anyLink.getAttribute("href"), base);
       if (!href || seen.has(href)) continue;
       const titleEl = card.querySelector(".card__title, .th-title, .short_header, h2, h3");
-      let title = compact(titleEl ? titleEl.textContent : (titleLink ? titleLink.textContent : ""));
-      if (!title) title = compact(anyLink.getAttribute("title")) || new URL(href).pathname.split("/").pop();
+      let title = cleanNewdeafTitle(compact(titleEl ? titleEl.textContent : (titleLink ? titleLink.textContent : "")));
+      if (!title) title = cleanNewdeafTitle(compact(anyLink.getAttribute("title"))) || new URL(href).pathname.split("/").pop();
       const img = card.querySelector("img[data-src], img[data-original], img[src]");
       const poster = img ? cleanUrl(img.getAttribute("data-src") || img.getAttribute("data-original") || img.getAttribute("src"), base) : null;
       seen.add(href);
@@ -994,10 +1050,11 @@ addEventListener('message', async (event) => {
     for (const match of text.matchAll(/https:\/\/api\.ortified\.ws\/embed\/[^"'<>\s)]+/gi)) add(ortified, match[0], /^https:\/\/api\.ortified\.ws\/embed\//i);
     for (const match of text.matchAll(/https:\/\/allo\.cdnlbox\.club\/[^"'<>\s)]+/gi)) add(allo, match[0], /^https:\/\/allo\.cdnlbox\.club\//i);
 
-    const title =
+    const title = cleanNewdeafTitle(
       compact(doc.querySelector('meta[property="og:title"]')?.getAttribute("content")) ||
       compact(doc.querySelector("h1")?.textContent) ||
-      compact(doc.querySelector("title")?.textContent);
+      compact(doc.querySelector("title")?.textContent)
+    );
     const description =
       compact(doc.querySelector('meta[property="og:description"]')?.getAttribute("content")) ||
       compact(doc.querySelector('meta[name="description"]')?.getAttribute("content"));
@@ -1046,7 +1103,7 @@ addEventListener('message', async (event) => {
     out = out.replace(/ads:\s*adsConfig\s*,/g, "ads: {},");
     if (!/<base\s/i.test(out) && /<head([^>]*)>/i.test(out)) out = out.replace(/<head([^>]*)>/i, `<head$1><base href="${escapeAttr(baseHref)}">`);
     if (!/<base\s/i.test(out)) out = out.replace(/<html([^>]*)>/i, `<html$1><head><base href="${escapeAttr(baseHref)}"></head>`);
-    out = out.replace(/<head([^>]*)>/i, `<head$1>${adBlockPrelude()}<style>html,body{margin:0;background:#000;min-height:100%;height:100%;overflow:hidden;}</style>`);
+    out = out.replace(/<head([^>]*)>/i, `<head$1>${adBlockPrelude()}${progressHook()}<style>html,body{margin:0;background:#000;min-height:100%;height:100%;overflow:hidden;}</style>`);
     stats.ok = stats.makePlayerRefs > 0;
     return { html: out, stats };
   }
@@ -1083,6 +1140,16 @@ addEventListener('message', async (event) => {
       results.find((movie) => year && String(movie.year) === String(year)) ||
       results[0];
   }
+  function cleanNewdeafTitle(value) {
+    // newdeaf's og:title is promo-padded ("… - смотреть онлайн с субтитрами").
+    // Strip that tail so the player shows a clean name; keep season info.
+    return compact(value)
+      .replace(/\s*[-–—]\s*смотреть\s+онлайн.*$/i, "")
+      .replace(/\s*смотреть\s+онлайн.*$/i, "")
+      .replace(/\s*[-–—]\s*newdeaf.*$/i, "")
+      .trim();
+  }
+
   function cleanMovieTitle(value) {
     return compact(value)
       .replace(/^(фильм|сериал|мультфильм|аниме|мультсериал)\s+/i, "")
@@ -1236,6 +1303,7 @@ addEventListener('message', async (event) => {
     el.backBtn.addEventListener("click", () => { if (history.length > 1) history.back(); else go("/"); });
     el.bookmarkBtn.addEventListener("click", () => { if (state.currentTarget) toggleBookmark(state.currentTarget); });
     window.addEventListener("hashchange", route);
+    window.addEventListener("message", onOrtProgress);
     bindKeyboard();
 
     // Migrate legacy query-param deep links (?q / ?url / ?kpId / ?zenith) to hash.
