@@ -16,7 +16,7 @@
 // Deploy: Deno Deploy app, entrypoint `resolver-deno/main.js`. Set POISKKINO_TOKEN
 // env var (needed for /search; /resolve-zona and /health do not need it).
 
-import worker from "../worker/src/index.js";
+import worker, { pickAllowOrigin } from "../worker/src/index.js";
 
 const env = {
   POISKKINO_TOKEN: Deno.env.get("POISKKINO_TOKEN"),
@@ -38,10 +38,8 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function corsHeadersFor(request) {
   const requestOrigin = request.headers.get("origin") || "";
-  const allowed = env.ALLOWED_ORIGIN.split(",").map((item) => item.trim()).filter(Boolean);
-  const allowOrigin = allowed.length === 0 ? "*" : allowed.includes(requestOrigin) ? requestOrigin : allowed[0];
   return {
-    "access-control-allow-origin": allowOrigin,
+    "access-control-allow-origin": pickAllowOrigin(requestOrigin, env.ALLOWED_ORIGIN),
     "access-control-allow-methods": "GET, OPTIONS",
     "access-control-allow-headers": "content-type, authorization",
     "vary": "Origin",

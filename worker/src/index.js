@@ -197,19 +197,29 @@ function json(request, env, body, status = 200) {
 
 function corsHeaders(request, env) {
   const requestOrigin = request.headers.get("origin") || "";
-  const allowed = (env.ALLOWED_ORIGIN || "").split(",").map((item) => item.trim()).filter(Boolean);
-  const allowOrigin = allowed.length === 0
-    ? "*"
-    : allowed.includes(requestOrigin)
-      ? requestOrigin
-      : allowed[0];
-
   return {
-    "access-control-allow-origin": allowOrigin,
+    "access-control-allow-origin": pickAllowOrigin(requestOrigin, env.ALLOWED_ORIGIN),
     "access-control-allow-methods": "GET, OPTIONS",
     "access-control-allow-headers": "content-type, authorization",
     "vary": "Origin",
   };
+}
+
+// Decide the Access-Control-Allow-Origin value. Beyond the explicit env
+// allowlist we trust any *.vercel.app (so per-commit PREVIEW deploys, whose
+// subdomain hash changes every push, work without re-listing them), any
+// *.alphy.tv, and localhost. This is a credential-less public resolver — CORS
+// is not its security boundary (the PoiskKino token never leaves the server),
+// so reflecting these origins is safe and saves constant allowlist edits.
+export function pickAllowOrigin(requestOrigin, allowedCsv) {
+  const allowed = (allowedCsv || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const trusted =
+    (requestOrigin && allowed.includes(requestOrigin)) ||
+    /^https:\/\/([a-z0-9-]+\.)*vercel\.app$/i.test(requestOrigin) ||
+    /^https:\/\/([a-z0-9-]+\.)*alphy\.tv$/i.test(requestOrigin) ||
+    /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(requestOrigin);
+  if (trusted) return requestOrigin;
+  return allowed[0] || "*";
 }
 
 function clampInt(value, min, max, fallback) {
