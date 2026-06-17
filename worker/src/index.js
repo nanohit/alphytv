@@ -53,31 +53,27 @@ async function handleSearch(request, env, url) {
     return json(request, env, { ok: false, error: "missing_q" }, 400);
   }
 
-  const apiUrl = new URL("/v1.4/movie/search", poiskkinoBase(env));
-  apiUrl.searchParams.set("query", query);
-  apiUrl.searchParams.set("limit", String(limit));
-
-  const raw = await poiskkinoFetch(env, apiUrl);
-  const docs = Array.isArray(raw.docs) ? raw.docs : [];
+  const { results, source } = await searchWithFallback(env, query, limit);
   // Year is a soft hint: providers (e.g. Newdeaf) and PoiskKino often disagree
   // by a year on the same title, so match within +/-1 and never let the year
   // filter zero out an otherwise-valid result.
   const yearNum = Number.parseInt(year, 10);
-  let filtered = docs;
+  let filtered = results;
   if (Number.isFinite(yearNum)) {
-    const near = docs.filter((item) => {
+    const near = results.filter((item) => {
       const y = Number.parseInt(item.year, 10);
       return Number.isFinite(y) && Math.abs(y - yearNum) <= 1;
     });
-    filtered = near.length ? near : docs;
+    filtered = near.length ? near : results;
   }
 
   return json(request, env, {
     ok: true,
     query,
     year: year || null,
-    total: raw.total ?? docs.length,
-    results: filtered.map(normalizeMovie),
+    source,
+    total: results.length,
+    results: filtered,
   });
 }
 
@@ -87,9 +83,85 @@ async function handleMovie(request, env, url) {
     return json(request, env, { ok: false, error: "missing_or_invalid_id" }, 400);
   }
 
-  const apiUrl = new URL(`/v1.4/movie/${id}`, poiskkinoBase(env));
+  const { movie, source } = await movieWithFallback(env, id);
+  return json(request, env, { ok: true, source, movie });
+}
+
+// The primary metadata source (api.poiskkino.dev) is capped at 200 requests/day
+// across all users (one shared key). When it's exhausted it returns a non-2xx,
+// which throws here, so we rotate to the unofficial Kinopoisk API as a fallback.
+// Both speak Kinopoisk IDs, so kpId stays compatible with /resolve-zona and the
+// rest of the flow regardless of which source answered.
+async function searchWithFallback(env, query, limit) {
+  try {
+    return { results: await poiskkinoSearch(env, query, limit), source: "poiskkino" };
+  } catch (primaryError) {
+    if (!env.KINOPOISK_UNOFFICIAL_TOKEN) throw primaryError;
+    try {
+      return { results: await unofficialSearch(env, query, limit), source: "kinopoiskunofficial" };
+    } catch {
+      throw primaryError; // both down -> surface the primary error
+    }
+  }
+}
+
+async function movieWithFallback(env, id) {
+  try {
+    return { movie: await poiskkinoMovie(env, id), source: "poiskkino" };
+  } catch (primaryError) {
+    if (!env.KINOPOISK_UNOFFICIAL_TOKEN) throw primaryError;
+    try {
+      return { movie: await unofficialMovie(env, id), source: "kinopoiskunofficial" };
+    } catch {
+      throw primaryError;
+    }
+  }
+}
+
+async function poiskkinoSearch(env, query, limit) {
+  const apiUrl = new URL("/v1.4/movie/search", poiskkinoBase(env));
+  apiUrl.searchParams.set("query", query);
+  apiUrl.searchParams.set("limit", String(limit));
   const raw = await poiskkinoFetch(env, apiUrl);
-  return json(request, env, { ok: true, movie: normalizeMovie(raw) });
+  const docs = Array.isArray(raw.docs) ? raw.docs : [];
+  return docs.map(normalizeMovie);
+}
+
+async function poiskkinoMovie(env, id) {
+  const apiUrl = new URL(`/v1.4/movie/${id}`, poiskkinoBase(env));
+  return normalizeMovie(await poiskkinoFetch(env, apiUrl));
+}
+
+async function unofficialSearch(env, query, limit) {
+  const apiUrl = new URL("/api/v2.1/films/search-by-keyword", unofficialBase(env));
+  apiUrl.searchParams.set("keyword", query);
+  apiUrl.searchParams.set("page", "1");
+  const raw = await unofficialFetch(env, apiUrl);
+  const films = Array.isArray(raw.films) ? raw.films : [];
+  return films.slice(0, limit).map(normalizeUnofficialSearch);
+}
+
+async function unofficialMovie(env, id) {
+  const apiUrl = new URL(`/api/v2.2/films/${id}`, unofficialBase(env));
+  return normalizeUnofficialFilm(await unofficialFetch(env, apiUrl));
+}
+
+async function unofficialFetch(env, apiUrl) {
+  if (!env.KINOPOISK_UNOFFICIAL_TOKEN) {
+    throw new Error("KINOPOISK_UNOFFICIAL_TOKEN is not configured");
+  }
+  const response = await fetch(apiUrl, {
+    headers: { "Accept": "application/json", "X-API-KEY": env.KINOPOISK_UNOFFICIAL_TOKEN },
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`KinopoiskUnofficial ${response.status}: ${text.slice(0, 200)}`);
+  }
+  return JSON.parse(text);
+}
+
+function unofficialBase(env) {
+  return env.KINOPOISK_UNOFFICIAL_BASE_URL || "https://kinopoiskapiunofficial.tech";
 }
 
 async function handleZonaResolve(request, env, url) {
@@ -178,6 +250,58 @@ function normalizeMovie(item) {
       imdb: item.votes?.imdb ?? null,
     },
   };
+}
+
+// kinopoiskapiunofficial.tech /api/v2.2/films/{id} -> our normalized movie shape.
+function normalizeUnofficialFilm(item) {
+  const year = String(item.year ?? "").match(/\d{4}/)?.[0] || null;
+  return {
+    kpId: item.kinopoiskId ?? item.filmId ?? null,
+    name: item.nameRu || item.nameOriginal || item.nameEn || null,
+    alternativeName: item.nameOriginal || null,
+    enName: item.nameEn || null,
+    type: item.type ?? null,
+    year: year ? Number(year) : null,
+    isSeries: !!item.serial || /SERIES|TV_SHOW|MINI/i.test(String(item.type || "")),
+    movieLength: typeof item.filmLength === "number" ? item.filmLength : null,
+    description: item.description ?? null,
+    shortDescription: item.shortDescription ?? null,
+    poster: item.posterUrl || item.posterUrlPreview || null,
+    rating: { kp: numOrNull(item.ratingKinopoisk), imdb: numOrNull(item.ratingImdb) },
+    votes: { kp: numOrNull(item.ratingKinopoiskVoteCount), imdb: numOrNull(item.ratingImdbVoteCount) },
+  };
+}
+
+// kinopoiskapiunofficial.tech /api/v2.1/films/search-by-keyword item. Search hits
+// carry only a single string `rating` (KP) and no IMDb rating; year is a string.
+function normalizeUnofficialSearch(item) {
+  const year = String(item.year ?? "").match(/\d{4}/)?.[0] || null;
+  return {
+    kpId: item.filmId ?? item.kinopoiskId ?? null,
+    name: item.nameRu || item.nameEn || null,
+    alternativeName: item.nameEn || null,
+    enName: item.nameEn || null,
+    type: item.type ?? null,
+    year: year ? Number(year) : null,
+    isSeries: /SERIES|TV_SHOW|MINI/i.test(String(item.type || "")),
+    movieLength: null,
+    description: item.description ?? null,
+    shortDescription: null,
+    poster: item.posterUrl || item.posterUrlPreview || null,
+    rating: { kp: ratingStr(item.rating), imdb: null },
+    votes: { kp: numOrNull(item.ratingVoteCount), imdb: null },
+  };
+}
+
+function numOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function ratingStr(value) {
+  if (value == null || value === "null" || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function poiskkinoBase(env) {
