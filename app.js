@@ -775,18 +775,46 @@ addEventListener('message', async (event) => {
     });
   }
 
-  async function resolverJson(path) {
+  async function resolverJson(path, { retries = 2, timeoutMs = 15000 } = {}) {
     if (!state.resolverBaseUrl) throw new Error("Cloudflare Worker URL is not configured");
     const url = `${state.resolverBaseUrl}${path}`;
-    log("worker", "fetch", { url: redact(url) });
-    const response = await fetch(url, { cache: "no-store", credentials: "omit" });
-    const text = await response.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { ok: false, raw: text.slice(0, 500) }; }
-    if (!response.ok || data.ok === false) {
-      throw new Error(data.message || data.error || `Worker ${response.status}`);
+    let lastError;
+    // The Worker lives on Cloudflare (*.workers.dev), whose path from Russia is
+    // flaky and can silently drop a long-held connection. Bound each attempt
+    // with an abort timeout and retry transient transport failures on a fresh
+    // connection so one dropped request no longer kills the whole resolve.
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        log("worker", attempt ? `fetch retry ${attempt}` : "fetch", { url: redact(url) });
+        const response = await fetch(url, { cache: "no-store", credentials: "omit", signal: controller.signal });
+        const text = await response.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = { ok: false, raw: text.slice(0, 500) }; }
+        if (!response.ok || data.ok === false) {
+          throw new Error(data.message || data.error || `Worker ${response.status}`);
+        }
+        return data;
+      } catch (error) {
+        lastError = error;
+        const aborted = error?.name === "AbortError";
+        const transient = aborted || /NetworkError|Failed to fetch|load failed|terminated|network/i.test(String(error?.message || ""));
+        log("worker-warn", aborted ? "request timed out" : "request failed", {
+          url: redact(url),
+          attempt,
+          transient,
+          message: String(error?.message || error),
+        });
+        // Only retry transport-level failures; a real 4xx/5xx from a reachable
+        // Worker (e.g. no Zenith mapping) is a genuine answer, not worth retrying.
+        if (!transient || attempt === retries) break;
+        await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)));
+      } finally {
+        clearTimeout(timer);
+      }
     }
-    return data;
+    throw lastError || new Error("Worker request failed");
   }
 
   function pageUrlCandidates(pageUrl) {
