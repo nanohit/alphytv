@@ -87,20 +87,54 @@ async function handleMovie(request, env, url) {
   return json(request, env, { ok: true, source, movie });
 }
 
-// The primary metadata source (api.poiskkino.dev) is capped at 200 requests/day
-// across all users (one shared key). When it's exhausted it returns a non-2xx,
-// which throws here, so we rotate to the unofficial Kinopoisk API as a fallback.
-// Both speak Kinopoisk IDs, so kpId stays compatible with /resolve-zona and the
-// rest of the flow regardless of which source answered.
+// Metadata sources, used in order of remaining daily budget:
+//   1) api.poiskkino.dev — primary, ~200 req/day on one shared key.
+//   2) kinopoiskapiunofficial.tech — a POOL of keys, ~500 req/day each.
+// When a source 4xxs (esp. 402/429 = quota spent) we rotate to the next. The
+// unofficial cursor sticks to the current working key (drain it first) and only
+// advances past a key once its quota is spent, so N keys ≈ N*500/day on top of the
+// primary's 200 (5 keys -> ~2700/day). All sources speak Kinopoisk IDs, so kpId
+// stays compatible with /resolve-zona regardless of which one answered.
+let unofficialCursor = 0;
+
+function unofficialKeys(env) {
+  const list = String(env.KINOPOISK_UNOFFICIAL_TOKENS || "").split(",").map((s) => s.trim());
+  if (env.KINOPOISK_UNOFFICIAL_TOKEN) list.push(String(env.KINOPOISK_UNOFFICIAL_TOKEN).trim());
+  return [...new Set(list.filter(Boolean))];
+}
+
+function isQuotaError(error) {
+  return /\b(402|429)\b/.test(String(error?.message || ""));
+}
+
+async function unofficialRotate(keys, run) {
+  const start = unofficialCursor; // capture once; the loop must not skip keys as the cursor moves
+  let lastError;
+  for (let i = 0; i < keys.length; i += 1) {
+    const idx = (start + i) % keys.length;
+    try {
+      const value = await run(keys[idx]);
+      unofficialCursor = idx; // stick with this working key next time
+      return { value, index: idx };
+    } catch (error) {
+      lastError = error;
+      if (isQuotaError(error)) unofficialCursor = (idx + 1) % keys.length; // this key is spent for today
+    }
+  }
+  throw lastError || new Error("all unofficial keys exhausted");
+}
+
 async function searchWithFallback(env, query, limit) {
   try {
     return { results: await poiskkinoSearch(env, query, limit), source: "poiskkino" };
   } catch (primaryError) {
-    if (!env.KINOPOISK_UNOFFICIAL_TOKEN) throw primaryError;
+    const keys = unofficialKeys(env);
+    if (!keys.length) throw primaryError;
     try {
-      return { results: await unofficialSearch(env, query, limit), source: "kinopoiskunofficial" };
+      const { value, index } = await unofficialRotate(keys, (key) => unofficialSearch(env, key, query, limit));
+      return { results: value, source: `kinopoiskunofficial#${index + 1}` };
     } catch {
-      throw primaryError; // both down -> surface the primary error
+      throw primaryError; // everything down -> surface the primary error
     }
   }
 }
@@ -109,9 +143,11 @@ async function movieWithFallback(env, id) {
   try {
     return { movie: await poiskkinoMovie(env, id), source: "poiskkino" };
   } catch (primaryError) {
-    if (!env.KINOPOISK_UNOFFICIAL_TOKEN) throw primaryError;
+    const keys = unofficialKeys(env);
+    if (!keys.length) throw primaryError;
     try {
-      return { movie: await unofficialMovie(env, id), source: "kinopoiskunofficial" };
+      const { value, index } = await unofficialRotate(keys, (key) => unofficialMovie(env, key, id));
+      return { movie: value, source: `kinopoiskunofficial#${index + 1}` };
     } catch {
       throw primaryError;
     }
@@ -132,26 +168,23 @@ async function poiskkinoMovie(env, id) {
   return normalizeMovie(await poiskkinoFetch(env, apiUrl));
 }
 
-async function unofficialSearch(env, query, limit) {
+async function unofficialSearch(env, key, query, limit) {
   const apiUrl = new URL("/api/v2.1/films/search-by-keyword", unofficialBase(env));
   apiUrl.searchParams.set("keyword", query);
   apiUrl.searchParams.set("page", "1");
-  const raw = await unofficialFetch(env, apiUrl);
+  const raw = await unofficialFetch(key, apiUrl);
   const films = Array.isArray(raw.films) ? raw.films : [];
   return films.slice(0, limit).map(normalizeUnofficialSearch);
 }
 
-async function unofficialMovie(env, id) {
+async function unofficialMovie(env, key, id) {
   const apiUrl = new URL(`/api/v2.2/films/${id}`, unofficialBase(env));
-  return normalizeUnofficialFilm(await unofficialFetch(env, apiUrl));
+  return normalizeUnofficialFilm(await unofficialFetch(key, apiUrl));
 }
 
-async function unofficialFetch(env, apiUrl) {
-  if (!env.KINOPOISK_UNOFFICIAL_TOKEN) {
-    throw new Error("KINOPOISK_UNOFFICIAL_TOKEN is not configured");
-  }
+async function unofficialFetch(key, apiUrl) {
   const response = await fetch(apiUrl, {
-    headers: { "Accept": "application/json", "X-API-KEY": env.KINOPOISK_UNOFFICIAL_TOKEN },
+    headers: { "Accept": "application/json", "X-API-KEY": key },
   });
   const text = await response.text();
   if (!response.ok) {

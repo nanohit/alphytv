@@ -21,7 +21,10 @@ import worker, { pickAllowOrigin } from "../worker/src/index.js";
 const env = {
   POISKKINO_TOKEN: Deno.env.get("POISKKINO_TOKEN"),
   POISKKINO_BASE_URL: Deno.env.get("POISKKINO_BASE_URL") || "https://api.poiskkino.dev",
-  // Fallback metadata source when the primary daily quota (200/day) is exhausted.
+  // Fallback metadata when the primary daily quota (200/day) is exhausted. A POOL
+  // of kinopoiskapiunofficial keys (comma-separated in KINOPOISK_UNOFFICIAL_TOKENS,
+  // ~500/day each) rotated by exhaustion; the singular var is still honoured.
+  KINOPOISK_UNOFFICIAL_TOKENS: Deno.env.get("KINOPOISK_UNOFFICIAL_TOKENS"),
   KINOPOISK_UNOFFICIAL_TOKEN: Deno.env.get("KINOPOISK_UNOFFICIAL_TOKEN"),
   KINOPOISK_UNOFFICIAL_BASE_URL: Deno.env.get("KINOPOISK_UNOFFICIAL_BASE_URL") || "https://kinopoiskapiunofficial.tech",
   ALLOWED_ORIGIN:
