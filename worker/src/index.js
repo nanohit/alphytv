@@ -208,6 +208,18 @@ async function handleZonaResolve(request, env, url) {
   }
 
   const resolved = await enqueueZonaResolve(() => resolveZonaInPureJs(kpId));
+  if (!resolved.embedUrl) {
+    // mzona occasionally returns an empty body when its shared egress is
+    // rate-limited. That is a transient upstream failure, not a successful
+    // "title has no Zenith" result. Returning ok:false lets clients retry and,
+    // crucially, prevents an empty mapping from looking cacheable.
+    return json(request, env, {
+      ok: false,
+      error: "zona_upstream_empty",
+      message: "Zona временно не вернула Zenith embed",
+      ...resolved,
+    }, 503);
+  }
   return json(request, env, { ok: true, ...resolved });
 }
 

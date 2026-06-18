@@ -19,7 +19,7 @@
     search: 6 * 3600e3,
     ndsearch: 6 * 3600e3,
     ndpage: 24 * 3600e3,
-    zona: 24 * 3600e3,
+    zona: 30 * 24 * 3600e3,
     meta: 7 * 24 * 3600e3,
   };
 
@@ -230,7 +230,7 @@
   // =====================================================================
   async function resolverJson(path, { retries = 2, timeoutMs = 15000 } = {}) {
     if (!state.resolverBaseUrl) throw new Error("Resolver URL не настроен");
-    const url = `${state.resolverBaseUrl}${path}`;
+    const url = /^https?:\/\//i.test(path) ? path : `${state.resolverBaseUrl}${path}`;
     let lastError;
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       const controller = new AbortController();
@@ -241,13 +241,20 @@
         let data;
         try { data = JSON.parse(text); } catch { data = { ok: false, raw: text.slice(0, 500) }; }
         if (!response.ok || data.ok === false) {
-          throw new Error(data.message || data.error || `Resolver ${response.status}`);
+          const resolverError = new Error(data.message || data.error || `Resolver ${response.status}`);
+          resolverError.code = data.error || "";
+          resolverError.status = response.status;
+          throw resolverError;
         }
         return data;
       } catch (error) {
         lastError = error;
         const aborted = error?.name === "AbortError";
-        const transient = aborted || /NetworkError|Failed to fetch|load failed|terminated|network/i.test(String(error?.message || ""));
+        const transient =
+          aborted ||
+          Number(error?.status) >= 500 ||
+          error?.code === "zona_upstream_empty" ||
+          /NetworkError|Failed to fetch|load failed|terminated|network/i.test(String(error?.message || ""));
         if (!transient || attempt === retries) break;
         await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)));
       } finally {
@@ -290,11 +297,24 @@
   async function resolveZona(kpId) {
     const cached = cacheGet("zona", kpId);
     if (cached && cached.embedUrl) return cached;
-    const data = await resolverJson(`/resolve-zona?kpId=${encodeURIComponent(kpId)}`);
-    if (!data.embedUrl) throw new Error("Zona resolver не вернул Zenith embed");
-    const value = { zenithId: data.zenithId, embedUrl: data.embedUrl };
-    cacheSet("zona", kpId, value, TTL.zona);
-    return value;
+    const path = `/resolve-zona?kpId=${encodeURIComponent(kpId)}`;
+    const candidates = isLocal
+      ? [path]
+      : [new URL(`/api${path}`, location.origin).href, path];
+    let lastError;
+    for (const candidate of candidates) {
+      try {
+        const data = await resolverJson(candidate, { retries: 0, timeoutMs: 18000 });
+        if (!data.embedUrl) throw new Error("Zenith временно недоступен");
+        const value = { zenithId: data.zenithId, embedUrl: data.embedUrl };
+        cacheSet("zona", kpId, value, TTL.zona);
+        return value;
+      } catch (error) {
+        lastError = error;
+        log("zona-resolver-fallback", { candidate, message: error.message });
+      }
+    }
+    throw lastError || new Error("Zenith временно недоступен");
   }
 
   async function resolveOpravar(playerUrl, pageUrl) {
@@ -632,21 +652,30 @@
     }
     recordOpen(target);
 
-    const resolved = await resolveOpravar(playerUrl, pageUrl);
-    if (isStale(token)) return;
-    const context = {
-      playerUrl,
-      pageUrl,
-      base: resolved.base || "",
-      playlist: resolved.playlist || [],
-      selection: chooseOpravarSelection(resolved.playlist || [], savedOpravarSelection(keyFor(target)) || resolved.current),
-    };
-    const currentMatches = sameOpravarSelection(context.selection, resolved.current);
-    const media = currentMatches
-      ? resolved
-      : await resolveOpravarVideo(playerUrl, context.selection.videoId, context.base);
-    if (isStale(token)) return;
-    await playOpravarMedia(media, context, target, token, currentMatches ? resumePosition(keyFor(target)) : 0);
+    try {
+      const resolved = await resolveOpravar(playerUrl, pageUrl);
+      if (isStale(token)) return;
+      const context = {
+        playerUrl,
+        pageUrl,
+        base: resolved.base || "",
+        playlist: resolved.playlist || [],
+        selection: chooseOpravarSelection(resolved.playlist || [], savedOpravarSelection(keyFor(target)) || resolved.current),
+      };
+      const currentMatches = sameOpravarSelection(context.selection, resolved.current);
+      const media = currentMatches
+        ? resolved
+        : await resolveOpravarVideo(playerUrl, context.selection.videoId, context.base);
+      if (isStale(token)) return;
+      await playOpravarMedia(media, context, target, token, currentMatches ? resumePosition(keyFor(target)) : 0);
+    } catch (error) {
+      if (isStale(token)) return;
+      if (meta?.title) {
+        log("opravar-fallback", { message: error.message, title: meta.title });
+        return playZonaFallback(meta.title, meta.year, token);
+      }
+      throw new Error("Плеер недоступен, а для резервного поиска не найдено название");
+    }
   }
 
   async function playOpravarMedia(media, context, target, token, resume = 0) {
@@ -678,7 +707,12 @@
       if (isStale(token) || keyFor(state.currentTarget) !== keyFor(target)) return;
       await playOpravarMedia(media, { ...context, selection }, target, token, 0);
     } catch (error) {
-      if (!isStale(token)) showError(error);
+      if (isStale(token)) return;
+      if (target.title) {
+        log("opravar-switch-fallback", { message: error.message, title: target.title });
+        return playZonaFallback(target.title, target.year, token);
+      }
+      showError(new Error("Не удалось переключить серию"));
     }
   }
 
@@ -729,11 +763,15 @@
     }
 
     // Allo-only or no player → Zona fallback via title -> kpId, then upgrade URL.
-    const title = cleanMovieTitle(parsed.title || "");
-    if (!title) throw new Error("Newdeaf не дал ни Ortified/Opravar, ни названия для Zona");
-    const results = await searchPoiskkino(title, parsed.year);
+    return playZonaFallback(parsed.title, parsed.year, token);
+  }
+
+  async function playZonaFallback(rawTitle, year, token) {
+    const title = cleanMovieTitle(rawTitle || "");
+    if (!title) throw new Error("Не найдено название для резервного поиска");
+    const results = await searchPoiskkino(title, year);
     if (isStale(token)) return;
-    const movie = chooseMovie(results, title, parsed.year);
+    const movie = chooseMovie(results, title, year);
     if (!movie) throw new Error("PoiskKino не вернул kpId для Zona fallback");
     cacheSet("meta", movie.kpId, movie, TTL.meta);
     replaceHash(`/watch/kp/${encodeURIComponent(movie.kpId)}`);
