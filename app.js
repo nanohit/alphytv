@@ -303,8 +303,9 @@
     return resolverJson(`/resolve-opravar?${query}`, { retries: 1, timeoutMs: 20000 });
   }
 
-  async function resolveOpravarVideo(playerUrl, videoId) {
+  async function resolveOpravarVideo(playerUrl, videoId, base) {
     const query = new URLSearchParams({ url: playerUrl, videoId: String(videoId) });
+    if (base) query.set("base", base); // the live (rotating) host the initial resolve found
     return resolverJson(`/resolve-opravar?${query}`, { retries: 1, timeoutMs: 20000 });
   }
 
@@ -636,13 +637,14 @@
     const context = {
       playerUrl,
       pageUrl,
+      base: resolved.base || "",
       playlist: resolved.playlist || [],
       selection: chooseOpravarSelection(resolved.playlist || [], savedOpravarSelection(keyFor(target)) || resolved.current),
     };
     const currentMatches = sameOpravarSelection(context.selection, resolved.current);
     const media = currentMatches
       ? resolved
-      : await resolveOpravarVideo(playerUrl, context.selection.videoId);
+      : await resolveOpravarVideo(playerUrl, context.selection.videoId, context.base);
     if (isStale(token)) return;
     await playOpravarMedia(media, context, target, token, currentMatches ? resumePosition(keyFor(target)) : 0);
   }
@@ -672,7 +674,7 @@
     await teardownPlayer();
     showPlayerLoading();
     try {
-      const media = await resolveOpravarVideo(context.playerUrl, selection.videoId);
+      const media = await resolveOpravarVideo(context.playerUrl, selection.videoId, context.base);
       if (isStale(token) || keyFor(state.currentTarget) !== keyFor(target)) return;
       await playOpravarMedia(media, { ...context, selection }, target, token, 0);
     } catch (error) {
