@@ -256,7 +256,7 @@ async function handleOpravarResolve(request, env, url) {
     if (!/^\d+$/.test(videoId)) {
       return json(request, env, { ok: false, error: "invalid_video_id" }, 400);
     }
-    const resolved = await fetchOpravarVideo(videoId, playerUrl);
+    const resolved = await fetchOpravarVideo(videoId, playerUrl, url.searchParams.get("base") || "");
     return json(request, env, { ok: true, provider: "opravar", ...resolved });
   }
 
@@ -273,22 +273,59 @@ async function handleOpravarResolve(request, env, url) {
     throw new Error("Opravar player document is unexpectedly large");
   }
 
-  const parsed = parseOpravarPage(html);
+  // gencit.info/bil/N 301-redirects to the current (rotating) player host, e.g.
+  // ceramet.net today. Everything downstream is derived from that resolved host
+  // and the spare host the page itself declares — never hardcoded — because the
+  // provider rotates its domains (ddos-guard fronted) like Newdeaf's mirrors.
+  const base = safePublicOrigin(new URL(response.url).origin);
+  const parsed = parseOpravarPage(html, base);
   if (!parsed.source || !parsed.playlist.length) {
-    throw new Error("Opravar player HTML did not expose a usable stream/playlist");
+    // Diagnostic (no secrets): tells apart "ddos-guard served Deno a stub"
+    // (tiny html / no inputData) from "host rotated past our rewrite" (real
+    // html but source unresolved).
+    const playerTag = html.match(/<div\b[^>]*\bid=["']videoplayer\d+["'][^>]*>/i)?.[0] || "";
+    return json(request, env, {
+      ok: false,
+      error: "opravar_parse_failed",
+      diag: {
+        status: response.status,
+        finalUrl: response.url,
+        htmlLength: html.length,
+        hasInputData: /id=["']inputData["']/i.test(html),
+        hasConfig: /data-config\s*=/i.test(html),
+        spareSeen: htmlAttr(playerTag, "data-spare") || htmlAttr(playerTag, "data-domainspare") || null,
+        sourceResolved: !!parsed.source,
+        playlistCount: parsed.playlist.length,
+        titleSnippet: (html.match(/<title>([^<]*)<\/title>/i)?.[1] || "").slice(0, 100),
+      },
+    }, 502);
   }
   return json(request, env, {
     ok: true,
     provider: "opravar",
     requestedUrl: playerUrl,
     resolvedUrl: response.url,
+    base,
     pageUrl,
     ...parsed,
   });
 }
 
-async function fetchOpravarVideo(videoId, playerUrl) {
-  const apiUrl = `https://opravar.online/player/responce.php?video_id=${encodeURIComponent(videoId)}`;
+// gencit.info/bil/N -> follow the 301 to learn the current player host so the
+// episode/voice API (responce.php) is called on the live host, not a stale one.
+async function resolveOpravarBaseOrigin(playerUrl) {
+  const response = await fetch(playerUrl, {
+    redirect: "follow",
+    headers: opravarHeaders("https://newdeaf.co/"),
+  });
+  await response.text().catch(() => {});
+  return safePublicOrigin(new URL(response.url).origin);
+}
+
+async function fetchOpravarVideo(videoId, playerUrl, baseParam) {
+  const base = safePublicOrigin(baseParam) || (await resolveOpravarBaseOrigin(playerUrl));
+  if (!base) throw new Error("Opravar: could not determine current player host");
+  const apiUrl = `${base}/player/responce.php?video_id=${encodeURIComponent(videoId)}`;
   const response = await fetch(apiUrl, {
     headers: opravarHeaders(playerUrl),
   });
@@ -310,19 +347,19 @@ async function fetchOpravarVideo(videoId, playerUrl) {
   return {
     videoId: Number(videoId),
     source,
-    spare: safeSpareOrigin(data.spare),
+    spare: safePublicOrigin(data.spare),
     expiresAt: mediaExpiry(source),
     subtitles: normalizeOpravarSubtitles(data.subtitles),
     thumbnail: data.thumbnail?.src ? rewriteOpravarMediaHost(data.thumbnail.src, data.spare) : null,
   };
 }
 
-function parseOpravarPage(html) {
+function parseOpravarPage(html, base) {
   const playerTag = String(html || "").match(/<div\b[^>]*\bid=["']videoplayer\d+["'][^>]*>/i)?.[0] || "";
   const inputMatch = String(html || "").match(/<div\b[^>]*\bid=["']inputData["'][^>]*>([\s\S]*?)<\/div>/i);
   const inputTag = inputMatch?.[0]?.slice(0, inputMatch[0].indexOf(">") + 1) || "";
   const config = parseJson(htmlAttr(playerTag, "data-config")) || {};
-  const spare = safeSpareOrigin(htmlAttr(playerTag, "data-spare") || htmlAttr(playerTag, "data-domainspare"));
+  const spare = safePublicOrigin(htmlAttr(playerTag, "data-spare") || htmlAttr(playerTag, "data-domainspare"));
   const source = rewriteOpravarMediaHost(config.hls || config.src || "", spare);
   const playlistData = parseJson(decodeHtml(inputMatch?.[1] || "")) || {};
   const playlist = normalizeOpravarPlaylist(playlistData);
@@ -334,6 +371,7 @@ function parseOpravarPage(html) {
   current.videoId = findOpravarVideoId(playlist, current);
 
   return {
+    base: safePublicOrigin(base) || null,
     source,
     spare,
     expiresAt: mediaExpiry(source),
@@ -396,7 +434,9 @@ function normalizeOpravarSubtitles(raw) {
     if (!value || !labels[key]) return [];
     try {
       const parsed = new URL(String(value));
-      if (parsed.protocol !== "https:" || parsed.hostname !== "opravar.online" || !/\.vtt$/i.test(parsed.pathname)) return [];
+      // VTT is served CORS-open (ACAO:*) from the rotating player host, so accept
+      // any public https .vtt rather than a hardcoded host.
+      if (parsed.protocol !== "https:" || !isPublicHost(parsed.hostname) || !/\.vtt$/i.test(parsed.pathname)) return [];
       return [{ language: labels[key][0], label: labels[key][1], url: parsed.href }];
     } catch {
       return [];
@@ -404,28 +444,43 @@ function normalizeOpravarSubtitles(raw) {
   });
 }
 
+// Move the signed media path from the primary host (e.g. cdn1.ceramet.net) to
+// the reserve host the provider itself declares (data-spare / API `spare`, e.g.
+// a1.flintraxvk-companet.pro or f1.werberk.pro). The reserve regenerates nested
+// playlist/segment URLs on its host with wildcard CORS, so Shaka on our origin
+// can read it. Hosts rotate, so nothing here is hardcoded — we only require both
+// sides to be public https hosts.
 function rewriteOpravarMediaHost(value, spareValue) {
   try {
     const media = new URL(String(value || ""));
-    const spare = new URL(String(spareValue || ""));
-    if (media.protocol !== "https:" || !/^(?:cdn|s)\d+\.opravar\.online$/i.test(media.hostname)) return null;
-    if (spare.protocol !== "https:" || !/^f\d+\.werberk\.pro$/i.test(spare.hostname)) return null;
-    media.protocol = spare.protocol;
-    media.host = spare.host;
+    const spareOrigin = safePublicOrigin(spareValue);
+    if (media.protocol !== "https:" || !isPublicHost(media.hostname) || !spareOrigin) return null;
+    media.host = new URL(spareOrigin).host;
     return media.href;
   } catch {
     return null;
   }
 }
 
-function safeSpareOrigin(value) {
+// A public https origin: rejects localhost, bare IPs, and host:port. Used for the
+// declared spare/reserve host and the redirect-resolved player base.
+function safePublicOrigin(value) {
   try {
     const parsed = new URL(String(value || ""));
-    if (parsed.protocol !== "https:" || !/^f\d+\.werberk\.pro$/i.test(parsed.hostname)) return null;
+    if (parsed.protocol !== "https:" || !isPublicHost(parsed.hostname)) return null;
     return parsed.origin;
   } catch {
     return null;
   }
+}
+
+function isPublicHost(host) {
+  const h = String(host || "").toLowerCase();
+  if (!h || h === "localhost" || h.endsWith(".localhost")) return false;
+  if (h.includes(":")) return false; // no IPv6 / host:port
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) return false; // no bare IPv4
+  if (!h.includes(".")) return false; // must be a dotted domain
+  return /^[a-z0-9.-]+$/.test(h);
 }
 
 function safeOpravarUrl(value) {
