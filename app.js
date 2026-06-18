@@ -67,6 +67,7 @@
     audioNames: [],
     sources: {},
     trackInterval: null,
+    playbackRate: 1,
   };
 
   // Monotonic token: every route bumps it; any async chain whose token is no
@@ -176,6 +177,17 @@
     if (!e || !e.duration) return 0;
     if (e.progress >= 0.95) return 0;
     return e.position > 5 ? e.position : 0;
+  }
+  function savedAudioLang(key) {
+    return loadList(STORE_HISTORY).find((h) => h.key === key)?.audioLang || null;
+  }
+  function persistAudio(lang) {
+    const t = state.currentTarget;
+    if (!t || !lang) return;
+    recordHistory({
+      key: keyFor(t), kind: t.kind, target: cleanTarget(t),
+      title: t.title || "", poster: t.poster || "", year: t.year || "", audioLang: lang,
+    });
   }
 
   function isBookmarked(key) {
@@ -535,6 +547,9 @@
     setView("watch");
     el.metaPanel.classList.add("hidden");
     el.trackPanel.classList.add("hidden");
+    // Show the loading state immediately so the previous title's player is never
+    // left on screen while the new one resolves (or fails to resolve).
+    showPlayerLoading();
     if (r.kind === "kp") return playKp(r.raw, token);
     if (r.kind === "zen") return playZen(r.raw, token);
     if (r.kind === "ort") return playOrt(r.raw, token, null);
@@ -553,7 +568,7 @@
 
     const resolved = await resolveZona(kpId);
     if (isStale(token)) return;
-    await playZenithEmbed(resolved.embedUrl, target, token, { histKey: `kp:${kpId}`, resume: resumePosition(`kp:${kpId}`) });
+    await playZenithEmbed(resolved.embedUrl, target, token, { histKey: `kp:${kpId}`, resume: resumePosition(`kp:${kpId}`), audioLang: savedAudioLang(`kp:${kpId}`) });
   }
 
   async function playZen(zenithId, token) {
@@ -563,7 +578,7 @@
     el.metaPanel.classList.add("hidden");
     recordOpen(target);
     const embedUrl = `https://api.zenithjs.ws/embed/movie/${encodeURIComponent(zenithId)}`;
-    await playZenithEmbed(embedUrl, target, token, { histKey: `zen:${zenithId}`, resume: resumePosition(`zen:${zenithId}`) });
+    await playZenithEmbed(embedUrl, target, token, { histKey: `zen:${zenithId}`, resume: resumePosition(`zen:${zenithId}`), audioLang: savedAudioLang(`zen:${zenithId}`) });
   }
 
   async function playOrt(embedUrl, token, ndMeta) {
@@ -682,7 +697,7 @@
     const bestUrl = parsed.sources.dash || parsed.sources.hls || parsed.sources.dasha;
     const kind = parsed.sources.dash ? "dash" : parsed.sources.hls ? "hls" : "dasha";
     if (!bestUrl) throw new Error("Zenith embed не отдал dash/hls");
-    await playShaka(bestUrl, kind, token, opts.resume || 0);
+    await playShaka(bestUrl, kind, token, { resume: opts.resume || 0, audioLang: opts.audioLang });
     if (isStale(token)) return;
     if (opts.histKey) startTracking(opts.histKey, target);
   }
@@ -695,14 +710,15 @@
     return { sources: data.sources || {}, meta: data.meta || {} };
   }
 
-  async function playShaka(url, kind, token, resume) {
+  async function playShaka(url, kind, token, opts = {}) {
     if (isStale(token)) return;
-    await teardownPlayer(true);
+    await teardownPlayer();
     const video = document.createElement("video");
     video.controls = true;
     video.playsInline = true;
     video.autoplay = true;
     video.crossOrigin = "anonymous";
+    video.playbackRate = state.playbackRate;
     if (isStale(token)) return;
     el.playerHost.replaceChildren(video);
     state.videoEl = video;
@@ -727,7 +743,10 @@
       if (state.player === player) { state.player = null; state.videoEl = null; }
       return;
     }
-    if (resume > 5) { try { video.currentTime = resume; } catch { /* ignore */ } }
+    // Restore saved озвучка (audio language) and resume position from history.
+    if (opts.audioLang) { try { player.selectAudioLanguage(opts.audioLang); } catch { /* ignore */ } }
+    if (opts.resume > 5) { try { video.currentTime = opts.resume; } catch { /* ignore */ } }
+    video.playbackRate = state.playbackRate;
     renderTracks();
     try { await video.play(); } catch { /* user gesture may be required */ }
   }
@@ -740,7 +759,8 @@
       const dur = v.duration;
       const cur = v.currentTime;
       if (!dur || !isFinite(dur) || dur <= 0) return;
-      recordHistory({
+      const audioLang = state.player?.getVariantTracks?.().find((t) => t.active)?.language;
+      const entry = {
         key: histKey,
         kind: target.kind,
         target: cleanTarget(target),
@@ -750,7 +770,9 @@
         position: cur,
         duration: dur,
         progress: cur / dur,
-      });
+      };
+      if (audioLang) entry.audioLang = audioLang;
+      recordHistory(entry);
     }, 5000);
   }
   function stopTracking() {
@@ -780,17 +802,20 @@
     });
   }
 
-  async function teardownPlayer(keepView) {
+  async function teardownPlayer() {
     stopTracking();
     if (state.player) {
       await state.player.destroy().catch(() => {});
       state.player = null;
     }
     state.videoEl = null;
-    if (!keepView) {
-      el.trackPanel.replaceChildren();
-      el.trackPanel.classList.add("hidden");
-    }
+    // Remove the old <iframe>/<video> from the DOM: stops its audio instantly and
+    // guarantees a new resolve never leaves stale content on screen — even when the
+    // new one errors before mounting (the "плеер залочен на старом контенте" bug).
+    el.playerHost.replaceChildren();
+    if (state.playerPlaceholder) el.playerHost.innerHTML = state.playerPlaceholder;
+    el.trackPanel.replaceChildren();
+    el.trackPanel.classList.add("hidden");
   }
 
   function showPlayerLoading() {
@@ -812,6 +837,7 @@
       if (track.active) btn.className = "active";
       btn.addEventListener("click", () => {
         player.selectAudioLanguage(track.language, (track.roles || [])[0]);
+        persistAudio(track.language);
         setTimeout(renderTracks, 250);
       });
       return btn;
@@ -848,6 +874,19 @@
         player.selectTextTrack(track);
         player.setTextTrackVisibility(true);
         setTimeout(renderTracks, 250);
+      });
+      return btn;
+    });
+
+    addTrackGroup("Скорость", [0.5, 1, 1.25, 1.5, 1.75, 2].map((s) => ({ speed: s })), (item) => {
+      const btn = document.createElement("button");
+      btn.textContent = `${item.speed}×`;
+      if (item.speed === state.playbackRate) btn.className = "active";
+      btn.addEventListener("click", () => {
+        state.playbackRate = item.speed;
+        try { localStorage.setItem("alphy.playbackRate", String(item.speed)); } catch { /* ignore */ }
+        if (state.videoEl) state.videoEl.playbackRate = item.speed;
+        setTimeout(renderTracks, 50);
       });
       return btn;
     });
@@ -1297,6 +1336,8 @@ addEventListener('message', async (event) => {
   // =====================================================================
   function boot() {
     state.playerPlaceholder = el.playerHost.innerHTML;
+    const savedRate = parseFloat(localStorage.getItem("alphy.playbackRate") || "1");
+    if ([0.5, 1, 1.25, 1.5, 1.75, 2].includes(savedRate)) state.playbackRate = savedRate;
 
     const resolverFromUrl = params.get("resolver");
     if (resolverFromUrl) localStorage.setItem(STORE_RESOLVER, cleanBaseUrl(resolverFromUrl));
