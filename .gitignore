@@ -3,3 +3,5 @@ node_modules/
 .DS_Store
 .dev.vars
 worker/node_modules/
+worker/.wrangler/
+worker/package-lock.json

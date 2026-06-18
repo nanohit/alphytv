@@ -33,6 +33,10 @@ export default {
         return await handleZenith(request, env, url);
       }
 
+      if (url.pathname === "/resolve-opravar") {
+        return await handleOpravarResolve(request, env, url);
+      }
+
       return json(request, env, { ok: false, error: "not_found" }, 404);
     } catch (error) {
       return json(request, env, {
@@ -239,6 +243,262 @@ async function handleZenith(request, env, url) {
     meta: parsed.meta,
     hasSources: !!(parsed.sources.dash || parsed.sources.dasha || parsed.sources.hls),
   });
+}
+
+async function handleOpravarResolve(request, env, url) {
+  const videoId = (url.searchParams.get("videoId") || "").trim();
+  const playerUrl = safeOpravarUrl(url.searchParams.get("url") || "");
+  if (!playerUrl) {
+    return json(request, env, { ok: false, error: "missing_or_invalid_opravar_url" }, 400);
+  }
+
+  if (videoId) {
+    if (!/^\d+$/.test(videoId)) {
+      return json(request, env, { ok: false, error: "invalid_video_id" }, 400);
+    }
+    const resolved = await fetchOpravarVideo(videoId, playerUrl);
+    return json(request, env, { ok: true, provider: "opravar", ...resolved });
+  }
+
+  const pageUrl = safeNewdeafUrl(url.searchParams.get("pageUrl") || "");
+  const response = await fetch(playerUrl, {
+    redirect: "follow",
+    headers: opravarHeaders(pageUrl || "https://newdeaf.co/"),
+  });
+  const html = await response.text();
+  if (!response.ok) {
+    throw new Error(`Opravar ${response.status}: ${html.slice(0, 200)}`);
+  }
+  if (html.length > 2_000_000) {
+    throw new Error("Opravar player document is unexpectedly large");
+  }
+
+  const parsed = parseOpravarPage(html);
+  if (!parsed.source || !parsed.playlist.length) {
+    throw new Error("Opravar player HTML did not expose a usable stream/playlist");
+  }
+  return json(request, env, {
+    ok: true,
+    provider: "opravar",
+    requestedUrl: playerUrl,
+    resolvedUrl: response.url,
+    pageUrl,
+    ...parsed,
+  });
+}
+
+async function fetchOpravarVideo(videoId, playerUrl) {
+  const apiUrl = `https://opravar.online/player/responce.php?video_id=${encodeURIComponent(videoId)}`;
+  const response = await fetch(apiUrl, {
+    headers: opravarHeaders(playerUrl),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`Opravar video ${response.status}: ${text.slice(0, 200)}`);
+  }
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error("Opravar video API returned invalid JSON");
+  }
+  const originalSource = data.src || data.hls || "";
+  const source = rewriteOpravarMediaHost(originalSource, data.spare);
+  if (!source) throw new Error("Opravar video API did not expose a CORS-open spare stream");
+
+  return {
+    videoId: Number(videoId),
+    source,
+    spare: safeSpareOrigin(data.spare),
+    expiresAt: mediaExpiry(source),
+    subtitles: normalizeOpravarSubtitles(data.subtitles),
+    thumbnail: data.thumbnail?.src ? rewriteOpravarMediaHost(data.thumbnail.src, data.spare) : null,
+  };
+}
+
+function parseOpravarPage(html) {
+  const playerTag = String(html || "").match(/<div\b[^>]*\bid=["']videoplayer\d+["'][^>]*>/i)?.[0] || "";
+  const inputMatch = String(html || "").match(/<div\b[^>]*\bid=["']inputData["'][^>]*>([\s\S]*?)<\/div>/i);
+  const inputTag = inputMatch?.[0]?.slice(0, inputMatch[0].indexOf(">") + 1) || "";
+  const config = parseJson(htmlAttr(playerTag, "data-config")) || {};
+  const spare = safeSpareOrigin(htmlAttr(playerTag, "data-spare") || htmlAttr(playerTag, "data-domainspare"));
+  const source = rewriteOpravarMediaHost(config.hls || config.src || "", spare);
+  const playlistData = parseJson(decodeHtml(inputMatch?.[1] || "")) || {};
+  const playlist = normalizeOpravarPlaylist(playlistData);
+  const current = {
+    season: numberOrNull(htmlAttr(inputTag, "data-season")),
+    episode: numberOrNull(htmlAttr(inputTag, "data-episode")),
+    voiceId: numberOrNull(String(htmlAttr(inputTag, "data-voice") || "").split("#")[0]),
+  };
+  current.videoId = findOpravarVideoId(playlist, current);
+
+  return {
+    source,
+    spare,
+    expiresAt: mediaExpiry(source),
+    subtitles: normalizeOpravarSubtitles({
+      original: htmlAttr(playerTag, "data-original_subtitle"),
+      ru: htmlAttr(playerTag, "data-ru_subtitle"),
+      en: htmlAttr(playerTag, "data-en_subtitle"),
+      ua: htmlAttr(playerTag, "data-ua_subtitle"),
+    }),
+    current,
+    playlist,
+  };
+}
+
+function normalizeOpravarPlaylist(raw) {
+  const seasons = [];
+  for (const [seasonKey, rawEpisodes] of Object.entries(raw || {})) {
+    const season = Number(seasonKey);
+    if (!Number.isFinite(season)) continue;
+    const episodeEntries = Array.isArray(rawEpisodes)
+      ? rawEpisodes.map((voices, index) => [String(index), voices])
+      : Object.entries(rawEpisodes || {});
+    const episodes = [];
+    for (const [episodeKey, rawVoices] of episodeEntries) {
+      if (!Array.isArray(rawVoices)) continue;
+      const voices = rawVoices.map((voice) => ({
+        videoId: numberOrNull(voice?.video_id),
+        voiceId: numberOrNull(voice?.voice_id),
+        name: String(voice?.voice_name || "Озвучка"),
+        duration: numberOrNull(voice?.duration),
+      })).filter((voice) => voice.videoId != null && voice.voiceId != null);
+      if (!voices.length) continue;
+      const episode = numberOrNull(voices[0]?.episode ?? rawVoices[0]?.episode ?? episodeKey);
+      if (episode == null) continue;
+      episodes.push({ episode, voices });
+    }
+    episodes.sort((a, b) => a.episode - b.episode);
+    if (episodes.length) seasons.push({ season, episodes });
+  }
+  seasons.sort((a, b) => a.season - b.season);
+  return seasons;
+}
+
+function findOpravarVideoId(playlist, current) {
+  const season = playlist.find((item) => item.season === current.season);
+  const episode = season?.episodes.find((item) => item.episode === current.episode);
+  return episode?.voices.find((item) => item.voiceId === current.voiceId)?.videoId
+    ?? episode?.voices[0]?.videoId
+    ?? null;
+}
+
+function normalizeOpravarSubtitles(raw) {
+  const labels = {
+    original: ["original", "Original"],
+    ru: ["ru", "Русские"],
+    en: ["en", "English"],
+    ua: ["uk", "Українські"],
+  };
+  return Object.entries(raw || {}).flatMap(([key, value]) => {
+    if (!value || !labels[key]) return [];
+    try {
+      const parsed = new URL(String(value));
+      if (parsed.protocol !== "https:" || parsed.hostname !== "opravar.online" || !/\.vtt$/i.test(parsed.pathname)) return [];
+      return [{ language: labels[key][0], label: labels[key][1], url: parsed.href }];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function rewriteOpravarMediaHost(value, spareValue) {
+  try {
+    const media = new URL(String(value || ""));
+    const spare = new URL(String(spareValue || ""));
+    if (media.protocol !== "https:" || !/^(?:cdn|s)\d+\.opravar\.online$/i.test(media.hostname)) return null;
+    if (spare.protocol !== "https:" || !/^f\d+\.werberk\.pro$/i.test(spare.hostname)) return null;
+    media.protocol = spare.protocol;
+    media.host = spare.host;
+    return media.href;
+  } catch {
+    return null;
+  }
+}
+
+function safeSpareOrigin(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    if (parsed.protocol !== "https:" || !/^f\d+\.werberk\.pro$/i.test(parsed.hostname)) return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function safeOpravarUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    if (parsed.protocol !== "https:" || !["gencit.info", "opravar.online"].includes(parsed.hostname)) return null;
+    if (!/^\/bil\/\d+\/?$/i.test(parsed.pathname)) return null;
+    parsed.username = "";
+    parsed.password = "";
+    parsed.hash = "";
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
+function safeNewdeafUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    if (parsed.protocol !== "https:" || !/(^|\.)newdeaf\.co$/i.test(parsed.hostname)) return null;
+    parsed.username = "";
+    parsed.password = "";
+    parsed.hash = "";
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
+function opravarHeaders(referer) {
+  return {
+    "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+    "Referer": referer,
+    "User-Agent": zonaUserAgent(),
+  };
+}
+
+function htmlAttr(tag, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = String(tag || "").match(new RegExp(`\\b${escaped}\\s*=\\s*([\"'])([\\s\\S]*?)\\1`, "i"));
+  return decodeHtml(match?.[2] || "");
+}
+
+function decodeHtml(value) {
+  return String(value || "")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&");
+}
+
+function parseJson(value) {
+  try {
+    return JSON.parse(String(value || "").trim());
+  } catch {
+    return null;
+  }
+}
+
+function numberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function mediaExpiry(value) {
+  try {
+    const parts = new URL(String(value || "")).pathname.split("/");
+    const epoch = parts.map((part) => Number(part)).find((part) => Number.isInteger(part) && part > 1_500_000_000);
+    return epoch ? epoch * 1000 : null;
+  } catch {
+    return null;
+  }
 }
 
 async function poiskkinoFetch(env, apiUrl) {

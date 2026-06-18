@@ -3,9 +3,10 @@
 Lightweight static MVP for the current playback flow:
 
 1. Search or paste a Newdeaf page URL.
-2. Prefer Newdeaf -> Ortified when the page exposes `api.ortified.ws`.
-3. If Newdeaf exposes only `allo.cdnlbox.club`, fall back to Zona -> Zenith.
-4. Play Zenith DASH/HLS in a local Shaka player.
+2. Use Newdeaf -> Ortified Cleanroom when the page exposes `api.ortified.ws`.
+3. Use Newdeaf -> Gencit/Opravar -> Werberk HLS when that is the only player.
+4. Otherwise fall back to Zona -> Zenith.
+5. Play Opravar and Zenith streams in a local Shaka player.
 
 The Vercel app remains static. The included Cloudflare Worker only resolves
 metadata and IDs; it does not proxy video bytes.
@@ -13,8 +14,8 @@ metadata and IDs; it does not proxy video bytes.
 ## Deploy Shape
 
 - `index.html`, `styles.css`, `app.js` - Vercel static frontend.
-- `worker/` - Cloudflare Worker source for PoiskKino search and
-  `kpId -> Zenith` resolution.
+- `worker/` - resolver source for PoiskKino, `kpId -> Zenith`, and Opravar
+  control-plane resolution.
 - No legacy SOAP frontend code is included here.
 
 ## Frontend
@@ -85,6 +86,9 @@ From a Russian IP, search a title or paste a Newdeaf URL.
 
 - Ortified path: fetches provider HTML from the browser with a null-origin
   sandbox, strips the known ad config, and loads a `srcdoc` player.
+- Opravar path: resolver reads player/API metadata, changes the signed HLS host
+  to Opravar's CORS-open `f*.werberk.pro` reserve, then the browser loads HLS
+  and VTT directly in Shaka. The resolver never proxies video bytes.
 - Allo-only Newdeaf path: does not embed Allo by default; it uses the title to
   resolve PoiskKino `kpId`, then Zona/Zenith.
 - Zona path: Worker resolves `kpId -> api.zenithjs.ws/embed/movie/<id>`, then
@@ -99,3 +103,5 @@ From a Russian IP, search a title or paste a Newdeaf URL.
 - Zona currently has no usable built-in subtitles in our captures.
 - Allo remains black-box: baseline iframe can play but may force audible ads;
   cleanroom/rehost fails because Allo API calls are origin/CORS gated.
+- Opravar signed media URLs are short-lived. Episode/voice changes therefore
+  call `/resolve-opravar` again to mint a fresh URL.

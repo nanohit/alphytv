@@ -8,7 +8,8 @@ Keep the user-visible flow simple while avoiding a bandwidth backend:
 input title/Newdeaf URL
   -> Newdeaf page probe
   -> Ortified Cleanroom if available
-  -> Zona/Zenith fallback if Newdeaf only exposes Allo
+  -> Gencit/Opravar custom player if available
+  -> Zona/Zenith fallback otherwise
   -> browser-side playback
 ```
 
@@ -60,6 +61,41 @@ Findings:
 
 Therefore Allo is only treated as a signal to invoke Zona fallback.
 
+### Gencit / Opravar
+
+Newdeaf can expose a `gencit.info/bil/<id>` iframe, which redirects to
+`opravar.online`. The provider HTML includes:
+
+- the current signed HLS URL;
+- `data-spare="https://f*.werberk.pro"`;
+- Russian/English VTT URLs;
+- a full season/episode/voice playlist;
+- a `video_id` for each selectable item.
+
+The primary `cdn*.opravar.online` host is not usable from Alphy because its CORS
+header is pinned to `https://opravar.online`. Opravar's own reserve
+`f*.werberk.pro` accepts the same signed path, regenerates nested URLs on
+Werberk, and returns wildcard CORS for master playlists, variants, and TS
+segments.
+
+The resolver endpoint:
+
+```text
+GET /resolve-opravar?url=<player>&pageUrl=<newdeaf>
+GET /resolve-opravar?url=<player>&videoId=<id>
+```
+
+does control-plane work only:
+
+- validates the player URL against fixed Gencit/Opravar hosts;
+- fetches player HTML or `player/responce.php`;
+- parses navigation metadata and subtitles;
+- rewrites only the signed media hostname to the validated Werberk reserve.
+
+The browser then loads HLS and VTT directly in Shaka. Because the provider
+player bundle is never executed, its `adsConfig`/VAST preroll code is never
+initialized.
+
 ### Zona / Zenith
 
 Zona pages are not directly usable from the frontend:
@@ -96,6 +132,7 @@ The Worker is intentionally narrow:
 - PoiskKino movie lookup;
 - Zona `kpId -> Zenith` ID resolution;
 - optional Zenith metadata fallback.
+- Gencit/Opravar player/API metadata resolution and media-host substitution.
 
 It does not proxy video segments, manifests, MP4, M4S, TS, or images.
 

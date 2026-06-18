@@ -66,6 +66,7 @@
     currentTarget: null,
     audioNames: [],
     sources: {},
+    opravar: null,
     trackInterval: null,
     playbackRate: 1,
   };
@@ -122,6 +123,7 @@
     if (t.kind === "kp") return `kp:${t.kpId}`;
     if (t.kind === "zen") return `zen:${t.zenithId}`;
     if (t.kind === "ort") return `ort:${t.embedUrl}`;
+    if (t.kind === "opr") return `opr:${t.playerUrl}`;
     if (t.kind === "nd") return `nd:${t.pageUrl}`;
     return "x";
   }
@@ -129,6 +131,7 @@
     if (t.kind === "kp") return { kind: "kp", kpId: t.kpId };
     if (t.kind === "zen") return { kind: "zen", zenithId: t.zenithId };
     if (t.kind === "ort") return { kind: "ort", embedUrl: t.embedUrl };
+    if (t.kind === "opr") return { kind: "opr", playerUrl: t.playerUrl, pageUrl: t.pageUrl || "" };
     if (t.kind === "nd") return { kind: "nd", pageUrl: t.pageUrl };
     return t;
   }
@@ -136,6 +139,7 @@
     if (t.kind === "kp") return `/watch/kp/${encodeURIComponent(t.kpId)}`;
     if (t.kind === "zen") return `/watch/zen/${encodeURIComponent(t.zenithId)}`;
     if (t.kind === "ort") return `/watch/ort/${encodeURIComponent(t.embedUrl)}`;
+    if (t.kind === "opr") return `/watch/opr/${encodeURIComponent(t.playerUrl)}`;
     if (t.kind === "nd") return `/watch/nd/${encodeURIComponent(t.pageUrl)}`;
     return "/";
   }
@@ -180,6 +184,9 @@
   }
   function savedAudioLang(key) {
     return loadList(STORE_HISTORY).find((h) => h.key === key)?.audioLang || null;
+  }
+  function savedOpravarSelection(key) {
+    return loadList(STORE_HISTORY).find((h) => h.key === key)?.opravarSelection || null;
   }
   function persistAudio(lang) {
     const t = state.currentTarget;
@@ -290,6 +297,17 @@
     return value;
   }
 
+  async function resolveOpravar(playerUrl, pageUrl) {
+    const query = new URLSearchParams({ url: playerUrl });
+    if (pageUrl) query.set("pageUrl", pageUrl);
+    return resolverJson(`/resolve-opravar?${query}`, { retries: 1, timeoutMs: 20000 });
+  }
+
+  async function resolveOpravarVideo(playerUrl, videoId) {
+    const query = new URLSearchParams({ url: playerUrl, videoId: String(videoId) });
+    return resolverJson(`/resolve-opravar?${query}`, { retries: 1, timeoutMs: 20000 });
+  }
+
   async function searchNewdeaf(query) {
     const cached = cacheGet("ndsearch", query);
     if (cached) return cached;
@@ -325,7 +343,7 @@
       try {
         const html = await fetchThirdPartyText(candidate, { preferSandbox: false, label: "newdeaf-page" });
         parsed = parseNewdeafPage(html, candidate);
-        if (parsed.ortified.length || parsed.allo.length) break;
+        if (parsed.ortified.length || parsed.opravar.length || parsed.allo.length) break;
       } catch (error) {
         log("newdeaf-warn", "page candidate failed", { candidate, message: error.message });
       }
@@ -333,7 +351,7 @@
     if (!parsed) throw new Error("Не удалось загрузить страницу newdeaf");
     // Only persist a page that actually exposed a player; an empty parse may be
     // a transient mirror miss we don't want to pin for 24h.
-    if (parsed.ortified.length || parsed.allo.length) cacheSet("ndpage", pageUrl, parsed, TTL.ndpage);
+    if (parsed.ortified.length || parsed.opravar.length || parsed.allo.length) cacheSet("ndpage", pageUrl, parsed, TTL.ndpage);
     return parsed;
   }
 
@@ -553,6 +571,7 @@
     if (r.kind === "kp") return playKp(r.raw, token);
     if (r.kind === "zen") return playZen(r.raw, token);
     if (r.kind === "ort") return playOrt(r.raw, token, null);
+    if (r.kind === "opr") return playOpr(r.raw, token, null);
     if (r.kind === "nd") return playNd(r.raw, token);
     throw new Error("Неизвестный тип контента");
   }
@@ -599,6 +618,88 @@
     await playOrtifiedCleanroom(embedUrl, target, token);
   }
 
+  async function playOpr(playerUrl, token, ndMeta) {
+    const meta = ndMeta || cacheGet("oprmeta", playerUrl) || storedMeta(`opr:${playerUrl}`);
+    const pageUrl = meta?.pageUrl || "";
+    const target = { kind: "opr", playerUrl, pageUrl, title: meta?.title, poster: meta?.poster, year: meta?.year };
+    state.currentTarget = target;
+    setWatchHead(target.title || "Opravar", target);
+    if (meta && (meta.title || meta.poster || meta.description)) {
+      renderMeta({ name: meta.title, poster: meta.poster, year: meta.year, description: meta.description }, target);
+    } else {
+      el.metaPanel.classList.add("hidden");
+    }
+    recordOpen(target);
+
+    const resolved = await resolveOpravar(playerUrl, pageUrl);
+    if (isStale(token)) return;
+    const context = {
+      playerUrl,
+      pageUrl,
+      playlist: resolved.playlist || [],
+      selection: chooseOpravarSelection(resolved.playlist || [], savedOpravarSelection(keyFor(target)) || resolved.current),
+    };
+    const currentMatches = sameOpravarSelection(context.selection, resolved.current);
+    const media = currentMatches
+      ? resolved
+      : await resolveOpravarVideo(playerUrl, context.selection.videoId);
+    if (isStale(token)) return;
+    await playOpravarMedia(media, context, target, token, currentMatches ? resumePosition(keyFor(target)) : 0);
+  }
+
+  async function playOpravarMedia(media, context, target, token, resume = 0) {
+    if (!media?.source) throw new Error("Opravar не вернул HLS с открытым CORS");
+    const selection = chooseOpravarSelection(context.playlist, context.selection);
+    if (!selection?.videoId) throw new Error("Opravar не вернул выбранную серию/озвучку");
+    context.selection = selection;
+    persistOpravarSelection(target, selection, resume);
+    await playShaka(media.source, "hls", token, {
+      resume,
+      opravar: context,
+      textTracks: media.subtitles || [],
+    });
+    if (isStale(token)) return;
+    startTracking(keyFor(target), target);
+  }
+
+  async function switchOpravarSelection(nextSelection) {
+    const context = state.opravar;
+    const target = state.currentTarget;
+    if (!context || !target || target.kind !== "opr") return;
+    const selection = chooseOpravarSelection(context.playlist, nextSelection);
+    if (!selection?.videoId || sameOpravarSelection(selection, context.selection)) return;
+    const token = resolveToken;
+    await teardownPlayer();
+    showPlayerLoading();
+    try {
+      const media = await resolveOpravarVideo(context.playerUrl, selection.videoId);
+      if (isStale(token) || keyFor(state.currentTarget) !== keyFor(target)) return;
+      await playOpravarMedia(media, { ...context, selection }, target, token, 0);
+    } catch (error) {
+      if (!isStale(token)) showError(error);
+    }
+  }
+
+  function persistOpravarSelection(target, selection, position = 0) {
+    recordHistory({
+      key: keyFor(target),
+      kind: target.kind,
+      target: cleanTarget(target),
+      title: target.title || "",
+      poster: target.poster || "",
+      year: target.year || "",
+      opravarSelection: {
+        season: selection.season,
+        episode: selection.episode,
+        voiceId: selection.voiceId,
+        videoId: selection.videoId,
+      },
+      position,
+      duration: 0,
+      progress: 0,
+    });
+  }
+
   async function playNd(pageUrl, token) {
     setWatchHead("Newdeaf…", { kind: "nd", pageUrl });
     const parsed = await resolveNewdeafPage(pageUrl);
@@ -617,9 +718,17 @@
       return playOrt(embedUrl, token, ndMeta);
     }
 
+    if (parsed.opravar.length) {
+      const playerUrl = parsed.opravar[0];
+      const oprMeta = { ...ndMeta, pageUrl };
+      cacheSet("oprmeta", playerUrl, oprMeta, TTL.meta);
+      replaceHash(`/watch/opr/${encodeURIComponent(playerUrl)}`);
+      return playOpr(playerUrl, token, oprMeta);
+    }
+
     // Allo-only or no player → Zona fallback via title -> kpId, then upgrade URL.
     const title = cleanMovieTitle(parsed.title || "");
-    if (!title) throw new Error("Newdeaf не дал ни Ortified, ни названия для Zona");
+    if (!title) throw new Error("Newdeaf не дал ни Ortified/Opravar, ни названия для Zona");
     const results = await searchPoiskkino(title, parsed.year);
     if (isStale(token)) return;
     const movie = chooseMovie(results, title, parsed.year);
@@ -713,6 +822,7 @@
   async function playShaka(url, kind, token, opts = {}) {
     if (isStale(token)) return;
     await teardownPlayer();
+    state.opravar = opts.opravar || null;
     const video = document.createElement("video");
     video.controls = true;
     video.playsInline = true;
@@ -742,6 +852,13 @@
       await player.destroy().catch(() => {});
       if (state.player === player) { state.player = null; state.videoEl = null; }
       return;
+    }
+    for (const track of opts.textTracks || []) {
+      try {
+        await player.addTextTrackAsync(track.url, track.language || "und", "subtitles", "text/vtt", "", track.label || track.language || "subs");
+      } catch (error) {
+        log("subtitle-warn", track.url, error.message);
+      }
     }
     // Restore saved озвучка (audio language) and resume position from history.
     if (opts.audioLang) { try { player.selectAudioLanguage(opts.audioLang); } catch { /* ignore */ } }
@@ -809,6 +926,7 @@
       state.player = null;
     }
     state.videoEl = null;
+    state.opravar = null;
     // Remove the old <iframe>/<video> from the DOM: stops its audio instantly and
     // guarantees a new resolve never leaves stale content on screen — even when the
     // new one errors before mounting (the "плеер залочен на старом контенте" bug).
@@ -830,20 +948,24 @@
     const variants = player.getVariantTracks ? player.getVariantTracks() : [];
     const texts = player.getTextTracks ? player.getTextTracks() : [];
 
-    const audioChoices = groupBy(variants, (track) => `${track.language || ""}|${(track.roles || []).join(",")}`);
-    addTrackGroup("Озвучка", audioChoices, (track, index) => {
-      const btn = document.createElement("button");
-      btn.textContent = audioNameFor(track.language, index);
-      if (track.active) btn.className = "active";
-      btn.addEventListener("click", () => {
-        player.selectAudioLanguage(track.language, (track.roles || [])[0]);
-        persistAudio(track.language);
-        setTimeout(renderTracks, 250);
+    if (state.opravar) {
+      renderOpravarControls(state.opravar);
+    } else {
+      const audioChoices = groupBy(variants, (track) => `${track.language || ""}|${(track.roles || []).join(",")}`);
+      addTrackGroup("Озвучка", audioChoices, (track, index) => {
+        const btn = document.createElement("button");
+        btn.textContent = audioNameFor(track.language, index);
+        if (track.active) btn.className = "active";
+        btn.addEventListener("click", () => {
+          player.selectAudioLanguage(track.language, (track.roles || [])[0]);
+          persistAudio(track.language);
+          setTimeout(renderTracks, 250);
+        });
+        return btn;
       });
-      return btn;
-    });
+    }
 
-    const activeAudio = variants.find((track) => track.active)?.language || audioChoices[0]?.language || "";
+    const activeAudio = variants.find((track) => track.active)?.language || "";
     const qualityChoices = groupBy(
       variants.filter((track) => !activeAudio || track.language === activeAudio),
       (track) => `${track.height || 0}|${Math.round((track.bandwidth || 0) / 1000)}`
@@ -887,6 +1009,44 @@
         try { localStorage.setItem("alphy.playbackRate", String(item.speed)); } catch { /* ignore */ }
         if (state.videoEl) state.videoEl.playbackRate = item.speed;
         setTimeout(renderTracks, 50);
+      });
+      return btn;
+    });
+  }
+
+  function renderOpravarControls(context) {
+    const seasons = context.playlist || [];
+    const current = chooseOpravarSelection(seasons, context.selection);
+    const season = seasons.find((item) => item.season === current?.season);
+    const episode = season?.episodes.find((item) => item.episode === current?.episode);
+
+    addTrackGroup("Сезон", seasons, (item) => {
+      const btn = document.createElement("button");
+      btn.textContent = String(item.season);
+      if (item.season === current?.season) btn.className = "active";
+      btn.addEventListener("click", () => {
+        const preferredEpisode = item.episodes.find((value) => value.episode > 0) || item.episodes[0];
+        switchOpravarSelection({ season: item.season, episode: preferredEpisode?.episode, voiceId: current?.voiceId });
+      });
+      return btn;
+    });
+
+    addTrackGroup("Серия", season?.episodes || [], (item) => {
+      const btn = document.createElement("button");
+      btn.textContent = item.episode > 0 ? String(item.episode) : `S${Math.abs(item.episode)}`;
+      if (item.episode === current?.episode) btn.className = "active";
+      btn.addEventListener("click", () => {
+        switchOpravarSelection({ season: current?.season, episode: item.episode, voiceId: current?.voiceId });
+      });
+      return btn;
+    });
+
+    addTrackGroup("Озвучка", episode?.voices || [], (item) => {
+      const btn = document.createElement("button");
+      btn.textContent = item.name || `Voice ${item.voiceId}`;
+      if (item.voiceId === current?.voiceId) btn.className = "active";
+      btn.addEventListener("click", () => {
+        switchOpravarSelection({ season: current?.season, episode: current?.episode, voiceId: item.voiceId });
       });
       return btn;
     });
@@ -1092,6 +1252,7 @@ addEventListener('message', async (event) => {
   function parseNewdeafPage(html, pageUrl) {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const ortified = [];
+    const opravar = [];
     const allo = [];
     const add = (list, value, re) => {
       const cleaned = cleanUrl(value, pageUrl);
@@ -1100,10 +1261,12 @@ addEventListener('message', async (event) => {
     for (const node of doc.querySelectorAll("iframe[src], [data-src], [data-url], [src]")) {
       const value = node.getAttribute("src") || node.getAttribute("data-src") || node.getAttribute("data-url");
       add(ortified, value, /^https:\/\/api\.ortified\.ws\/embed\//i);
+      add(opravar, value, /^https:\/\/(?:gencit\.info|opravar\.online)\/bil\/\d+/i);
       add(allo, value, /^https:\/\/allo\.cdnlbox\.club\//i);
     }
     const text = html.replace(/&amp;/g, "&");
     for (const match of text.matchAll(/https:\/\/api\.ortified\.ws\/embed\/[^"'<>\s)]+/gi)) add(ortified, match[0], /^https:\/\/api\.ortified\.ws\/embed\//i);
+    for (const match of text.matchAll(/https:\/\/(?:gencit\.info|opravar\.online)\/bil\/\d+[^"'<>\s)]*/gi)) add(opravar, match[0], /^https:\/\/(?:gencit\.info|opravar\.online)\/bil\/\d+/i);
     for (const match of text.matchAll(/https:\/\/allo\.cdnlbox\.club\/[^"'<>\s)]+/gi)) add(allo, match[0], /^https:\/\/allo\.cdnlbox\.club\//i);
 
     const title = cleanNewdeafTitle(
@@ -1116,7 +1279,7 @@ addEventListener('message', async (event) => {
       compact(doc.querySelector('meta[name="description"]')?.getAttribute("content"));
     const poster = cleanUrl(doc.querySelector('meta[property="og:image"], meta[name="og:image"]')?.getAttribute("content"), pageUrl);
     const year = extractYear(`${title} ${description} ${pageUrl}`);
-    return { title, description, poster, year, ortified, allo };
+    return { title, description, poster, year, ortified, opravar, allo };
   }
 
   function parseZenithEmbed(html) {
@@ -1189,6 +1352,38 @@ addEventListener('message', async (event) => {
   // =====================================================================
   // small helpers
   // =====================================================================
+  function chooseOpravarSelection(playlist, requested) {
+    const seasons = Array.isArray(playlist) ? playlist : [];
+    if (!seasons.length) return null;
+    const season = seasons.find((item) => item.season === Number(requested?.season)) || seasons[0];
+    const positiveEpisodes = season.episodes.filter((item) => item.episode > 0);
+    const episode =
+      season.episodes.find((item) => item.episode === Number(requested?.episode)) ||
+      positiveEpisodes[0] ||
+      season.episodes[0];
+    if (!episode) return null;
+    const voice =
+      episode.voices.find((item) => item.voiceId === Number(requested?.voiceId)) ||
+      episode.voices.find((item) => item.voiceId === 2) ||
+      episode.voices[0];
+    if (!voice) return null;
+    return {
+      season: season.season,
+      episode: episode.episode,
+      voiceId: voice.voiceId,
+      videoId: voice.videoId,
+      voiceName: voice.name,
+    };
+  }
+
+  function sameOpravarSelection(a, b) {
+    return !!a && !!b &&
+      Number(a.season) === Number(b.season) &&
+      Number(a.episode) === Number(b.episode) &&
+      Number(a.voiceId) === Number(b.voiceId) &&
+      (!a.videoId || !b.videoId || Number(a.videoId) === Number(b.videoId));
+  }
+
   function chooseMovie(results, title, year) {
     if (!Array.isArray(results) || !results.length) return null;
     const normalized = normalizeTitle(title);
@@ -1289,6 +1484,9 @@ addEventListener('message', async (event) => {
         if (/api\.zenithjs\.ws$/i.test(url.host)) {
           const id = value.match(/\/movie\/(\d+)/)?.[1];
           if (id) return go(`/watch/zen/${id}`);
+        }
+        if (/^(?:gencit\.info|opravar\.online)$/i.test(url.host) && /^\/bil\/\d+/i.test(url.pathname)) {
+          return go(`/watch/opr/${encodeURIComponent(value)}`);
         }
         if (/newdeaf\.co$/i.test(url.host)) return go(`/watch/nd/${encodeURIComponent(value)}`);
       } catch { /* fall through to title search */ }
