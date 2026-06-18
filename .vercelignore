@@ -1,10 +1,14 @@
-# Vercel serves ONLY the static frontend (index.html, app.js, styles.css, Logo.png).
-# The resolver runs on Deno Deploy, not here — keep its 888KB Zona runtime and
-# Node bits out of the Vercel deploy so the production bundle stays tiny.
-worker/
+# Vercel serves the static frontend plus /api/resolve-zona. That control-plane
+# function imports worker/src, but video bytes never cross Vercel.
 resolver-deno/
 docs/
 node_modules/
 *.md
 package.json
 package-lock.json
+worker/node_modules/
+worker/.wrangler/
+worker/README.md
+worker/package.json
+worker/wrangler.toml
+worker/package-lock.json

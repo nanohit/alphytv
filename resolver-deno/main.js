@@ -32,15 +32,26 @@ const env = {
     "https://alphytv.vercel.app,https://alphy.tv,https://www.alphy.tv,http://127.0.0.1:5177,http://localhost:5177",
 };
 
-// Persistent kpId -> Zenith cache. Optional: if KV is unavailable we just skip
-// caching and resolve every time.
+// Persistent kpId -> Zenith cache. Deno KV is optional and is not automatically
+// attached to every Deploy project. The edge Cache API needs no database setup,
+// while the in-memory map protects a warm isolate. We use all available layers
+// so a missing KV can never silently turn every page view into a fresh mzona
+// request (mzona soft-rate-limits shared datacenter egress).
 let kv = null;
 try {
   kv = await Deno.openKv();
 } catch {
   kv = null;
 }
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+let edgeCache = null;
+try {
+  edgeCache = globalThis.caches?.open ? await globalThis.caches.open("alphy-zona-v1") : null;
+} catch {
+  edgeCache = null;
+}
+const zonaMemoryCache = new Map();
+const zonaInflight = new Map();
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function corsHeadersFor(request) {
   const requestOrigin = request.headers.get("origin") || "";
@@ -52,49 +63,137 @@ function corsHeadersFor(request) {
   };
 }
 
-function jsonResponse(request, body, status = 200) {
+function jsonResponse(request, body, status = 200, cacheControl = "no-store") {
   return new Response(JSON.stringify(body, null, 2), {
     status,
     headers: {
       ...corsHeadersFor(request),
       "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
+      "cache-control": cacheControl,
     },
   });
+}
+
+function zonaCacheRequest(kpId) {
+  return new Request(`https://alphy-zona-cache.invalid/${encodeURIComponent(kpId)}`);
+}
+
+async function readZonaCache(kpId) {
+  const memoryHit = zonaMemoryCache.get(kpId);
+  if (memoryHit?.embedUrl) return { ...memoryHit, cache: "memory" };
+
+  if (kv) {
+    try {
+      const hit = await kv.get(["zona", kpId]);
+      if (hit.value?.embedUrl) {
+        zonaMemoryCache.set(kpId, hit.value);
+        return { ...hit.value, cache: "kv" };
+      }
+    } catch {
+      // Keep serving through the other cache layers.
+    }
+  }
+
+  if (edgeCache) {
+    try {
+      const hit = await edgeCache.match(zonaCacheRequest(kpId));
+      if (hit) {
+        const value = await hit.json();
+        if (value?.embedUrl) {
+          zonaMemoryCache.set(kpId, value);
+          return { ...value, cache: "edge" };
+        }
+      }
+    } catch {
+      // Keep serving through mzona.
+    }
+  }
+
+  return null;
+}
+
+async function writeZonaCache(value) {
+  if (!value?.kpId || !value?.embedUrl || !value?.zenithId) return;
+  const stored = {
+    kpId: String(value.kpId),
+    zenithId: String(value.zenithId),
+    zenithIds: value.zenithIds || [String(value.zenithId)],
+    embedUrl: value.embedUrl,
+  };
+  zonaMemoryCache.set(stored.kpId, stored);
+
+  const writes = [];
+  if (kv) {
+    writes.push(kv.set(["zona", stored.kpId], stored, { expireIn: CACHE_TTL_MS }));
+  }
+  if (edgeCache) {
+    writes.push(edgeCache.put(
+      zonaCacheRequest(stored.kpId),
+      new Response(JSON.stringify(stored), {
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": `public, max-age=${Math.floor(CACHE_TTL_MS / 1000)}`,
+        },
+      }),
+    ));
+  }
+  await Promise.allSettled(writes);
+}
+
+async function resolveAndCacheZona(request, kpId) {
+  const workerUrl = new URL(request.url);
+  workerUrl.searchParams.set("kpId", kpId);
+  const response = await worker.fetch(new Request(workerUrl, {
+    method: request.method,
+    headers: request.headers,
+  }), env);
+  try {
+    const data = await response.clone().json();
+    if (response.ok && data?.ok && data.embedUrl && data.zenithId) {
+      await writeZonaCache(data);
+    }
+  } catch {
+    // Preserve the original resolver response.
+  }
+  return response;
 }
 
 async function handleResolveZonaCached(request, url) {
   const kpId = (url.searchParams.get("kpId") || url.searchParams.get("id") || "").trim();
   if (!/^\d+$/.test(kpId)) return worker.fetch(request, env);
 
-  const key = ["zona", kpId];
-  const hit = await kv.get(key);
-  if (hit.value && hit.value.embedUrl) {
-    return jsonResponse(request, { ok: true, ...hit.value, cached: true });
+  const hit = await readZonaCache(kpId);
+  if (hit?.embedUrl) {
+    return jsonResponse(request, { ok: true, ...hit, cached: true }, 200, "public, max-age=300");
   }
 
-  const response = await worker.fetch(request, env);
-  // Cache only a real, successful resolve so a transient rate-limited null is
-  // never persisted.
-  try {
-    const data = await response.clone().json();
-    if (data && data.ok && data.embedUrl && data.zenithId) {
-      await kv.set(
-        key,
-        { kpId: data.kpId, zenithId: data.zenithId, zenithIds: data.zenithIds, embedUrl: data.embedUrl },
-        { expireIn: CACHE_TTL_MS },
-      );
-    }
-  } catch {
-    // non-JSON / error response — leave uncached
+  // Collapse simultaneous requests for the same title. Without this, one page
+  // refresh can consume several scarce mzona calls before the first one caches.
+  const inflightKey = `${kpId}|${request.headers.get("origin") || ""}`;
+  if (!zonaInflight.has(inflightKey)) {
+    const pending = resolveAndCacheZona(request, kpId).finally(() => zonaInflight.delete(inflightKey));
+    zonaInflight.set(inflightKey, pending);
   }
-  return response;
+  const response = await zonaInflight.get(inflightKey);
+  // A Response body can be consumed only once; every waiter gets its own clone.
+  return response.clone();
 }
 
 Deno.serve((request) => {
   const url = new URL(request.url);
-  if (kv && request.method === "GET" && url.pathname === "/resolve-zona") {
+  if (request.method === "GET" && url.pathname === "/resolve-zona") {
     return handleResolveZonaCached(request, url);
+  }
+  if (request.method === "GET" && url.pathname === "/health" && url.searchParams.has("diag")) {
+    return jsonResponse(request, {
+      ok: true,
+      service: "alphy-resolver",
+      zonaCache: {
+        kv: !!kv,
+        edge: !!edgeCache,
+        memoryEntries: zonaMemoryCache.size,
+      },
+    });
   }
   return worker.fetch(request, env);
 });
