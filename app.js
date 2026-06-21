@@ -15,6 +15,9 @@
   const STORE_BOOKMARKS = "alphy.bookmarks";
   const STORE_HISTORY = "alphy.history";
   const CACHE_PREFIX = "alphy.cache.";
+  // Older builds cached a transient empty Newdeaf result for six hours. Keep
+  // this namespace versioned so those false misses cannot survive an upgrade.
+  const ND_SEARCH_CACHE_NS = "ndsearch.v2";
   const TTL = {
     search: 6 * 3600e3,
     ndsearch: 6 * 3600e3,
@@ -330,29 +333,61 @@
   }
 
   async function searchNewdeaf(query) {
-    const cached = cacheGet("ndsearch", query);
-    if (cached) return cached;
+    const normalizedQuery = compact(query);
+    const cacheKey = normalizedQuery.toLowerCase().replace(/ё/g, "е");
+    const cached = cacheGet(ND_SEARCH_CACHE_NS, cacheKey);
+    if (Array.isArray(cached) && cached.length) return cached;
+
     const mirrors = dailyMirrorCandidates();
-    for (const mirror of mirrors) {
-      const searchUrl = `${mirror}/index.php?do=search&subaction=search&story=${encodeURIComponent(query)}`;
-      try {
-        // Direct CORS fetch — newdeaf returns `access-control-allow-origin: *`, so a
-        // fetch from the real page origin works. The sandboxed iframe sends
-        // `Origin: null`, which newdeaf rejects/hangs, so it must NOT be the only
-        // path (it stays as the fallback). This is why newdeaf results were silently
-        // empty before.
-        const html = await fetchThirdPartyText(searchUrl, { preferSandbox: false, label: "newdeaf-search", timeoutMs: 12000 });
-        const candidates = parseNewdeafSearch(html, searchUrl);
-        if (candidates.length) {
-          cacheSet("ndsearch", query, candidates, TTL.ndsearch);
-          return candidates;
-        }
-      } catch (error) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let finished = 0;
+      let lastError = null;
+      const timers = [];
+
+      const finish = (candidates) => {
+        if (settled) return;
+        settled = true;
+        timers.forEach((timer) => clearTimeout(timer));
+        // Never persist an empty result. "No matches" and "the browser privacy
+        // layer swallowed the response" are indistinguishable at the cache
+        // boundary, and pinning either one caused browser-specific false misses.
+        if (candidates.length) cacheSet(ND_SEARCH_CACHE_NS, cacheKey, candidates, TTL.ndsearch);
+        resolve(candidates);
+      };
+      const fail = (error, mirror) => {
+        lastError = error;
+        finished += 1;
         log("newdeaf-warn", "mirror failed", { mirror, message: error.message });
-      }
-    }
-    cacheSet("ndsearch", query, [], TTL.ndsearch);
-    return [];
+        if (!settled && finished === mirrors.length) {
+          settled = true;
+          reject(lastError || new Error("Newdeaf search unavailable"));
+        }
+      };
+
+      mirrors.forEach((mirror, index) => {
+        // Usually only today's mirror is touched. Adjacent mirrors start only
+        // when the previous probe is slow/blocked, avoiding a long serial wait
+        // on browsers whose privacy layer leaves cross-site fetch pending.
+        const timer = setTimeout(async () => {
+          if (settled) return;
+          const searchUrl = `${mirror}/index.php?do=search&subaction=search&story=${encodeURIComponent(normalizedQuery)}`;
+          try {
+            const html = await fetchThirdPartyText(searchUrl, {
+              preferSandbox: false,
+              label: "newdeaf-search",
+              timeoutMs: 7000,
+              sandboxTimeoutMs: 9000,
+            });
+            if (!isNewdeafSearchDocument(html)) throw new Error("Newdeaf returned an invalid search document");
+            finish(parseNewdeafSearch(html, searchUrl));
+          } catch (error) {
+            fail(error, mirror);
+          }
+        }, index * 1400);
+        timers.push(timer);
+      });
+    });
   }
 
   async function resolveNewdeafPage(pageUrl) {
@@ -479,9 +514,15 @@
     // ("Scavengers Reign") still surface the newdeaf pages ("Царство падальщиков").
     const ndQuery = pickNewdeafQuery(query, pk);
     let nd = [];
-    try { nd = await searchNewdeaf(ndQuery); } catch (error) { log("newdeaf-error", error.message); }
+    let newdeafUnavailable = false;
+    try {
+      nd = await searchNewdeaf(ndQuery);
+    } catch (error) {
+      newdeafUnavailable = true;
+      log("newdeaf-error", error.message);
+    }
     if (isStale(token)) return;
-    renderResults(nd, pk, query);
+    renderResults(nd, pk, query, { newdeafUnavailable });
     if (!pk.length && !nd.length) el.resultsTitle.textContent = "Ничего не найдено";
   }
 
@@ -491,7 +532,7 @@
     return ru || query;
   }
 
-  function renderResults(ndCandidates, pkResults, query) {
+  function renderResults(ndCandidates, pkResults, query, options = {}) {
     el.resultsGrid.replaceChildren();
     el.resultsTitle.textContent = "Результаты";
     // newdeaf first and prioritized: when a title is in both sources, the ad-free
@@ -517,6 +558,12 @@
         onClick: () => go(`/watch/kp/${encodeURIComponent(movie.kpId)}`),
       });
       el.resultsGrid.appendChild(card);
+    }
+    if (options.newdeafUnavailable) {
+      const note = document.createElement("p");
+      note.className = "muted search-note";
+      note.textContent = "Newdeaf не ответил этому браузеру — показаны остальные результаты.";
+      el.resultsGrid.appendChild(note);
     }
     if (!pkResults.length && !ndCandidates.length) {
       const p = document.createElement("p");
@@ -1144,23 +1191,75 @@
 
   async function fetchThirdPartyText(url, options = {}) {
     const preferSandbox = !!options.preferSandbox;
+    const timeoutMs = options.timeoutMs || 30000;
+    const sandboxTimeoutMs = options.sandboxTimeoutMs || timeoutMs;
     if (preferSandbox) {
       try {
-        return await sandboxFetchText(url, options.label, options.timeoutMs);
+        return await sandboxFetchText(url, options.label, sandboxTimeoutMs);
       } catch (error) {
         if (options.directFallback === false) throw error;
         log("fetch-warn", "sandbox fetch failed; trying direct CORS", { url, message: error.message });
       }
     }
     try {
-      const response = await fetch(url, { cache: "no-store", credentials: "omit", mode: "cors", referrerPolicy: "no-referrer" });
+      return await directFetchText(url, timeoutMs);
+    } catch (error) {
+      log("fetch-warn", "direct CORS fetch failed; trying XHR", { url, message: error.message });
+    }
+    try {
+      return await xhrFetchText(url, timeoutMs);
+    } catch (error) {
+      if (!preferSandbox) {
+        log("fetch-warn", "XHR failed; trying sandbox", { url, message: error.message });
+        return sandboxFetchText(url, options.label, sandboxTimeoutMs);
+      }
+      throw error;
+    }
+  }
+
+  function directFetchText(url, timeoutMs) {
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    let timer = null;
+    const operation = (async () => {
+      const response = await fetch(url, {
+        cache: "no-store",
+        credentials: "omit",
+        mode: "cors",
+        referrerPolicy: "no-referrer",
+        ...(controller ? { signal: controller.signal } : {}),
+      });
       const text = await response.text();
       if (!response.ok) throw new Error(`Fetch ${response.status}`);
       return text;
-    } catch (error) {
-      if (!preferSandbox) return sandboxFetchText(url, options.label, options.timeoutMs);
-      throw error;
-    }
+    })();
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller?.abort();
+        reject(new Error(`Direct fetch timeout for ${url}`));
+      }, timeoutMs);
+    });
+    return Promise.race([operation, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  function xhrFetchText(url, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", url, true);
+      xhr.withCredentials = false;
+      xhr.timeout = timeoutMs;
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.responseText);
+        else reject(new Error(`XHR ${xhr.status || "failed"}`));
+      };
+      xhr.onerror = () => reject(new Error(`XHR network error for ${url}`));
+      xhr.ontimeout = () => reject(new Error(`XHR timeout for ${url}`));
+      xhr.onabort = () => reject(new Error(`XHR aborted for ${url}`));
+      try {
+        xhr.send();
+      } catch (error) {
+        reject(error);
+      }
+    });
   }
 
   function sandboxFetchText(url, label, timeoutMs) {
@@ -1192,6 +1291,7 @@ addEventListener('message', async (event) => {
   try {
     const response = await fetch(data.url, { cache: 'no-store', credentials: 'omit', mode: 'cors', referrerPolicy: 'no-referrer' });
     const text = await response.text();
+    if (!response.ok) throw new Error('Fetch ' + response.status);
     parent.postMessage({ alphyFetch: true, id: data.id, ok: true, status: response.status, contentType: response.headers.get('content-type') || '', text }, '*');
   } catch (error) {
     parent.postMessage({ alphyFetch: true, id: data.id, ok: false, error: String(error && error.message || error) }, '*');
@@ -1287,6 +1387,13 @@ addEventListener('message', async (event) => {
       if (out.length >= 20) break;
     }
     return out;
+  }
+
+  function isNewdeafSearchDocument(html) {
+    const text = String(html || "");
+    if (text.length < 5000) return false;
+    return /(?:id=["']quicksearch["']|name=["']story["'])/i.test(text) &&
+      /(?:newdeaf|Новый мир глухих)/i.test(text);
   }
 
   function parseNewdeafPage(html, pageUrl) {

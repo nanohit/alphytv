@@ -84,6 +84,9 @@ From a Russian IP, search a title or paste a Newdeaf URL.
 
 ## Expected Behavior
 
+- Newdeaf search: tries direct CORS fetch, XHR, then a sandbox fallback with
+  deadlines and staggered daily-mirror probes. Only successful non-empty
+  results are cached; transient empty responses are never pinned.
 - Ortified path: fetches provider HTML from the browser with a null-origin
   sandbox, strips the known ad config, and loads a `srcdoc` player.
 - Opravar path: resolver reads player/API metadata, changes the signed HLS host
@@ -97,6 +100,9 @@ From a Russian IP, search a title or paste a Newdeaf URL.
 
 ## Known Limits
 
+- A privacy browser can block `*.newdeaf.co` before CORS is evaluated. The
+  browser-only client cannot read a body that the browser itself suppresses;
+  it falls back to catalogue results and displays a Newdeaf availability note.
 - `api.zenithjs.ws` may return `422` outside the working region/origin context.
   The production test must be done from the Russian browser path where Zenith
   was previously confirmed.

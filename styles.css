@@ -23,6 +23,7 @@ body {
 
 .hidden { display: none !important; }
 .muted { color: var(--muted); }
+.search-note { grid-column: 1 / -1; margin: 4px 0 0; }
 
 .container {
   max-width: 1280px;

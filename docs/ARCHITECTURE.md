@@ -17,9 +17,16 @@ input title/Newdeaf URL
 
 ### Newdeaf
 
-The frontend fetches Newdeaf search/page HTML from a sandboxed iframe without
-`allow-same-origin`. That produces a browser `Origin: null` request instead of
-`Origin: https://alphytv.vercel.app`.
+Newdeaf search/page HTML is fetched by the viewer browser so the request keeps
+the viewer's network location. The transport order is:
+
+1. direct CORS `fetch`;
+2. direct CORS `XMLHttpRequest` for browsers that patch or stall `fetch`;
+3. an opaque-origin sandbox helper as the final browser-only fallback.
+
+Every transport has a deadline. Daily mirror probes are staggered, so a privacy
+browser that leaves a blocked third-party request pending cannot stall Newdeaf
+search indefinitely.
 
 Daily mirror candidates are generated around the current date:
 
@@ -28,6 +35,17 @@ Daily mirror candidates are generated around the current date:
 - tomorrow.
 
 This handles the Newdeaf mirror rollover window around late night Moscow time.
+
+Only non-empty successful search results are cached. Empty responses are not
+persisted because a real zero-result page and a response swallowed by a browser
+privacy layer cannot be distinguished reliably after the fact. The frontend
+asset URL is versioned so browsers with persistent caches cannot retain the old
+sandbox-only search implementation.
+
+Hard limitation: if a browser blocks every request to `*.newdeaf.co` before the
+CORS layer, a browser-only client cannot read the response. In that case Alphy
+finishes the search with the normal catalogue results and shows a small Newdeaf
+availability note instead of silently omitting it or hanging.
 
 ### Ortified
 
