@@ -70,6 +70,7 @@
     audioNames: [],
     sources: {},
     opravar: null,
+    serial: null,
     trackInterval: null,
     playbackRate: 1,
   };
@@ -190,6 +191,9 @@
   }
   function savedOpravarSelection(key) {
     return loadList(STORE_HISTORY).find((h) => h.key === key)?.opravarSelection || null;
+  }
+  function savedSerialSelection(key) {
+    return loadList(STORE_HISTORY).find((h) => h.key === key)?.serialSelection || null;
   }
   function persistAudio(lang) {
     const t = state.currentTarget;
@@ -647,7 +651,14 @@
   async function playKp(kpId, token) {
     let meta = cacheGet("meta", kpId);
     if (!meta) { meta = await fetchMovieMeta(kpId); if (isStale(token)) return; }
-    const target = { kind: "kp", kpId, title: movieTitle(meta), poster: meta?.poster, year: meta?.year };
+    const target = {
+      kind: "kp",
+      kpId,
+      title: movieTitle(meta),
+      poster: meta?.poster,
+      year: meta?.year,
+      isSeries: !!meta?.isSeries,
+    };
     state.currentTarget = target;
     setWatchHead(target.title || `kpId ${kpId}`, target);
     renderMeta(meta, target);
@@ -655,7 +666,12 @@
 
     const resolved = await resolveZona(kpId);
     if (isStale(token)) return;
-    await playZenithEmbed(resolved.embedUrl, target, token, { histKey: `kp:${kpId}`, resume: resumePosition(`kp:${kpId}`), audioLang: savedAudioLang(`kp:${kpId}`) });
+    await playZenithEmbed(resolved.embedUrl, target, token, {
+      histKey: `kp:${kpId}`,
+      resume: resumePosition(`kp:${kpId}`),
+      audioLang: savedAudioLang(`kp:${kpId}`),
+      serialSelection: savedSerialSelection(keyFor(target)),
+    });
   }
 
   async function playZen(zenithId, token) {
@@ -665,7 +681,12 @@
     el.metaPanel.classList.add("hidden");
     recordOpen(target);
     const embedUrl = `https://api.zenithjs.ws/embed/movie/${encodeURIComponent(zenithId)}`;
-    await playZenithEmbed(embedUrl, target, token, { histKey: `zen:${zenithId}`, resume: resumePosition(`zen:${zenithId}`), audioLang: savedAudioLang(`zen:${zenithId}`) });
+    await playZenithEmbed(embedUrl, target, token, {
+      histKey: `zen:${zenithId}`,
+      resume: resumePosition(`zen:${zenithId}`),
+      audioLang: savedAudioLang(`zen:${zenithId}`),
+      serialSelection: savedSerialSelection(keyFor(target)),
+    });
   }
 
   async function playOrt(embedUrl, token, ndMeta) {
@@ -783,6 +804,75 @@
     });
   }
 
+  async function switchZenithSelection(nextSelection) {
+    const context = state.serial;
+    const target = state.currentTarget;
+    if (!context || context.provider !== "zenith" || !target || context.switching) return;
+    const selection = chooseSerialSelection(context.seasons, nextSelection);
+    if (!selection || sameSerialSelection(selection, context.selection)) return;
+    const episode = findSerialEpisode(context.seasons, selection);
+    const media = bestZenithSource(episode?.sources);
+    if (!media) return;
+
+    const token = resolveToken;
+    const audioLang = state.player?.getVariantTracks?.().find((track) => track.active)?.language || savedAudioLang(keyFor(target));
+    context.switching = true;
+    renderTracks();
+    await teardownPlayer();
+    showPlayerLoading();
+    persistSerialSelection(target, selection, true);
+
+    try {
+      if (isStale(token) || keyFor(state.currentTarget) !== keyFor(target)) return;
+      const nextContext = { ...context, selection, switching: false };
+      state.sources = episode.sources;
+      await playShaka(media.url, media.kind, token, {
+        resume: 0,
+        audioLang,
+        serial: nextContext,
+      });
+      if (isStale(token)) return;
+      startTracking(context.histKey || keyFor(target), target);
+    } catch (error) {
+      if (isStale(token)) return;
+      log("zenith-episode-refresh", { selection, message: error.message });
+      try {
+        await playZenithEmbed(context.embedUrl, target, token, {
+          histKey: context.histKey || keyFor(target),
+          resume: 0,
+          audioLang,
+          serialSelection: selection,
+          forceWorker: true,
+        });
+      } catch (refreshError) {
+        if (isStale(token)) return;
+        showError(new Error("Не удалось загрузить выбранную серию"));
+        log("zenith-episode-switch-error", { selection, message: refreshError.message });
+      }
+    }
+  }
+
+  function persistSerialSelection(target, selection, resetPlayback = false) {
+    const entry = {
+      key: keyFor(target),
+      kind: target.kind,
+      target: cleanTarget(target),
+      title: target.title || "",
+      poster: target.poster || "",
+      year: target.year || "",
+      serialSelection: {
+        season: selection.season,
+        episode: selection.episode,
+      },
+    };
+    if (resetPlayback) {
+      entry.position = 0;
+      entry.duration = 0;
+      entry.progress = 0;
+    }
+    recordHistory(entry);
+  }
+
   async function playNd(pageUrl, token) {
     setWatchHead("Newdeaf…", { kind: "nd", pageUrl });
     const parsed = await resolveNewdeafPage(pageUrl);
@@ -881,19 +971,50 @@
   async function playZenithEmbed(embedUrl, target, token, opts = {}) {
     if (isStale(token)) return;
     showPlayerLoading();
-    const html = await fetchThirdPartyText(embedUrl, { preferSandbox: false, label: "zenith" });
-    if (isStale(token)) return;
-    let parsed = parseZenithEmbed(html);
-    if (!parsed.sources.dash && !parsed.sources.hls && !parsed.sources.dasha) {
+    let parsed = { sources: {}, meta: {}, playlist: { current: null, seasons: [] } };
+    if (!opts.forceWorker) {
+      try {
+        const html = await fetchThirdPartyText(embedUrl, { preferSandbox: false, label: "zenith" });
+        if (isStale(token)) return;
+        parsed = parseZenithEmbed(html);
+      } catch (error) {
+        log("zenith-browser-fallback", { message: error.message });
+      }
+    }
+    const needsWorker =
+      !parsed.sources.dash && !parsed.sources.hls && !parsed.sources.dasha ||
+      (target?.isSeries && !parsed.playlist?.seasons?.length);
+    if (opts.forceWorker || needsWorker) {
       parsed = await resolveZenithThroughWorker(embedUrl);
       if (isStale(token)) return;
     }
-    state.sources = parsed.sources;
+
+    const seasons = normalizeSerialSeasons(parsed.playlist?.seasons);
+    const requested = opts.serialSelection || parsed.playlist?.current;
+    const selection = chooseSerialSelection(seasons, requested);
+    const episode = findSerialEpisode(seasons, selection);
+    const sources = episode?.sources || parsed.sources;
+    const media = bestZenithSource(sources);
+    const serial = selection
+      ? {
+          provider: "zenith",
+          embedUrl,
+          histKey: opts.histKey || keyFor(target),
+          seasons,
+          selection,
+          switching: false,
+        }
+      : null;
+
+    state.sources = sources;
     state.audioNames = parsed.meta.audioNames || [];
-    const bestUrl = parsed.sources.dash || parsed.sources.hls || parsed.sources.dasha;
-    const kind = parsed.sources.dash ? "dash" : parsed.sources.hls ? "hls" : "dasha";
-    if (!bestUrl) throw new Error("Zenith embed не отдал dash/hls");
-    await playShaka(bestUrl, kind, token, { resume: opts.resume || 0, audioLang: opts.audioLang });
+    if (!media) throw new Error("Zenith embed не отдал dash/hls");
+    if (selection) persistSerialSelection(target, selection);
+    await playShaka(media.url, media.kind, token, {
+      resume: opts.resume || 0,
+      audioLang: opts.audioLang,
+      serial,
+    });
     if (isStale(token)) return;
     if (opts.histKey) startTracking(opts.histKey, target);
   }
@@ -903,13 +1024,18 @@
     if (!id) throw new Error("Не удалось извлечь Zenith id");
     const data = await resolverJson(`/zenith?id=${encodeURIComponent(id)}`);
     if (!data.hasSources) throw new Error("Worker Zenith fallback не отдал источники");
-    return { sources: data.sources || {}, meta: data.meta || {} };
+    return {
+      sources: data.sources || {},
+      meta: data.meta || {},
+      playlist: data.playlist || { current: null, seasons: [] },
+    };
   }
 
   async function playShaka(url, kind, token, opts = {}) {
     if (isStale(token)) return;
     await teardownPlayer();
     state.opravar = opts.opravar || null;
+    state.serial = opts.serial || null;
     const video = document.createElement("video");
     video.controls = true;
     video.playsInline = true;
@@ -1014,6 +1140,7 @@
     }
     state.videoEl = null;
     state.opravar = null;
+    state.serial = null;
     // Remove the old <iframe>/<video> from the DOM: stops its audio instantly and
     // guarantees a new resolve never leaves stale content on screen — even when the
     // new one errors before mounting (the "плеер залочен на старом контенте" bug).
@@ -1038,6 +1165,7 @@
     if (state.opravar) {
       renderOpravarControls(state.opravar);
     } else {
+      if (state.serial?.provider === "zenith") renderZenithSerialControls(state.serial);
       const audioChoices = groupBy(variants, (track) => `${track.language || ""}|${(track.roles || []).join(",")}`);
       addTrackGroup("Озвучка", audioChoices, (track, index) => {
         const btn = document.createElement("button");
@@ -1134,6 +1262,37 @@
       if (item.voiceId === current?.voiceId) btn.className = "active";
       btn.addEventListener("click", () => {
         switchOpravarSelection({ season: current?.season, episode: current?.episode, voiceId: item.voiceId });
+      });
+      return btn;
+    });
+  }
+
+  function renderZenithSerialControls(context) {
+    const seasons = context.seasons || [];
+    const current = chooseSerialSelection(seasons, context.selection);
+    const season = seasons.find((item) => item.season === current?.season);
+
+    addTrackGroup("Сезон", seasons, (item) => {
+      const btn = document.createElement("button");
+      btn.textContent = String(item.season);
+      btn.disabled = !!context.switching;
+      if (item.season === current?.season) btn.className = "active";
+      btn.addEventListener("click", () => {
+        const sameEpisode = item.episodes.find((value) => value.episode === current?.episode);
+        const episode = sameEpisode || item.episodes[0];
+        switchZenithSelection({ season: item.season, episode: episode?.episode });
+      });
+      return btn;
+    });
+
+    addTrackGroup("Серия", season?.episodes || [], (item) => {
+      const btn = document.createElement("button");
+      btn.textContent = String(item.episode);
+      btn.disabled = !!context.switching;
+      if (item.title) btn.title = item.title;
+      if (item.episode === current?.episode) btn.className = "active";
+      btn.addEventListener("click", () => {
+        switchZenithSelection({ season: current?.season, episode: item.episode });
       });
       return btn;
     });
@@ -1430,22 +1589,81 @@ addEventListener('message', async (event) => {
   }
 
   function parseZenithEmbed(html) {
+    const text = String(html || "");
     const sources = {};
-    for (const match of html.matchAll(/\b(dash|dasha|hls)\s*:\s*("(?:(?:\\.|[^"\\])*)"|'(?:(?:\\.|[^'\\])*)')/g)) {
+    for (const match of text.matchAll(/\b(dash|dasha|hls)\s*:\s*("(?:(?:\\.|[^"\\])*)"|'(?:(?:\\.|[^'\\])*)')/g)) {
       sources[match[1]] = decodeJsString(match[2]).replace(/&amp;/g, "&");
     }
-    const fallbackText = html.replace(/\\\//g, "/").replace(/&amp;/g, "&");
+    const fallbackText = text.replace(/\\\//g, "/").replace(/&amp;/g, "&");
     if (!sources.dash) sources.dash = firstUrl(fallbackText, /\.mpd(?:\?|$)/i);
     if (!sources.hls) sources.hls = firstUrl(fallbackText, /(?:\.m3u8|master\.m3u8)(?:\?|$)/i);
-    const titleMatch = html.match(/\btitle\s*:\s*("(?:(?:\\.|[^"\\])*)"|'(?:(?:\\.|[^'\\])*)')/);
-    const audioMatch = html.match(/\baudio\s*:\s*\{\s*["']?names["']?\s*:\s*\[([^\]]*)\]/);
+    const playlist = parseZenithPlaylist(text);
+    const currentEpisode = findSerialEpisode(playlist.seasons, playlist.current);
+    if (currentEpisode) Object.assign(sources, currentEpisode.sources);
+    const titleMatch = text.match(/\btitle\s*:\s*("(?:(?:\\.|[^"\\])*)"|'(?:(?:\\.|[^'\\])*)')/);
+    const audioMatch = text.match(/\baudio\s*:\s*\{\s*["']?names["']?\s*:\s*\[([^\]]*)\]/);
     return {
       sources,
       meta: {
         title: titleMatch ? decodeJsString(titleMatch[1]) : "",
         audioNames: audioMatch ? [...audioMatch[1].matchAll(/"([^"]+)"|'([^']+)'/g)].map((m) => m[1] || m[2]) : [],
       },
+      playlist,
     };
+  }
+
+  function parseZenithPlaylist(text) {
+    const playlistMatch = /\bplaylist\s*:\s*\{/.exec(text);
+    if (!playlistMatch) return { current: null, seasons: [] };
+    const tail = text.slice(playlistMatch.index);
+    const seasonsMatch = /\bseasons\s*:\s*\[/.exec(tail);
+    if (!seasonsMatch) return { current: null, seasons: [] };
+    const arrayStart = playlistMatch.index + seasonsMatch.index + seasonsMatch[0].lastIndexOf("[");
+    const arrayText = balancedJsContainer(text, arrayStart, "[", "]");
+    if (!arrayText) return { current: null, seasons: [] };
+
+    let rawSeasons;
+    try {
+      rawSeasons = JSON.parse(arrayText);
+    } catch {
+      return { current: null, seasons: [] };
+    }
+    const beforeSeasons = text.slice(playlistMatch.index, arrayStart);
+    const currentMatch = beforeSeasons.match(
+      /\bcurrent\s*:\s*\{\s*season\s*:\s*(\d+)\s*,\s*episode\s*:\s*(?:"([^"]+)"|'([^']+)'|(\d+))/,
+    );
+    return {
+      current: currentMatch
+        ? { season: Number(currentMatch[1]), episode: Number(currentMatch[2] || currentMatch[3] || currentMatch[4]) }
+        : null,
+      seasons: normalizeSerialSeasons(rawSeasons),
+    };
+  }
+
+  function balancedJsContainer(text, start, open, close) {
+    if (text[start] !== open) return "";
+    let depth = 0;
+    let quote = "";
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === quote) quote = "";
+        continue;
+      }
+      if (char === '"' || char === "'" || char === "`") {
+        quote = char;
+        continue;
+      }
+      if (char === open) depth += 1;
+      else if (char === close) {
+        depth -= 1;
+        if (depth === 0) return text.slice(start, index + 1);
+      }
+    }
+    return "";
   }
 
   function firstUrl(text, kindRe) {
@@ -1499,6 +1717,67 @@ addEventListener('message', async (event) => {
   // =====================================================================
   // small helpers
   // =====================================================================
+  function normalizeSerialSeasons(value) {
+    return (Array.isArray(value) ? value : [])
+      .map((season) => ({
+        season: positiveInt(season?.season ?? season?.number),
+        episodes: (Array.isArray(season?.episodes) ? season.episodes : [])
+          .map((episode) => ({
+            episode: positiveInt(episode?.episode ?? episode?.number ?? episode?.episodeNumber),
+            title: compact(episode?.title || episode?.name || episode?.nameRu || episode?.nameEn || ""),
+            id: positiveInt(episode?.id),
+            videoKey: positiveInt(episode?.videoKey),
+            sources: zenithEpisodeSources(episode?.sources || episode),
+          }))
+          .filter((episode) => episode.episode && Object.keys(episode.sources).length)
+          .sort((a, b) => a.episode - b.episode),
+      }))
+      .filter((season) => season.season && season.episodes.length)
+      .sort((a, b) => a.season - b.season);
+  }
+
+  function chooseSerialSelection(seasons, requested) {
+    const list = normalizeSerialSeasons(seasons);
+    if (!list.length) return null;
+    const season = list.find((item) => item.season === positiveInt(requested?.season)) || list[0];
+    const episode =
+      season.episodes.find((item) => item.episode === positiveInt(requested?.episode)) ||
+      season.episodes[0];
+    return episode ? { season: season.season, episode: episode.episode } : null;
+  }
+
+  function sameSerialSelection(a, b) {
+    return !!a && !!b &&
+      Number(a.season) === Number(b.season) &&
+      Number(a.episode) === Number(b.episode);
+  }
+
+  function positiveInt(value) {
+    const parsed = Number.parseInt(String(value ?? ""), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function zenithEpisodeSources(value) {
+    const sources = {};
+    for (const key of ["dash", "dasha", "hls"]) {
+      const url = String(value?.[key] || "").replace(/&amp;/g, "&");
+      if (/^https:\/\//i.test(url)) sources[key] = url;
+    }
+    return sources;
+  }
+
+  function findSerialEpisode(seasons, selection) {
+    const season = (Array.isArray(seasons) ? seasons : []).find((item) => item.season === selection?.season);
+    return season?.episodes.find((item) => item.episode === selection?.episode) || null;
+  }
+
+  function bestZenithSource(sources) {
+    if (sources?.dash) return { url: sources.dash, kind: "dash" };
+    if (sources?.hls) return { url: sources.hls, kind: "hls" };
+    if (sources?.dasha) return { url: sources.dasha, kind: "dasha" };
+    return null;
+  }
+
   function chooseOpravarSelection(playlist, requested) {
     const seasons = Array.isArray(playlist) ? playlist : [];
     if (!seasons.length) return null;

@@ -94,8 +94,11 @@ From a Russian IP, search a title or paste a Newdeaf URL.
   and VTT directly in Shaka. The resolver never proxies video bytes.
 - Allo-only Newdeaf path: does not embed Allo by default; it uses the title to
   resolve PoiskKino `kpId`, then Zona/Zenith.
-- Zona path: Worker resolves `kpId -> api.zenithjs.ws/embed/movie/<id>`, then
-  the browser fetches the Zenith embed and plays DASH/HLS directly.
+- Zona path: Worker resolves `kpId -> api.zenithjs.ws/embed/movie/<id>`. The
+  Zenith embed contains the authoritative season/episode playlist and a
+  separate signed DASH/HLS source for every episode. Shaka shows those seasons
+  and episodes next to audio/quality controls, loads the selected episode
+  directly, and restores the saved selection on reopen.
 - Diagnostics are hidden by default. Click `Диагностика` to copy logs.
 
 ## Known Limits
@@ -107,6 +110,9 @@ From a Russian IP, search a title or paste a Newdeaf URL.
   The production test must be done from the Russian browser path where Zenith
   was previously confirmed.
 - Zona currently has no usable built-in subtitles in our captures.
+- Zenith does not accept `?season=&episode=` navigation. Episode switching must
+  use the per-episode sources embedded in its playlist; selecting the first
+  media URL in the document can play the wrong episode.
 - Allo remains black-box: baseline iframe can play but may force audible ads;
   cleanroom/rehost fails because Allo API calls are origin/CORS gated.
 - Opravar signed media URLs are short-lived. Episode/voice changes therefore

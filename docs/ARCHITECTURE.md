@@ -139,8 +139,19 @@ Then the browser fetches the Zenith embed and extracts:
 - `dasha`;
 - `hls`;
 - audio labels.
+- `playlist.current`;
+- every season/episode and its own signed DASH/HLS sources.
 
-Shaka Player handles DASH/HLS and exposes quality/audio switching.
+The playlist is authoritative. Zenith serial embeds contain many media URLs,
+and the first URL in the HTML is not necessarily the current episode. The
+resolver and browser parser therefore match `playlist.current` (or the saved
+user selection) to a concrete episode before loading Shaka. Season/episode
+buttons switch directly to that episode's source and persist the selection.
+If a signed source expires during switching, the client refreshes the Zenith
+embed through the resolver and retries the same selection.
+
+Shaka Player handles DASH/HLS and exposes season, episode, quality, and audio
+switching.
 
 ## Backend Scope
 
@@ -149,7 +160,7 @@ The Worker is intentionally narrow:
 - PoiskKino title search;
 - PoiskKino movie lookup;
 - Zona `kpId -> Zenith` ID resolution;
-- optional Zenith metadata fallback.
+- Zenith metadata/serial-playlist fallback.
 - Gencit/Opravar player/API metadata resolution and media-host substitution.
 
 It does not proxy video segments, manifests, MP4, M4S, TS, or images.

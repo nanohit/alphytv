@@ -11,6 +11,8 @@ Endpoints:
 - `GET /movie?id=1382256` -> PoiskKino movie details.
 - `GET /resolve-zona?kpId=1382256` -> pure-JS Zona protocol resolve from
   Kinopoisk ID to `https://api.zenithjs.ws/embed/movie/<id>`.
+- `GET /zenith?id=2097` -> Zenith sources plus the normalized serial playlist
+  (`current`, seasons, episodes, and per-episode DASH/HLS URLs).
 
 ## Local setup
 
@@ -29,6 +31,7 @@ For local tests, paste the token when Wrangler asks.
 curl 'http://127.0.0.1:8787/search?q=Project%20Hail%20Mary&limit=3'
 curl 'http://127.0.0.1:8787/movie?id=1382256'
 curl 'http://127.0.0.1:8787/resolve-zona?kpId=1382256'
+curl 'http://127.0.0.1:8787/zenith?id=2097'
 ```
 
 ## Deploy
