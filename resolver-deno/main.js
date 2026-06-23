@@ -51,7 +51,11 @@ try {
 }
 const zonaMemoryCache = new Map();
 const zonaInflight = new Map();
+const zenithMemoryCache = new Map();
+const zenithInflight = new Map();
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const ZENITH_FRESH_MS = 60 * 60 * 1000;
+const ZENITH_STALE_MS = 24 * 60 * 60 * 1000;
 
 function corsHeadersFor(request) {
   const requestOrigin = request.headers.get("origin") || "";
@@ -179,10 +183,90 @@ async function handleResolveZonaCached(request, url) {
   return response.clone();
 }
 
+function zenithCacheRequest(id) {
+  return new Request(`https://alphy-zenith-cache.invalid/${encodeURIComponent(id)}`);
+}
+
+async function readZenithCache(id) {
+  let stored = zenithMemoryCache.get(id) || null;
+  if (!stored && edgeCache) {
+    try {
+      const response = await edgeCache.match(zenithCacheRequest(id));
+      if (response) {
+        stored = await response.json();
+        if (stored?.value?.hasSources) zenithMemoryCache.set(id, stored);
+      }
+    } catch {
+      // A cache miss must never break the live resolver.
+    }
+  }
+  if (!stored?.value?.hasSources || !stored.storedAt) return null;
+  const age = Date.now() - stored.storedAt;
+  if (age > ZENITH_STALE_MS) return null;
+  return { ...stored, fresh: age <= ZENITH_FRESH_MS };
+}
+
+async function writeZenithCache(id, value) {
+  const stored = { storedAt: Date.now(), value };
+  zenithMemoryCache.set(id, stored);
+  if (edgeCache) {
+    await edgeCache.put(
+      zenithCacheRequest(id),
+      new Response(JSON.stringify(stored), {
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": `public, max-age=${Math.floor(ZENITH_STALE_MS / 1000)}`,
+        },
+      }),
+    ).catch(() => {});
+  }
+}
+
+async function fetchAndCacheZenith(request, id) {
+  const response = await worker.fetch(request, env);
+  try {
+    const value = await response.clone().json();
+    if (response.ok && value?.ok && value?.hasSources) {
+      await writeZenithCache(id, value);
+    }
+  } catch {
+    // Preserve the upstream response unchanged.
+  }
+  return response;
+}
+
+async function handleZenithCached(request, url) {
+  const idOrUrl = (url.searchParams.get("id") || url.searchParams.get("url") || "").trim();
+  const id = idOrUrl.match(/(?:^|\/)(\d+)(?:$|[/?#])/)?.[1] || idOrUrl.match(/^\d+$/)?.[0] || "";
+  if (!id) return worker.fetch(request, env);
+
+  const cached = await readZenithCache(id);
+  if (cached?.fresh) {
+    return jsonResponse(request, { ...cached.value, cached: true }, 200, "public, max-age=300");
+  }
+
+  const inflightKey = `${id}|${request.headers.get("origin") || ""}`;
+  if (!zenithInflight.has(inflightKey)) {
+    const pending = fetchAndCacheZenith(request, id).finally(() => zenithInflight.delete(inflightKey));
+    zenithInflight.set(inflightKey, pending);
+  }
+  const response = await zenithInflight.get(inflightKey);
+  if (response.ok || !cached?.value) return response.clone();
+
+  return jsonResponse(request, {
+    ...cached.value,
+    cached: true,
+    stale: true,
+  }, 200, "public, max-age=60");
+}
+
 Deno.serve((request) => {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/resolve-zona") {
     return handleResolveZonaCached(request, url);
+  }
+  if (request.method === "GET" && url.pathname === "/zenith") {
+    return handleZenithCached(request, url);
   }
   if (request.method === "GET" && url.pathname === "/health" && url.searchParams.has("diag")) {
     return jsonResponse(request, {
@@ -192,6 +276,10 @@ Deno.serve((request) => {
         kv: !!kv,
         edge: !!edgeCache,
         memoryEntries: zonaMemoryCache.size,
+      },
+      zenithCache: {
+        edge: !!edgeCache,
+        memoryEntries: zenithMemoryCache.size,
       },
     });
   }

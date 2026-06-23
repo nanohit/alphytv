@@ -150,6 +150,10 @@ buttons switch directly to that episode's source and persist the selection.
 If a signed source expires during switching, the client refreshes the Zenith
 embed through the resolver and retries the same selection.
 
+The Deno wrapper keeps successful parsed Zenith responses fresh for one hour
+and stale-usable for up to 24 hours. This absorbs provider `422` bursts without
+proxying media; Shaka still requests manifests and segments from the media CDN.
+
 Shaka Player handles DASH/HLS and exposes season, episode, quality, and audio
 switching.
 

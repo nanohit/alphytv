@@ -113,6 +113,9 @@ From a Russian IP, search a title or paste a Newdeaf URL.
 - Zenith does not accept `?season=&episode=` navigation. Episode switching must
   use the per-episode sources embedded in its playlist; selecting the first
   media URL in the document can play the wrong episode.
+- The Deno resolver caches successful Zenith playlist metadata for one hour and
+  can serve it stale for up to 24 hours when Zenith temporarily returns `422`.
+  Media manifests and segments are still loaded directly by the browser.
 - Allo remains black-box: baseline iframe can play but may force audible ads;
   cleanroom/rehost fails because Allo API calls are origin/CORS gated.
 - Opravar signed media URLs are short-lived. Episode/voice changes therefore
