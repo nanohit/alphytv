@@ -25,6 +25,10 @@ export default {
         return await handleMovie(request, env, url);
       }
 
+      if (url.pathname === "/seasons") {
+        return await handleSeasons(request, env, url);
+      }
+
       if (url.pathname === "/resolve-zona") {
         return await handleZonaResolve(request, env, url);
       }
@@ -89,6 +93,15 @@ async function handleMovie(request, env, url) {
 
   const { movie, source } = await movieWithFallback(env, id);
   return json(request, env, { ok: true, source, movie });
+}
+
+async function handleSeasons(request, env, url) {
+  const id = (url.searchParams.get("id") || url.searchParams.get("kpId") || "").trim();
+  if (!/^\d+$/.test(id)) {
+    return json(request, env, { ok: false, error: "missing_or_invalid_id" }, 400);
+  }
+  const { seasons, source } = await seasonsWithFallback(env, id);
+  return json(request, env, { ok: true, source, kpId: id, seasons });
 }
 
 // Metadata sources, used in order of remaining daily budget:
@@ -158,6 +171,21 @@ async function movieWithFallback(env, id) {
   }
 }
 
+async function seasonsWithFallback(env, id) {
+  try {
+    return { seasons: await poiskkinoSeasons(env, id), source: "poiskkino" };
+  } catch (primaryError) {
+    const keys = unofficialKeys(env);
+    if (!keys.length) throw primaryError;
+    try {
+      const { value, index } = await unofficialRotate(keys, (key) => unofficialSeasons(env, key, id));
+      return { seasons: value, source: `kinopoiskunofficial#${index + 1}` };
+    } catch {
+      throw primaryError;
+    }
+  }
+}
+
 async function poiskkinoSearch(env, query, limit) {
   const apiUrl = new URL("/v1.4/movie/search", poiskkinoBase(env));
   apiUrl.searchParams.set("query", query);
@@ -172,6 +200,14 @@ async function poiskkinoMovie(env, id) {
   return normalizeMovie(await poiskkinoFetch(env, apiUrl));
 }
 
+async function poiskkinoSeasons(env, id) {
+  const apiUrl = new URL("/v1.4/season", poiskkinoBase(env));
+  apiUrl.searchParams.set("movieId", id);
+  apiUrl.searchParams.set("limit", "50");
+  const raw = await poiskkinoFetch(env, apiUrl);
+  return normalizeSeasons(raw.docs);
+}
+
 async function unofficialSearch(env, key, query, limit) {
   const apiUrl = new URL("/api/v2.1/films/search-by-keyword", unofficialBase(env));
   apiUrl.searchParams.set("keyword", query);
@@ -184,6 +220,12 @@ async function unofficialSearch(env, key, query, limit) {
 async function unofficialMovie(env, key, id) {
   const apiUrl = new URL(`/api/v2.2/films/${id}`, unofficialBase(env));
   return normalizeUnofficialFilm(await unofficialFetch(key, apiUrl));
+}
+
+async function unofficialSeasons(env, key, id) {
+  const apiUrl = new URL(`/api/v2.2/films/${id}/seasons`, unofficialBase(env));
+  const raw = await unofficialFetch(key, apiUrl);
+  return normalizeSeasons(raw.items);
 }
 
 async function unofficialFetch(key, apiUrl) {
@@ -230,7 +272,13 @@ async function handleZenith(request, env, url) {
     return json(request, env, { ok: false, error: "missing_or_invalid_zenith_id" }, 400);
   }
 
-  const embedUrl = `https://api.zenithjs.ws/embed/movie/${id}`;
+  const embedUrl = new URL(`https://api.zenithjs.ws/embed/movie/${id}`);
+  const season = optionalPositiveInt(url.searchParams.get("season"));
+  const episode = optionalPositiveInt(url.searchParams.get("episode"));
+  if (season && episode) {
+    embedUrl.searchParams.set("season", String(season));
+    embedUrl.searchParams.set("episode", String(episode));
+  }
   const response = await fetch(embedUrl, {
     headers: {
       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -248,7 +296,9 @@ async function handleZenith(request, env, url) {
   return json(request, env, {
     ok: true,
     id,
-    embedUrl,
+    season: season && episode ? season : null,
+    episode: season && episode ? episode : null,
+    embedUrl: embedUrl.href,
     status: response.status,
     bytes: html.length,
     sources: parsed.sources,
@@ -597,6 +647,7 @@ function normalizeMovie(item) {
     type: item.type ?? null,
     year: item.year ?? null,
     isSeries: item.isSeries ?? false,
+    seasons: normalizeSeasonInfo(item.seasonsInfo),
     movieLength: item.movieLength ?? null,
     description: item.description ?? null,
     shortDescription: item.shortDescription ?? null,
@@ -610,6 +661,40 @@ function normalizeMovie(item) {
       imdb: item.votes?.imdb ?? null,
     },
   };
+}
+
+function normalizeSeasonInfo(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((item) => ({
+      season: numberOrNull(item?.number ?? item?.seasonNumber),
+      episodes: Array.from(
+        { length: Math.max(0, numberOrNull(item?.episodesCount) || 0) },
+        (_, index) => ({ episode: index + 1 }),
+      ),
+    }))
+    .filter((item) => item.season > 0 && item.episodes.length)
+    .sort((a, b) => a.season - b.season);
+}
+
+function normalizeSeasons(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((item) => {
+      const season = numberOrNull(item?.number ?? item?.seasonNumber);
+      let episodes = (Array.isArray(item?.episodes) ? item.episodes : [])
+        .map((episode) => ({
+          episode: numberOrNull(episode?.number ?? episode?.episodeNumber),
+          title: String(episode?.name || episode?.nameRu || episode?.enName || episode?.nameEn || "").trim(),
+        }))
+        .filter((episode) => episode.episode > 0)
+        .sort((a, b) => a.episode - b.episode);
+      if (!episodes.length) {
+        const count = Math.max(0, numberOrNull(item?.episodesCount) || 0);
+        episodes = Array.from({ length: count }, (_, index) => ({ episode: index + 1, title: "" }));
+      }
+      return { season, episodes };
+    })
+    .filter((item) => item.season > 0 && item.episodes.length)
+    .sort((a, b) => a.season - b.season);
 }
 
 // kinopoiskapiunofficial.tech /api/v2.2/films/{id} -> our normalized movie shape.
@@ -710,6 +795,12 @@ function clampInt(value, min, max, fallback) {
   const parsed = Number.parseInt(value || "", 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, parsed));
+}
+
+function optionalPositiveInt(value) {
+  if (value == null || value === "") return null;
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function enqueueZonaResolve(task) {
