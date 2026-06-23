@@ -293,6 +293,7 @@ async function handleZenith(request, env, url) {
   }
 
   const parsed = parseZenithEmbed(html);
+  const inspect = url.searchParams.get("inspect") === "1" ? inspectZenithHtml(html) : null;
   return json(request, env, {
     ok: true,
     id,
@@ -304,6 +305,7 @@ async function handleZenith(request, env, url) {
     sources: parsed.sources,
     meta: parsed.meta,
     hasSources: !!(parsed.sources.dash || parsed.sources.dasha || parsed.sources.hls),
+    ...(inspect ? { inspect } : {}),
   });
 }
 
@@ -975,6 +977,24 @@ function parseZenithEmbed(html) {
       audioNames: audioMatch ? [...audioMatch[1].matchAll(/"([^"]+)"|'([^']+)'/g)].map((match) => match[1] || match[2]) : [],
     },
   };
+}
+
+function inspectZenithHtml(html) {
+  const text = String(html || "");
+  const scriptSrcs = [...text.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi)]
+    .map((match) => decodeHtml(match[1]))
+    .slice(0, 50);
+  const snippets = [];
+  const seen = new Set();
+  for (const match of text.matchAll(/season|episode|serial|playlist|translation|download_link_key/gi)) {
+    const start = Math.max(0, match.index - 240);
+    const snippet = text.slice(start, Math.min(text.length, match.index + 600)).replace(/\s+/g, " ");
+    if (seen.has(snippet)) continue;
+    seen.add(snippet);
+    snippets.push(snippet);
+    if (snippets.length >= 80) break;
+  }
+  return { scriptSrcs, snippets };
 }
 
 function firstUrl(text, kindRe) {
