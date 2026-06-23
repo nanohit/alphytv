@@ -42,10 +42,23 @@
 
     <!-- HOME -->
     <section id="homeView" class="view">
-      <div id="continueSection" class="row hidden">
+      <div id="continueSection" class="row continue-section hidden">
         <h3 id="continueHeader">Продолжить просмотр</h3>
         <div id="continueGrid" class="card-grid"></div>
       </div>
+      <section id="curatedSection" class="curated-section hidden" aria-label="Подборки">
+        <div class="curated-toolbar">
+          <div>
+            <h2>Подборки</h2>
+            <span id="catalogState" class="catalog-state"></span>
+          </div>
+          <div id="adminCatalogActions" class="admin-catalog-actions hidden">
+            <button id="createListBtn" type="button">+ список</button>
+            <button id="saveCatalogBtn" type="button">Сохранить</button>
+          </div>
+        </div>
+        <div id="curatedLists" class="curated-lists"></div>
+      </section>
       <div id="bookmarksSection" class="row hidden">
         <h3>Закладки</h3>
         <div id="bookmarksGrid" class="card-grid"></div>
@@ -68,6 +81,7 @@
         <button class="back-btn" id="backBtn" type="button">← Назад</button>
         <h2 id="watchTitle" class="watch-title"></h2>
         <div class="watch-actions">
+          <button class="add-list-btn hidden" id="addToListBtn" type="button">+ В подборку</button>
           <button class="bookmark-btn" id="bookmarkBtn" type="button" aria-label="В закладки">☆</button>
         </div>
       </div>
@@ -84,9 +98,37 @@
 
     <div id="loading" class="loading hidden"><div class="spinner"></div><div>Загрузка…</div></div>
     <div id="error" class="error hidden"></div>
+
+    <footer class="site-footer">
+      <button id="adminEntry" class="admin-entry" type="button">admin entry</button>
+    </footer>
   </div>
 
+  <dialog id="adminDialog" class="compact-dialog">
+    <form id="adminLoginForm" method="dialog">
+      <div class="dialog-head">
+        <strong>admin</strong>
+        <button class="dialog-close" value="cancel" aria-label="Закрыть">×</button>
+      </div>
+      <label>Логин<input id="adminUserInput" autocomplete="username"></label>
+      <label>Пароль<input id="adminPasswordInput" type="password" autocomplete="current-password"></label>
+      <div id="adminLoginError" class="dialog-error hidden"></div>
+      <button id="adminLoginBtn" class="dialog-primary" type="submit" value="default">Войти</button>
+    </form>
+  </dialog>
+
+  <dialog id="listPickerDialog" class="compact-dialog">
+    <form method="dialog">
+      <div class="dialog-head">
+        <strong>Добавить в подборку</strong>
+        <button class="dialog-close" value="cancel" aria-label="Закрыть">×</button>
+      </div>
+      <div id="listPickerOptions" class="list-picker-options"></div>
+    </form>
+  </dialog>
+
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
-  <script src="/app.js?v=20260623-serial1"></script>
+  <script src="/app.js?v=20260624-serial1"></script>
+  <script src="/catalog.js?v=20260624-serial1"></script>
 </body>
 </html>

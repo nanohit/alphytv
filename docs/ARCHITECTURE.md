@@ -13,6 +13,15 @@ input title/Newdeaf URL
   -> browser-side playback
 ```
 
+The homepage has a separate immutable-read path:
+
+```text
+curated-config.json
+  -> public Vercel Blob CDN catalog/curated.json
+  -> cached metadata + resolved player target
+  -> direct watch route
+```
+
 ## Source Decisions
 
 ### Newdeaf
@@ -144,9 +153,12 @@ Then the browser fetches the Zenith embed and extracts:
 
 The playlist is authoritative. Zenith serial embeds contain many media URLs,
 and the first URL in the HTML is not necessarily the current episode. The
-resolver and browser parser therefore match `playlist.current` (or the saved
-user selection) to a concrete episode before loading Shaka. Season/episode
-buttons switch directly to that episode's source and persist the selection.
+resolver and browser parser therefore match the explicit season/episode from
+the selected Newdeaf page, then a saved user selection, then
+`playlist.current`, to a concrete episode before loading Shaka. This hint also
+forces a full serial-playlist resolve for Allo-only Newdeaf pages even when
+metadata did not classify the title as a series. Season/episode buttons switch
+directly to that episode's source and persist the selection.
 If a signed source expires during switching, the client refreshes the Zenith
 embed through the resolver and retries the same selection.
 
@@ -156,6 +168,34 @@ proxying media; Shaka still requests manifests and segments from the media CDN.
 
 Shaka Player handles DASH/HLS and exposes season, episode, quality, and audio
 switching.
+
+### Curated homepage
+
+Public visitors never call a catalog Function or Deno. `catalog.js` reads the
+stable public Blob URL from `curated-config.json`; Blob CDN serves the revisioned
+JSON snapshot. `curated-fallback.json` is baked into the deployment as a
+last-known-good bootstrap.
+
+Only authenticated admin activity reaches Vercel Functions:
+
+- `GET /api/admin/check`;
+- `GET /api/admin/catalog`;
+- `PUT /api/admin/catalog`.
+
+The PUT validates all targets and public URLs, caps the catalog size, compares
+`baseRevision`, then overwrites the stable Blob pathname. Admin edits are
+debounced and backed up locally until a successful save.
+
+Curated items store the metadata needed to render a complete card and the most
+direct durable playback target available:
+
+- Zenith ID instead of a `kpId`, when Shaka resolved Zenith successfully;
+- Ortified embed URL;
+- Gencit/Opravar player URL plus Newdeaf page URL;
+- `kpId` or Newdeaf URL only as a fallback.
+
+Signed media manifests are never stored because they expire. No video bytes go
+through Vercel, Blob, or Deno.
 
 ## Backend Scope
 
@@ -168,6 +208,9 @@ The Worker is intentionally narrow:
 - Gencit/Opravar player/API metadata resolution and media-host substitution.
 
 It does not proxy video segments, manifests, MP4, M4S, TS, or images.
+
+The curated admin system is deliberately outside Deno. Homepage reads are Blob
+CDN reads; catalog Functions run only while an admin signs in or saves.
 
 ## Legacy Integration Window
 

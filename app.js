@@ -24,6 +24,7 @@
     ndpage: 24 * 3600e3,
     zona: 30 * 24 * 3600e3,
     meta: 7 * 24 * 3600e3,
+    enriched: 30 * 24 * 3600e3,
   };
 
   const params = new URLSearchParams(location.search);
@@ -71,6 +72,10 @@
     sources: {},
     opravar: null,
     serial: null,
+    currentMeta: null,
+    zenithEmbedUrl: "",
+    playerReady: false,
+    lastSnapshotAt: 0,
     trackInterval: null,
     playbackRate: 1,
   };
@@ -150,6 +155,9 @@
 
   function recordHistory(entry) {
     let hist = loadList(STORE_HISTORY);
+    if (entry.snapshot) {
+      hist = hist.map((item) => item.key === entry.key ? item : ({ ...item, snapshot: "" }));
+    }
     const i = hist.findIndex((h) => h.key === entry.key);
     const merged = { ...(i >= 0 ? hist[i] : {}), ...entry, updatedAt: Date.now() };
     if (i >= 0) hist[i] = merged;
@@ -167,6 +175,9 @@
       title: target.title || existing?.title || "",
       poster: target.poster || existing?.poster || "",
       year: target.year || existing?.year || "",
+      rating: state.currentMeta?.rating || existing?.rating,
+      movieLength: state.currentMeta?.movieLength || existing?.movieLength,
+      isSeries: state.currentMeta?.isSeries ?? target.isSeries ?? existing?.isSeries ?? false,
       position: existing?.position || 0,
       duration: existing?.duration || 0,
       progress: existing?.progress || 0,
@@ -460,6 +471,7 @@
     el.homeView.classList.toggle("hidden", name !== "home");
     el.searchView.classList.toggle("hidden", name !== "search");
     el.watchView.classList.toggle("hidden", name !== "watch");
+    window.dispatchEvent(new CustomEvent("alphy:view", { detail: { view: name } }));
   }
 
   function showHome() {
@@ -468,7 +480,11 @@
     el.searchInput.value = "";
     const hist = loadList(STORE_HISTORY);
     const bms = loadList(STORE_BOOKMARKS);
-    renderHomeGrid(el.continueGrid, el.continueSection, hist, { withProgress: true, store: STORE_HISTORY });
+    renderHomeGrid(el.continueGrid, el.continueSection, hist, {
+      withProgress: true,
+      store: STORE_HISTORY,
+      featureLatest: true,
+    });
     renderHomeGrid(el.bookmarksGrid, el.bookmarksSection, bms, { withProgress: false, store: STORE_BOOKMARKS });
     el.homeEmpty.classList.toggle("hidden", hist.length > 0 || bms.length > 0);
   }
@@ -477,7 +493,7 @@
     grid.replaceChildren();
     if (!entries.length) { section.classList.add("hidden"); return; }
     section.classList.remove("hidden");
-    entries.slice(0, 20).forEach((entry) => {
+    entries.slice(0, 20).forEach((entry, index) => {
       let sub = entry.year ? String(entry.year) : "";
       if (opts.withProgress && entry.duration > 0) {
         const pct = Math.round((entry.progress || 0) * 100);
@@ -488,6 +504,11 @@
         title: entry.title || "(без названия)",
         sub,
         poster: entry.poster,
+        snapshot: entry.snapshot,
+        wide: !!opts.featureLatest && index === 0,
+        rating: entry.rating,
+        movieLength: entry.movieLength,
+        isSeries: entry.isSeries,
         progress: opts.withProgress && entry.duration > 0 ? entry.progress || 0 : null,
         onClick: () => go(hashFor(entry.target)),
         onRemove: () => {
@@ -543,22 +564,28 @@
     // Ortified path (newdeaf, with the embedded season/episode player) is the
     // preferred choice, so it leads the grid — same ordering as the old MVP.
     for (const item of ndCandidates) {
+      const match = matchNewdeafMetadata(item, pkResults);
+      if (match) cacheSet("ndenriched", item.url, match, TTL.enriched);
       const card = makeCard({
         title: item.title || "Newdeaf",
-        sub: "NF",
-        poster: item.poster,
+        sub: [match?.year, match?.isSeries ? "сериал" : "Newdeaf"].filter(Boolean).join(" · "),
+        poster: match?.poster || item.poster,
+        rating: match?.rating,
+        movieLength: match?.movieLength,
+        isSeries: match?.isSeries,
         onClick: () => go(`/watch/nd/${encodeURIComponent(item.url)}`),
       });
       el.resultsGrid.appendChild(card);
     }
     for (const movie of pkResults) {
       if (movie.kpId == null) continue;
-      const kp = movie.rating?.kp;
       const card = makeCard({
         title: movieTitle(movie),
         sub: [movie.year, movie.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · "),
         poster: movie.poster,
-        ratingPill: kp ? Number(kp).toFixed(1) : "",
+        rating: movie.rating,
+        movieLength: movie.movieLength,
+        isSeries: movie.isSeries,
         onClick: () => go(`/watch/kp/${encodeURIComponent(movie.kpId)}`),
       });
       el.resultsGrid.appendChild(card);
@@ -577,34 +604,61 @@
     }
   }
 
-  function makeCard({ title, sub, poster, ratingPill, progress, onClick, onRemove }) {
+  function makeCard({
+    title,
+    sub,
+    poster,
+    snapshot,
+    wide = false,
+    ratingPill,
+    rating,
+    movieLength,
+    isSeries,
+    progress,
+    onClick,
+    onRemove,
+  }) {
     const card = document.createElement("article");
-    card.className = "card";
-    if (poster) {
+    card.className = `card${wide ? " continue-featured" : ""}`;
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+    const media = document.createElement("div");
+    media.className = "card-media";
+    const imageUrl = wide && snapshot ? snapshot : poster;
+    if (imageUrl) {
       const img = document.createElement("img");
       img.className = "poster";
-      img.loading = "lazy";
-      img.src = poster;
+      img.loading = wide ? "eager" : "lazy";
+      img.src = imageUrl;
       img.alt = "";
       img.addEventListener("error", () => { img.replaceWith(blankPoster()); });
-      card.appendChild(img);
+      media.appendChild(img);
     } else {
-      card.appendChild(blankPoster());
+      media.appendChild(blankPoster());
     }
     if (ratingPill) {
       const pill = document.createElement("div");
       pill.className = "rating-pill";
       pill.textContent = ratingPill;
-      card.appendChild(pill);
+      media.appendChild(pill);
     }
+    const hover = document.createElement("div");
+    hover.className = "card-hover-meta";
+    hover.innerHTML = `
+      <span><b>${formatRating(rating?.kp)}</b> КиноПоиск</span>
+      <span><b>${formatRating(rating?.imdb)}</b> IMDb</span>
+      <span><b>${isSeries ? "сериал" : movieLength ? `${Math.round(movieLength)} мин` : "—"}</b></span>
+    `;
+    media.appendChild(hover);
     if (onRemove) {
       const x = document.createElement("button");
       x.className = "card-remove";
       x.type = "button";
       x.textContent = "×";
       x.addEventListener("click", (event) => { event.stopPropagation(); onRemove(); });
-      card.appendChild(x);
+      media.appendChild(x);
     }
+    card.appendChild(media);
     const t = document.createElement("div");
     t.className = "ctitle";
     t.textContent = title;
@@ -622,6 +676,12 @@
       card.appendChild(bar);
     }
     card.addEventListener("click", onClick);
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        onClick();
+      }
+    });
     return card;
   }
   function blankPoster() {
@@ -630,11 +690,20 @@
     return d;
   }
 
+  function formatRating(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number.toFixed(1) : "—";
+  }
+
   // =====================================================================
   // Watch dispatch
   // =====================================================================
   async function showWatch(r, token) {
     setView("watch");
+    state.playerReady = false;
+    state.currentMeta = null;
+    state.zenithEmbedUrl = "";
+    window.dispatchEvent(new CustomEvent("alphy:player-ready", { detail: { ready: false } }));
     el.metaPanel.classList.add("hidden");
     el.trackPanel.classList.add("hidden");
     // Show the loading state immediately so the previous title's player is never
@@ -648,16 +717,18 @@
     throw new Error("Неизвестный тип контента");
   }
 
-  async function playKp(kpId, token) {
-    let meta = cacheGet("meta", kpId);
+  async function playKp(kpId, token, opts = {}) {
+    let meta = opts.meta || cacheGet("meta", kpId);
     if (!meta) { meta = await fetchMovieMeta(kpId); if (isStale(token)) return; }
+    if (meta) cacheSet("meta", kpId, meta, TTL.meta);
+    const serialSelection = normalizeSerialHint(opts.serialSelection);
     const target = {
       kind: "kp",
       kpId,
       title: movieTitle(meta),
       poster: meta?.poster,
       year: meta?.year,
-      isSeries: !!meta?.isSeries,
+      isSeries: !!(opts.forceSeries || meta?.isSeries || serialSelection),
     };
     state.currentTarget = target;
     setWatchHead(target.title || `kpId ${kpId}`, target);
@@ -670,15 +741,25 @@
       histKey: `kp:${kpId}`,
       resume: resumePosition(`kp:${kpId}`),
       audioLang: savedAudioLang(`kp:${kpId}`),
-      serialSelection: savedSerialSelection(keyFor(target)),
+      serialSelection: serialSelection || savedSerialSelection(keyFor(target)),
+      forceSeries: target.isSeries,
     });
   }
 
   async function playZen(zenithId, token) {
-    const target = { kind: "zen", zenithId, title: `Zenith ${zenithId}` };
+    const cachedMeta = cacheGet("curatedmeta", `zen:${zenithId}`) || storedMeta(`zen:${zenithId}`);
+    const target = {
+      kind: "zen",
+      zenithId,
+      title: cachedMeta?.title || `Zenith ${zenithId}`,
+      poster: cachedMeta?.poster,
+      year: cachedMeta?.year,
+      isSeries: !!cachedMeta?.isSeries,
+    };
     state.currentTarget = target;
     setWatchHead(target.title, target);
-    el.metaPanel.classList.add("hidden");
+    if (cachedMeta) renderMeta(cachedMeta, target);
+    else el.metaPanel.classList.add("hidden");
     recordOpen(target);
     const embedUrl = `https://api.zenithjs.ws/embed/movie/${encodeURIComponent(zenithId)}`;
     await playZenithEmbed(embedUrl, target, token, {
@@ -699,7 +780,7 @@
     state.currentTarget = target;
     setWatchHead(target.title || "Ortified", target);
     if (meta && (meta.title || meta.poster || meta.description)) {
-      renderMeta({ name: meta.title, poster: meta.poster, year: meta.year, description: meta.description }, target);
+      renderMeta(meta, target);
     } else {
       el.metaPanel.classList.add("hidden");
     }
@@ -710,11 +791,21 @@
   async function playOpr(playerUrl, token, ndMeta) {
     const meta = ndMeta || cacheGet("oprmeta", playerUrl) || storedMeta(`opr:${playerUrl}`);
     const pageUrl = meta?.pageUrl || "";
-    const target = { kind: "opr", playerUrl, pageUrl, title: meta?.title, poster: meta?.poster, year: meta?.year };
+    const serialHint = normalizeSerialHint(meta?.serialSelection) ||
+      newdeafSerialHint(meta?.title || "", pageUrl, playerUrl);
+    const target = {
+      kind: "opr",
+      playerUrl,
+      pageUrl,
+      title: meta?.title,
+      poster: meta?.poster,
+      year: meta?.year,
+      isSeries: !!(meta?.isSeries || serialHint),
+    };
     state.currentTarget = target;
     setWatchHead(target.title || "Opravar", target);
     if (meta && (meta.title || meta.poster || meta.description)) {
-      renderMeta({ name: meta.title, poster: meta.poster, year: meta.year, description: meta.description }, target);
+      renderMeta(meta, target);
     } else {
       el.metaPanel.classList.add("hidden");
     }
@@ -728,7 +819,13 @@
         pageUrl,
         base: resolved.base || "",
         playlist: resolved.playlist || [],
-        selection: chooseOpravarSelection(resolved.playlist || [], savedOpravarSelection(keyFor(target)) || resolved.current),
+        selection: chooseOpravarSelection(
+          resolved.playlist || [],
+          (ndMeta ? serialHint : null) ||
+            savedOpravarSelection(keyFor(target)) ||
+            serialHint ||
+            resolved.current,
+        ),
       };
       const currentMatches = sameOpravarSelection(context.selection, resolved.current);
       const media = currentMatches
@@ -740,7 +837,11 @@
       if (isStale(token)) return;
       if (meta?.title) {
         log("opravar-fallback", { message: error.message, title: meta.title });
-        return playZonaFallback(meta.title, meta.year, token);
+        return playZonaFallback(meta.title, meta.year, token, {
+          meta,
+          serialSelection: serialHint,
+          forceSeries: target.isSeries,
+        });
       }
       throw new Error("Плеер недоступен, а для резервного поиска не найдено название");
     }
@@ -778,7 +879,14 @@
       if (isStale(token)) return;
       if (target.title) {
         log("opravar-switch-fallback", { message: error.message, title: target.title });
-        return playZonaFallback(target.title, target.year, token);
+        return playZonaFallback(target.title, target.year, token, {
+          meta: state.currentMeta || target,
+          serialSelection: {
+            season: selection.season,
+            episode: selection.episode,
+          },
+          forceSeries: true,
+        });
       }
       showError(new Error("Не удалось переключить серию"));
     }
@@ -877,7 +985,24 @@
     setWatchHead("Newdeaf…", { kind: "nd", pageUrl });
     const parsed = await resolveNewdeafPage(pageUrl);
     if (isStale(token)) return;
-    const ndMeta = { title: parsed.title, poster: parsed.poster, year: parsed.year, description: parsed.description };
+    const enriched = cacheGet("ndenriched", pageUrl);
+    const serialHint = newdeafSerialHint(
+      parsed.title || "",
+      pageUrl,
+      parsed.opravar[0] || "",
+      parsed.allo[0] || "",
+    );
+    const ndMeta = mergeMetadata(
+      { title: parsed.title, poster: parsed.poster, year: parsed.year, description: parsed.description },
+      enriched,
+    );
+    if (serialHint) {
+      ndMeta.isSeries = true;
+      ndMeta.serialSelection = serialHint;
+    }
+    if (!ndMeta.rating?.kp && !ndMeta.rating?.imdb) {
+      enrichNewdeafMetadata(ndMeta, pageUrl, token).catch(() => {});
+    }
 
     if (parsed.ortified.length) {
       const embedUrl = parsed.ortified[0];
@@ -900,19 +1025,76 @@
     }
 
     // Allo-only or no player → Zona fallback via title -> kpId, then upgrade URL.
-    return playZonaFallback(parsed.title, parsed.year, token);
+    return playZonaFallback(parsed.title, parsed.year, token, {
+      meta: ndMeta,
+      serialSelection: serialHint,
+      forceSeries: !!(ndMeta.isSeries || serialHint),
+    });
   }
 
-  async function playZonaFallback(rawTitle, year, token) {
+  async function playZonaFallback(rawTitle, year, token, opts = {}) {
     const title = cleanMovieTitle(rawTitle || "");
     if (!title) throw new Error("Не найдено название для резервного поиска");
-    const results = await searchPoiskkino(title, year);
-    if (isStale(token)) return;
-    const movie = chooseMovie(results, title, year);
+    let movie = opts.meta?.kpId ? opts.meta : null;
+    if (!movie) {
+      const results = await searchPoiskkino(title, year);
+      if (isStale(token)) return;
+      movie = chooseMovie(results, title, year);
+    }
     if (!movie) throw new Error("PoiskKino не вернул kpId для Zona fallback");
-    cacheSet("meta", movie.kpId, movie, TTL.meta);
+    const meta = mergeMetadata(opts.meta || {}, movie);
+    cacheSet("meta", movie.kpId, meta, TTL.meta);
     replaceHash(`/watch/kp/${encodeURIComponent(movie.kpId)}`);
-    return playKp(String(movie.kpId), token);
+    return playKp(String(movie.kpId), token, {
+      meta,
+      serialSelection: opts.serialSelection,
+      forceSeries: !!(opts.forceSeries || meta.isSeries || opts.serialSelection),
+    });
+  }
+
+  function mergeMetadata(base, enriched) {
+    const left = base && typeof base === "object" ? base : {};
+    const right = enriched && typeof enriched === "object" ? enriched : {};
+    return {
+      ...right,
+      ...left,
+      title: left.title || movieTitle(left) || right.title || movieTitle(right) || "",
+      year: left.year || right.year || "",
+      poster: left.poster || right.poster || "",
+      backdrop: left.backdrop || right.backdrop || "",
+      description: left.description || left.shortDescription || right.description || right.shortDescription || "",
+      isSeries: left.isSeries ?? right.isSeries ?? false,
+      movieLength: left.movieLength || right.movieLength || null,
+      rating: {
+        ...(right.rating || {}),
+        ...(left.rating || {}),
+      },
+    };
+  }
+
+  async function enrichNewdeafMetadata(meta, pageUrl, token) {
+    const cleanTitle = [...matchTitleTokens(meta?.title || "")].join(" ");
+    if (!cleanTitle) return null;
+    const results = await searchPoiskkino(cleanTitle, meta?.year);
+    const match = matchNewdeafMetadata({ title: meta?.title, url: pageUrl }, results);
+    if (!match) return null;
+    cacheSet("ndenriched", pageUrl, match, TTL.enriched);
+    if (isStale(token) || !state.currentTarget) return match;
+    const merged = mergeMetadata(meta, match);
+    state.currentMeta = merged;
+    state.currentTarget.poster = merged.poster || state.currentTarget.poster;
+    state.currentTarget.year = merged.year || state.currentTarget.year;
+    state.currentTarget.isSeries = merged.isSeries;
+    renderMeta(merged, state.currentTarget);
+    if (state.currentTarget.kind === "ort") cacheSet("ortmeta", state.currentTarget.embedUrl, merged, TTL.enriched);
+    if (state.currentTarget.kind === "opr") {
+      cacheSet("oprmeta", state.currentTarget.playerUrl, {
+        ...merged,
+        pageUrl: state.currentTarget.pageUrl || pageUrl,
+      }, TTL.enriched);
+    }
+    window.dispatchEvent(new CustomEvent("alphy:metadata", { detail: merged }));
+    return match;
   }
 
   function setWatchHead(title, target) {
@@ -929,6 +1111,14 @@
     const kp = meta.rating?.kp;
     const imdb = meta.rating?.imdb;
     const desc = meta.description || meta.shortDescription || "";
+    state.currentMeta = mergeMetadata(state.currentMeta || {}, {
+      ...meta,
+      title,
+      year,
+      poster,
+      description: desc,
+      isSeries: meta.isSeries ?? target?.isSeries,
+    });
     const sub = [year, meta.movieLength ? `${meta.movieLength} мин` : ""].filter(Boolean).join(" · ");
     let html = "";
     if (poster) html += `<img src="${escapeAttr(poster)}" alt="">`;
@@ -962,6 +1152,17 @@
     iframe.srcdoc = sanitized.html;
     el.playerHost.replaceChildren(iframe);
     el.trackPanel.classList.add("hidden");
+    await new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      iframe.addEventListener("load", done, { once: true });
+      setTimeout(done, 1800);
+    });
+    if (!isStale(token)) markPlayerReady();
     log("ortified", "cleanroom loaded", sanitized.stats);
   }
 
@@ -971,6 +1172,7 @@
   async function playZenithEmbed(embedUrl, target, token, opts = {}) {
     if (isStale(token)) return;
     showPlayerLoading();
+    state.zenithEmbedUrl = embedUrl;
     let parsed = { sources: {}, meta: {}, playlist: { current: null, seasons: [] } };
     if (!opts.forceWorker) {
       try {
@@ -983,7 +1185,7 @@
     }
     const needsWorker =
       !parsed.sources.dash && !parsed.sources.hls && !parsed.sources.dasha ||
-      (target?.isSeries && !parsed.playlist?.seasons?.length);
+      ((opts.forceSeries || target?.isSeries || opts.serialSelection) && !parsed.playlist?.seasons?.length);
     if (opts.forceWorker || needsWorker) {
       parsed = await resolveZenithThroughWorker(embedUrl);
       if (isStale(token)) return;
@@ -1078,6 +1280,17 @@
     if (opts.resume > 5) { try { video.currentTime = opts.resume; } catch { /* ignore */ } }
     video.playbackRate = state.playbackRate;
     renderTracks();
+    markPlayerReady();
+    const snapshotCurrentFrame = () => {
+      const target = state.currentTarget;
+      if (!target) return;
+      setTimeout(() => captureVideoSnapshot(keyFor(target), target), 350);
+    };
+    video.addEventListener("loadeddata", snapshotCurrentFrame, { once: true });
+    video.addEventListener("playing", snapshotCurrentFrame);
+    video.addEventListener("pause", snapshotCurrentFrame);
+    video.addEventListener("seeked", snapshotCurrentFrame);
+    setTimeout(snapshotCurrentFrame, 2200);
     try { await video.play(); } catch { /* user gesture may be required */ }
   }
 
@@ -1097,16 +1310,71 @@
         title: target.title || "",
         poster: target.poster || "",
         year: target.year || "",
+        rating: state.currentMeta?.rating || undefined,
+        movieLength: state.currentMeta?.movieLength || undefined,
+        isSeries: state.currentMeta?.isSeries ?? target.isSeries ?? false,
         position: cur,
         duration: dur,
         progress: cur / dur,
       };
       if (audioLang) entry.audioLang = audioLang;
       recordHistory(entry);
+      if (Date.now() - state.lastSnapshotAt > 20_000) {
+        captureVideoSnapshot(histKey, target);
+      }
     }, 5000);
   }
   function stopTracking() {
     if (state.trackInterval) { clearInterval(state.trackInterval); state.trackInterval = null; }
+  }
+
+  function markPlayerReady() {
+    state.playerReady = true;
+    window.dispatchEvent(new CustomEvent("alphy:player-ready", {
+      detail: { ready: true },
+    }));
+  }
+
+  function captureVideoSnapshot(histKey, target) {
+    const video = state.videoEl;
+    if (!video || !video.videoWidth || !video.videoHeight || video.readyState < 2) return;
+    const width = Math.min(480, video.videoWidth);
+    const height = Math.max(1, Math.round(width * 9 / 16));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) return;
+    const sourceRatio = video.videoWidth / video.videoHeight;
+    const targetRatio = width / height;
+    let sx = 0;
+    let sy = 0;
+    let sw = video.videoWidth;
+    let sh = video.videoHeight;
+    if (sourceRatio > targetRatio) {
+      sw = video.videoHeight * targetRatio;
+      sx = (video.videoWidth - sw) / 2;
+    } else {
+      sh = video.videoWidth / targetRatio;
+      sy = (video.videoHeight - sh) / 2;
+    }
+    try {
+      context.drawImage(video, sx, sy, sw, sh, 0, 0, width, height);
+      const snapshot = canvas.toDataURL("image/jpeg", 0.58);
+      state.lastSnapshotAt = Date.now();
+      recordHistory({
+        key: histKey,
+        kind: target.kind,
+        target: cleanTarget(target),
+        title: target.title || state.currentMeta?.title || "",
+        poster: target.poster || state.currentMeta?.poster || "",
+        year: target.year || state.currentMeta?.year || "",
+        snapshot,
+      });
+    } catch (error) {
+      state.lastSnapshotAt = Date.now();
+      log("snapshot-warn", error?.message || String(error));
+    }
   }
 
   // Position reports from the Ortified cleanroom iframe (see progressHook). We can't
@@ -1117,7 +1385,7 @@
     if (!data.alphyOrtProgress) return;
     const target = state.currentTarget;
     if (!target || target.kind !== "ort") return;
-    const { position, duration } = data;
+    const { position, duration, snapshot } = data;
     if (!duration || !isFinite(duration) || duration <= 0) return;
     recordHistory({
       key: keyFor(target),
@@ -1126,9 +1394,13 @@
       title: target.title || "",
       poster: target.poster || "",
       year: target.year || "",
+      rating: state.currentMeta?.rating || undefined,
+      movieLength: state.currentMeta?.movieLength || undefined,
+      isSeries: state.currentMeta?.isSeries ?? target.isSeries ?? false,
       position,
       duration,
       progress: position / duration,
+      ...(typeof snapshot === "string" && snapshot.startsWith("data:image/jpeg") ? { snapshot } : {}),
     });
   }
 
@@ -1141,6 +1413,8 @@
     state.videoEl = null;
     state.opravar = null;
     state.serial = null;
+    state.playerReady = false;
+    window.dispatchEvent(new CustomEvent("alphy:player-ready", { detail: { ready: false } }));
     // Remove the old <iframe>/<video> from the DOM: stops its audio instantly and
     // guarantees a new resolve never leaves stale content on screen — even when the
     // new one errors before mounting (the "плеер залочен на старом контенте" bug).
@@ -1240,7 +1514,10 @@
       btn.textContent = String(item.season);
       if (item.season === current?.season) btn.className = "active";
       btn.addEventListener("click", () => {
-        const preferredEpisode = item.episodes.find((value) => value.episode > 0) || item.episodes[0];
+        const preferredEpisode =
+          item.episodes.find((value) => value.episode === current?.episode) ||
+          item.episodes.find((value) => value.episode > 0) ||
+          item.episodes[0];
         switchOpravarSelection({ season: item.season, episode: preferredEpisode?.episode, voiceId: current?.voiceId });
       });
       return btn;
@@ -1331,12 +1608,29 @@
 (() => {
   const hooked = new WeakSet();
   let lastSent = 0;
+  let lastShot = 0;
   const send = (v) => {
     const now = Date.now();
     if (now - lastSent < 4000) return;
     if (!v.duration || !isFinite(v.duration) || v.duration <= 0) return;
     lastSent = now;
-    try { parent.postMessage({ alphyOrtProgress: true, position: v.currentTime, duration: v.duration }, '*'); } catch (e) {}
+    let snapshot = '';
+    if (now - lastShot > 20000 && v.videoWidth && v.videoHeight) {
+      lastShot = now;
+      try {
+        const width = Math.min(480, v.videoWidth), height = Math.max(1, Math.round(width * 9 / 16));
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d', { alpha: false });
+        const sourceRatio = v.videoWidth / v.videoHeight, targetRatio = width / height;
+        let sx = 0, sy = 0, sw = v.videoWidth, sh = v.videoHeight;
+        if (sourceRatio > targetRatio) { sw = v.videoHeight * targetRatio; sx = (v.videoWidth - sw) / 2; }
+        else { sh = v.videoWidth / targetRatio; sy = (v.videoHeight - sh) / 2; }
+        ctx.drawImage(v, sx, sy, sw, sh, 0, 0, width, height);
+        snapshot = canvas.toDataURL('image/jpeg', 0.58);
+      } catch (e) {}
+    }
+    try { parent.postMessage({ alphyOrtProgress: true, position: v.currentTime, duration: v.duration, snapshot }, '*'); } catch (e) {}
   };
   const hook = (v) => {
     if (hooked.has(v)) return; hooked.add(v);
@@ -1757,6 +2051,53 @@ addEventListener('message', async (event) => {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   }
 
+  function normalizeSerialHint(value) {
+    const season = positiveInt(value?.season);
+    const episode = positiveInt(value?.episode);
+    if (!season && !episode) return null;
+    return {
+      ...(season ? { season } : {}),
+      ...(episode ? { episode } : {}),
+    };
+  }
+
+  // Newdeaf has a separate result/page for each season, while the fallback
+  // providers expose one combined serial playlist. Preserve the page's explicit
+  // season/episode instead of letting Zenith/Opravar pick an unrelated
+  // playlist.current. Query parameters are authoritative; title/path patterns
+  // cover Allo-only pages that have no selectable player query.
+  function newdeafSerialHint(...values) {
+    let season = null;
+    let episode = null;
+    const textParts = [];
+    for (const value of values) {
+      const text = String(value || "");
+      if (!text) continue;
+      textParts.push(text);
+      try {
+        const url = new URL(text);
+        season ||= positiveInt(url.searchParams.get("season"));
+        episode ||= positiveInt(url.searchParams.get("episode"));
+        textParts.push(decodeURIComponent(url.pathname.replace(/[+_-]+/g, " ")));
+      } catch {
+        // A title is expected to land here.
+      }
+    }
+
+    const text = compact(textParts.join(" "));
+    season ||= positiveInt(
+      text.match(/\b(?:сезон|season|sezon)\s*(?:№|#|:|-)?\s*(\d{1,3})\b/i)?.[1] ||
+      text.match(/\b(\d{1,3})\s*(?:сезон|season|sezon)\b/i)?.[1] ||
+      text.match(/(?:^|[\s/_-])s(?:eason|ezon)?[\s_-]?(\d{1,3})(?:$|[\s/_.-])/i)?.[1],
+    );
+    episode ||= positiveInt(
+      text.match(/\b(?:серия|эпизод|episode|seriya|epizod|ep)\s*(?:№|#|:|-)?\s*(\d{1,4})\b/i)?.[1] ||
+      text.match(/\b(\d{1,4})\s*(?:серия|эпизод|episode|seriya|epizod)\b/i)?.[1] ||
+      text.match(/(?:^|[\s/_.-])e(?:p(?:isode)?)?[\s_-]?(\d{1,4})(?:$|[\s/_.-])/i)?.[1],
+    );
+    return normalizeSerialHint({ season, episode });
+  }
+
   function zenithEpisodeSources(value) {
     const sources = {};
     for (const key of ["dash", "dasha", "hls"]) {
@@ -1817,6 +2158,51 @@ addEventListener('message', async (event) => {
       results.find((movie) => year && String(movie.year) === String(year)) ||
       results[0];
   }
+
+  function matchNewdeafMetadata(item, movies) {
+    if (!item?.title || !Array.isArray(movies) || !movies.length) return null;
+    const wanted = matchTitleTokens(item.title);
+    if (!wanted.size) return null;
+    let best = null;
+    let bestScore = 0;
+    for (const movie of movies) {
+      const names = [movieTitle(movie), movie?.alternativeName, movie?.enName].filter(Boolean);
+      let score = 0;
+      for (const name of names) {
+        const candidate = matchTitleTokens(name);
+        if (!candidate.size) continue;
+        const intersection = [...wanted].filter((token) => candidate.has(token)).length;
+        const union = new Set([...wanted, ...candidate]).size;
+        const jaccard = union ? intersection / union : 0;
+        const left = [...wanted].join("");
+        const right = [...candidate].join("");
+        const containment = left === right ? 1 : left.includes(right) || right.includes(left) ? 0.86 : 0;
+        score = Math.max(score, jaccard, containment);
+      }
+      const pageYear = extractYear(`${item.title} ${item.url}`);
+      if (pageYear && String(movie?.year || "") === pageYear) score += 0.1;
+      if (score > bestScore) {
+        best = movie;
+        bestScore = score;
+      }
+    }
+    return bestScore >= 0.54 ? best : null;
+  }
+
+  function matchTitleTokens(value) {
+    const cleaned = compact(value)
+      .replace(/\([^)]*\b(?:сезон|season)\b[^)]*\)/gi, " ")
+      .replace(/\b\d+\s*(?:сезон|season)\b/gi, " ")
+      .replace(/\b(?:русские?|english|английские?)\s+субтитры\b/gi, " ")
+      .replace(/\b(?:субтитры|subtitle[sd]?|смотреть|онлайн|online)\b/gi, " ")
+      .replace(/\b(?:19|20)\d{2}\b/g, " ")
+      .toLowerCase()
+      .replace(/ё/g, "е")
+      .replace(/[^a-zа-я0-9]+/gi, " ")
+      .trim();
+    return new Set(cleaned.split(/\s+/).filter((token) => token.length > 1));
+  }
+
   function cleanNewdeafTitle(value) {
     // newdeaf's og:title is promo-padded ("… - смотреть онлайн с субтитрами").
     // Strip that tail so the player shows a clean name; keep season info.
@@ -1830,8 +2216,13 @@ addEventListener('message', async (event) => {
   function cleanMovieTitle(value) {
     return compact(value)
       .replace(/^(фильм|сериал|мультфильм|аниме|мультсериал)\s+/i, "")
+      .replace(/\([^)]*\b(?:сезон|season|sezon)\b[^)]*\)/gi, " ")
+      .replace(/\b\d+\s*(?:сезон|season|sezon)\b/gi, " ")
+      .replace(/\b(?:русские?|english|английские?)\s+субтитры\b/gi, " ")
+      .replace(/\b(?:субтитры|subtitle[sd]?)\b/gi, " ")
       .replace(/\s*\((?:19|20)\d{2}\).*$/, "")
       .replace(/\s*смотреть.*$/i, "")
+      .replace(/\s*[-–—]\s*$/, "")
       .trim();
   }
   function movieTitle(movie) {
@@ -1936,6 +2327,55 @@ addEventListener('message', async (event) => {
     });
   }
 
+  function currentCuratedItem() {
+    const current = state.currentTarget;
+    const meta = state.currentMeta || {};
+    if (!state.playerReady || !current) return null;
+    let target = cleanTarget(current);
+    const zenithId = state.zenithEmbedUrl.match(/\/movie\/(\d+)/i)?.[1];
+    if (zenithId) target = { kind: "zen", zenithId };
+    const title = meta.title || movieTitle(meta) || current.title || "";
+    if (!title) return null;
+    return {
+      id: crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+      key: keyFor(target),
+      title,
+      year: meta.year || current.year || "",
+      poster: meta.poster || current.poster || "",
+      backdrop: typeof meta.backdrop === "string" ? meta.backdrop : meta.backdrop?.url || "",
+      description: meta.description || meta.shortDescription || "",
+      isSeries: meta.isSeries ?? current.isSeries ?? !!state.serial,
+      movieLength: meta.movieLength || null,
+      rating: {
+        ...(meta.rating || {}),
+      },
+      target,
+      cachedAt: new Date().toISOString(),
+    };
+  }
+
+  function openCuratedItem(item) {
+    const target = item?.target;
+    if (!target?.kind) return;
+    const meta = {
+      title: item.title,
+      year: item.year,
+      poster: item.poster,
+      backdrop: item.backdrop,
+      description: item.description,
+      isSeries: item.isSeries,
+      movieLength: item.movieLength,
+      rating: item.rating,
+    };
+    cacheSet("curatedmeta", keyFor(target), meta, TTL.enriched);
+    if (target.kind === "ort") cacheSet("ortmeta", target.embedUrl, meta, TTL.enriched);
+    if (target.kind === "opr") {
+      cacheSet("oprmeta", target.playerUrl, { ...meta, pageUrl: target.pageUrl || "" }, TTL.enriched);
+    }
+    if (target.kind === "kp") cacheSet("meta", target.kpId, { ...meta, kpId: target.kpId }, TTL.enriched);
+    go(hashFor(target));
+  }
+
   // =====================================================================
   // resolver settings
   // =====================================================================
@@ -2001,6 +2441,11 @@ addEventListener('message', async (event) => {
 
     route();
   }
+
+  window.alphyBridge = {
+    getCurrentCuratedItem: currentCuratedItem,
+    openCuratedItem,
+  };
 
   boot();
 })();

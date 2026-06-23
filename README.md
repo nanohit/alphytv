@@ -7,13 +7,18 @@ Lightweight static MVP for the current playback flow:
 3. Use Newdeaf -> Gencit/Opravar -> Werberk HLS when that is the only player.
 4. Otherwise fall back to Zona -> Zenith.
 5. Play Opravar and Zenith streams in a local Shaka player.
+6. Serve admin-curated homepage lists as one public JSON snapshot from Vercel
+   Blob CDN.
 
 The Vercel app remains static. The included Cloudflare Worker only resolves
 metadata and IDs; it does not proxy video bytes.
 
 ## Deploy Shape
 
-- `index.html`, `styles.css`, `app.js` - Vercel static frontend.
+- `index.html`, `styles.css`, `app.js`, `catalog.js` - Vercel static frontend.
+- `api/admin/*` - admin-only authentication and catalog writes.
+- `curated-config.json` - public Blob URL; visitors read the snapshot directly
+  from Blob CDN and do not invoke a Function or Deno.
 - `worker/` - resolver source for PoiskKino, `kpId -> Zenith`, and Opravar
   control-plane resolution.
 - No legacy SOAP frontend code is included here.
@@ -57,6 +62,27 @@ POISKKINO_BASE_URL = "https://api.poiskkino.dev"
 
 If the Vercel domain changes, update `ALLOWED_ORIGIN` and redeploy the Worker.
 
+## Curated Lists
+
+The production project uses a public Vercel Blob store named `alphy-curated`.
+Only the admin endpoints use Functions; public homepage traffic fetches the
+stable `catalog/curated.json` Blob URL directly.
+
+Required Vercel environment variables:
+
+```text
+BLOB_READ_WRITE_TOKEN
+ALPHY_ADMIN_USER
+ALPHY_ADMIN_PASSWORD
+```
+
+Credentials are sent only to same-origin `/api/admin/*` over HTTPS and are kept
+in `sessionStorage`, never in the frontend bundle or URL. Catalog saves use a
+revision guard, a local unsaved-draft backup, and a 1.2-second debounce.
+
+See [docs/CURATED_ADMIN.md](docs/CURATED_ADMIN.md) for the data model and
+operational details.
+
 ## Local Smoke Test
 
 Terminal 1:
@@ -99,6 +125,18 @@ From a Russian IP, search a title or paste a Newdeaf URL.
   separate signed DASH/HLS source for every episode. Shaka shows those seasons
   and episodes next to audio/quality controls, loads the selected episode
   directly, and restores the saved selection on reopen.
+- Non-Ortified Newdeaf serial pages preserve their explicit season/episode
+  through both Gencit/Opravar and Allo-to-Zona fallback paths, so Shaka opens
+  the selected season instead of an arbitrary provider `playlist.current`.
+- Newdeaf search cards are matched client-side to the closest PoiskKino result
+  after season/promo noise is removed. Matching cards inherit ratings, poster,
+  duration, year, and series/movie type without another API request.
+- Curated cards cache metadata and a resolved direct playback target. A click
+  therefore skips Newdeaf search/page parsing; Zenith items also skip the Zona
+  `kpId` mapping.
+- The newest Continue card is a wide 16:9 card. Shaka captures a small local
+  JPEG frame after playback starts; the Ortified cleanroom attempts the same
+  capture and falls back to the poster if canvas security blocks it.
 - Diagnostics are hidden by default. Click `Диагностика` to copy logs.
 
 ## Known Limits

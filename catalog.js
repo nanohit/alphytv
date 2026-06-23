@@ -1,0 +1,673 @@
+(() => {
+  "use strict";
+
+  const CONFIG_URL = "/curated-config.json";
+  const ADMIN_CHECK_URL = "/api/admin/check";
+  const ADMIN_CATALOG_URL = "/api/admin/catalog";
+  const AUTH_KEY = "alphy.admin.auth.v1";
+  const DRAFT_KEY = "alphy.curated.draft.v1";
+  const SAVE_DELAY_MS = 1200;
+
+  const state = {
+    catalog: { schema: 1, revision: 0, updatedAt: null, lists: [] },
+    blobUrl: "",
+    fallbackUrl: "/curated-fallback.json",
+    admin: false,
+    dirty: false,
+    saving: false,
+    queued: false,
+    saveTimer: null,
+    pendingItem: null,
+  };
+
+  const el = {
+    section: document.getElementById("curatedSection"),
+    lists: document.getElementById("curatedLists"),
+    state: document.getElementById("catalogState"),
+    actions: document.getElementById("adminCatalogActions"),
+    create: document.getElementById("createListBtn"),
+    save: document.getElementById("saveCatalogBtn"),
+    addCurrent: document.getElementById("addToListBtn"),
+    entry: document.getElementById("adminEntry"),
+    adminDialog: document.getElementById("adminDialog"),
+    loginForm: document.getElementById("adminLoginForm"),
+    user: document.getElementById("adminUserInput"),
+    password: document.getElementById("adminPasswordInput"),
+    loginError: document.getElementById("adminLoginError"),
+    picker: document.getElementById("listPickerDialog"),
+    pickerOptions: document.getElementById("listPickerOptions"),
+  };
+
+  function uid() {
+    return crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  function loadAuth() {
+    try {
+      const auth = JSON.parse(sessionStorage.getItem(AUTH_KEY) || "null");
+      return auth?.user && auth?.password ? auth : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveAuth(auth) {
+    try {
+      if (auth) sessionStorage.setItem(AUTH_KEY, JSON.stringify(auth));
+      else sessionStorage.removeItem(AUTH_KEY);
+    } catch {
+      // Session persistence is a convenience, not a requirement.
+    }
+  }
+
+  function adminHeaders(extra = {}) {
+    const auth = loadAuth();
+    if (!auth) return extra;
+    return {
+      ...extra,
+      Authorization: `Basic ${btoa(`${auth.user}:${auth.password}`)}`,
+    };
+  }
+
+  function normalizeTarget(value) {
+    const kind = String(value?.kind || "");
+    if (kind === "zen" && /^\d+$/.test(String(value?.zenithId || ""))) {
+      return { kind, zenithId: String(value.zenithId) };
+    }
+    if (kind === "kp" && /^\d+$/.test(String(value?.kpId || ""))) {
+      return { kind, kpId: String(value.kpId) };
+    }
+    if (kind === "ort" && value?.embedUrl) return { kind, embedUrl: String(value.embedUrl) };
+    if (kind === "opr" && value?.playerUrl) {
+      return { kind, playerUrl: String(value.playerUrl), pageUrl: String(value.pageUrl || "") };
+    }
+    if (kind === "nd" && value?.pageUrl) return { kind, pageUrl: String(value.pageUrl) };
+    return null;
+  }
+
+  function normalizeItem(value) {
+    const target = normalizeTarget(value?.target);
+    const title = String(value?.title || "").trim();
+    if (!target || !title) return null;
+    const rating = {};
+    if (Number.isFinite(Number(value?.rating?.kp))) rating.kp = Number(value.rating.kp);
+    if (Number.isFinite(Number(value?.rating?.imdb))) rating.imdb = Number(value.rating.imdb);
+    return {
+      id: String(value?.id || uid()),
+      key: String(value?.key || JSON.stringify(target)),
+      title,
+      year: String(value?.year || ""),
+      poster: String(value?.poster || ""),
+      backdrop: String(value?.backdrop || ""),
+      description: String(value?.description || ""),
+      isSeries: !!value?.isSeries,
+      movieLength: Number.isFinite(Number(value?.movieLength)) ? Number(value.movieLength) : null,
+      rating,
+      target,
+      cachedAt: String(value?.cachedAt || new Date().toISOString()),
+    };
+  }
+
+  function normalizeCatalog(value) {
+    const lists = [];
+    for (const rawList of Array.isArray(value?.lists) ? value.lists : []) {
+      const seen = new Set();
+      const items = [];
+      for (const rawItem of Array.isArray(rawList?.items) ? rawList.items : []) {
+        const item = normalizeItem(rawItem);
+        if (!item || seen.has(item.key)) continue;
+        seen.add(item.key);
+        items.push(item);
+      }
+      lists.push({
+        id: String(rawList?.id || uid()),
+        title: String(rawList?.title || "").trim() || "Новый список",
+        items,
+      });
+    }
+    return {
+      schema: 1,
+      revision: Math.max(0, Number(value?.revision) || 0),
+      updatedAt: value?.updatedAt || null,
+      lists,
+    };
+  }
+
+  function setStatus(text, mode = "") {
+    if (!el.state) return;
+    el.state.textContent = text;
+    el.state.dataset.mode = mode;
+  }
+
+  function showDialog(dialog) {
+    if (!dialog) return;
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+  }
+
+  function closeDialog(dialog) {
+    if (!dialog) return;
+    if (typeof dialog.close === "function") dialog.close();
+    else dialog.removeAttribute("open");
+  }
+
+  async function fetchJson(url, options = {}) {
+    const response = await fetch(url, options);
+    const text = await response.text();
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = { ok: false, error: text.slice(0, 200) };
+    }
+    if (!response.ok || payload?.ok === false) {
+      const error = new Error(payload?.error || `HTTP ${response.status}`);
+      error.status = response.status;
+      error.payload = payload;
+      throw error;
+    }
+    return payload;
+  }
+
+  async function loadPublicCatalog() {
+    let config = {};
+    try {
+      config = await fetchJson(CONFIG_URL, { cache: "force-cache" });
+    } catch {
+      // The baked fallback below keeps the homepage usable.
+    }
+    state.blobUrl = String(config.blobUrl || "");
+    state.fallbackUrl = String(config.fallbackUrl || state.fallbackUrl);
+
+    let payload = null;
+    if (state.blobUrl) {
+      try {
+        payload = await fetchJson(state.blobUrl, {
+          cache: "no-cache",
+          credentials: "omit",
+        });
+      } catch {
+        // Fall through to the deployment-baked snapshot.
+      }
+    }
+    if (!payload) payload = await fetchJson(state.fallbackUrl, { cache: "force-cache" });
+    state.catalog = normalizeCatalog(payload);
+    render();
+  }
+
+  async function loadAdminCatalog() {
+    const payload = await fetchJson(ADMIN_CATALOG_URL, {
+      headers: adminHeaders(),
+      cache: "no-store",
+    });
+    state.catalog = normalizeCatalog(payload.catalog);
+    if (payload.blobUrl) state.blobUrl = payload.blobUrl;
+    state.dirty = false;
+    render();
+    setStatus("синхронизировано", "ok");
+  }
+
+  function saveDraft(active = true) {
+    try {
+      if (!active) localStorage.removeItem(DRAFT_KEY);
+      else localStorage.setItem(DRAFT_KEY, JSON.stringify({
+        revision: state.catalog.revision,
+        savedAt: Date.now(),
+        catalog: state.catalog,
+      }));
+    } catch {
+      // A server save is still authoritative.
+    }
+  }
+
+  function restoreDraft() {
+    if (!state.admin) return false;
+    try {
+      const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
+      if (!draft?.catalog || Number(draft.revision) !== Number(state.catalog.revision)) return false;
+      state.catalog = normalizeCatalog(draft.catalog);
+      state.dirty = true;
+      setStatus("локальный черновик", "dirty");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function markDirty() {
+    if (!state.admin) return;
+    state.dirty = true;
+    saveDraft(true);
+    setStatus("не сохранено", "dirty");
+    if (state.saveTimer) clearTimeout(state.saveTimer);
+    state.saveTimer = setTimeout(() => {
+      state.saveTimer = null;
+      saveCatalog();
+    }, SAVE_DELAY_MS);
+  }
+
+  async function saveCatalog() {
+    if (!state.admin || !state.dirty) return;
+    if (state.saving) {
+      state.queued = true;
+      return;
+    }
+    state.saving = true;
+    setStatus("сохранение…", "saving");
+    if (el.save) el.save.disabled = true;
+    try {
+      let baseRevision = state.catalog.revision;
+      let payload;
+      try {
+        payload = await fetchJson(ADMIN_CATALOG_URL, {
+          method: "PUT",
+          headers: adminHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ catalog: state.catalog, baseRevision }),
+        });
+      } catch (error) {
+        if (error.status !== 409 || !error.payload?.catalog) throw error;
+        baseRevision = Number(error.payload.catalog.revision) || 0;
+        payload = await fetchJson(ADMIN_CATALOG_URL, {
+          method: "PUT",
+          headers: adminHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ catalog: state.catalog, baseRevision }),
+        });
+      }
+      state.catalog = normalizeCatalog(payload.catalog);
+      if (payload.blobUrl) state.blobUrl = payload.blobUrl;
+      state.dirty = false;
+      saveDraft(false);
+      render();
+      setStatus("сохранено", "ok");
+    } catch (error) {
+      if (error.status === 401) setAdminMode(false);
+      setStatus("ошибка сохранения", "error");
+    } finally {
+      state.saving = false;
+      if (el.save) el.save.disabled = false;
+      if (state.queued) {
+        state.queued = false;
+        saveCatalog();
+      }
+    }
+  }
+
+  function setAdminMode(enabled) {
+    state.admin = !!enabled;
+    document.body.classList.toggle("admin-mode", state.admin);
+    el.actions?.classList.toggle("hidden", !state.admin);
+    if (el.entry) el.entry.textContent = state.admin ? "admin · выход" : "admin entry";
+    updateAddButton();
+    render();
+    window.dispatchEvent(new CustomEvent("alphy:admin", { detail: { active: state.admin } }));
+  }
+
+  async function verifyStoredAdmin() {
+    if (!loadAuth()) return false;
+    try {
+      await fetchJson(ADMIN_CHECK_URL, { headers: adminHeaders(), cache: "no-store" });
+      setAdminMode(true);
+      await loadAdminCatalog();
+      if (restoreDraft()) render();
+      return true;
+    } catch {
+      saveAuth(null);
+      setAdminMode(false);
+      return false;
+    }
+  }
+
+  async function login(user, password) {
+    saveAuth({ user, password });
+    try {
+      await fetchJson(ADMIN_CHECK_URL, { headers: adminHeaders(), cache: "no-store" });
+      setAdminMode(true);
+      await loadAdminCatalog();
+      if (restoreDraft()) render();
+      return true;
+    } catch {
+      saveAuth(null);
+      setAdminMode(false);
+      return false;
+    }
+  }
+
+  function logout() {
+    if (state.saveTimer) clearTimeout(state.saveTimer);
+    saveAuth(null);
+    state.dirty = false;
+    saveDraft(false);
+    setAdminMode(false);
+    setStatus("", "");
+    loadPublicCatalog().catch(() => {});
+  }
+
+  function ratingLabel(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number.toFixed(1) : "—";
+  }
+
+  function durationLabel(item) {
+    if (item.isSeries) return "сериал";
+    if (item.movieLength) return `${Math.round(item.movieLength)} мин`;
+    return "—";
+  }
+
+  function makePublicCard(item) {
+    const card = document.createElement("article");
+    card.className = "card curated-card";
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+    card.dataset.key = item.key;
+
+    const media = document.createElement("div");
+    media.className = "card-media";
+    const image = document.createElement("img");
+    image.className = "poster";
+    image.loading = "lazy";
+    image.src = item.poster || item.backdrop || "";
+    image.alt = "";
+    image.addEventListener("error", () => {
+      image.removeAttribute("src");
+      image.classList.add("poster-empty");
+    });
+    media.appendChild(image);
+    const overlay = document.createElement("div");
+    overlay.className = "card-hover-meta";
+    overlay.innerHTML = `
+      <span><b>${ratingLabel(item.rating?.kp)}</b> КиноПоиск</span>
+      <span><b>${ratingLabel(item.rating?.imdb)}</b> IMDb</span>
+      <span><b>${durationLabel(item)}</b></span>
+    `;
+    media.appendChild(overlay);
+    card.appendChild(media);
+
+    const title = document.createElement("div");
+    title.className = "ctitle";
+    title.textContent = item.title;
+    card.appendChild(title);
+    const sub = document.createElement("div");
+    sub.className = "cmeta";
+    sub.textContent = [item.year, item.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · ");
+    card.appendChild(sub);
+
+    const open = () => window.alphyBridge?.openCuratedItem?.(item);
+    card.addEventListener("click", (event) => {
+      if (event.target.closest(".admin-item-controls")) return;
+      open();
+    });
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
+    });
+    return card;
+  }
+
+  function moveItem(fromListIndex, itemIndex, direction) {
+    const items = state.catalog.lists[fromListIndex]?.items;
+    const targetIndex = itemIndex + direction;
+    if (!items || targetIndex < 0 || targetIndex >= items.length) return;
+    [items[itemIndex], items[targetIndex]] = [items[targetIndex], items[itemIndex]];
+    markDirty();
+    render();
+  }
+
+  function moveItemToList(fromListIndex, itemIndex, toListIndex) {
+    if (fromListIndex === toListIndex) return;
+    const source = state.catalog.lists[fromListIndex];
+    const destination = state.catalog.lists[toListIndex];
+    if (!source || !destination) return;
+    const [item] = source.items.splice(itemIndex, 1);
+    if (!item) return;
+    if (!destination.items.some((entry) => entry.key === item.key)) destination.items.push(item);
+    markDirty();
+    render();
+  }
+
+  function addAdminItemControls(card, listIndex, itemIndex) {
+    if (!state.admin) return;
+    const controls = document.createElement("div");
+    controls.className = "admin-item-controls";
+    const left = document.createElement("button");
+    left.type = "button";
+    left.textContent = "‹";
+    left.title = "Сдвинуть влево";
+    left.disabled = itemIndex === 0;
+    left.addEventListener("click", (event) => {
+      event.stopPropagation();
+      moveItem(listIndex, itemIndex, -1);
+    });
+    const right = document.createElement("button");
+    right.type = "button";
+    right.textContent = "›";
+    right.title = "Сдвинуть вправо";
+    right.disabled = itemIndex >= state.catalog.lists[listIndex].items.length - 1;
+    right.addEventListener("click", (event) => {
+      event.stopPropagation();
+      moveItem(listIndex, itemIndex, 1);
+    });
+    const select = document.createElement("select");
+    select.title = "Перенести в другой список";
+    state.catalog.lists.forEach((list, index) => {
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = list.title;
+      option.selected = index === listIndex;
+      select.appendChild(option);
+    });
+    select.addEventListener("click", (event) => event.stopPropagation());
+    select.addEventListener("change", (event) => {
+      event.stopPropagation();
+      moveItemToList(listIndex, itemIndex, Number(select.value));
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "remove";
+    remove.textContent = "×";
+    remove.title = "Удалить";
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.catalog.lists[listIndex].items.splice(itemIndex, 1);
+      markDirty();
+      render();
+    });
+    controls.append(left, right, select, remove);
+    card.querySelector(".card-media")?.appendChild(controls);
+  }
+
+  function moveList(index, direction) {
+    const target = index + direction;
+    if (target < 0 || target >= state.catalog.lists.length) return;
+    [state.catalog.lists[index], state.catalog.lists[target]] = [
+      state.catalog.lists[target],
+      state.catalog.lists[index],
+    ];
+    markDirty();
+    render();
+  }
+
+  function listHeader(list, index) {
+    const header = document.createElement("div");
+    header.className = "curated-list-head";
+    if (state.admin) {
+      const input = document.createElement("input");
+      input.className = "curated-title-input";
+      input.value = list.title;
+      input.setAttribute("aria-label", "Название списка");
+      input.addEventListener("change", () => {
+        const title = input.value.trim() || "Новый список";
+        if (title !== list.title) {
+          list.title = title;
+          markDirty();
+          render();
+        }
+      });
+      header.appendChild(input);
+      const controls = document.createElement("div");
+      controls.className = "curated-list-controls";
+      for (const [label, title, action, disabled] of [
+        ["↑", "Поднять список", () => moveList(index, -1), index === 0],
+        ["↓", "Опустить список", () => moveList(index, 1), index === state.catalog.lists.length - 1],
+        ["×", "Удалить список", () => {
+          state.catalog.lists.splice(index, 1);
+          markDirty();
+          render();
+        }, false],
+      ]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.title = title;
+        button.disabled = disabled;
+        button.addEventListener("click", action);
+        controls.appendChild(button);
+      }
+      header.appendChild(controls);
+    } else {
+      const title = document.createElement("h3");
+      title.textContent = list.title;
+      header.appendChild(title);
+    }
+    return header;
+  }
+
+  function render() {
+    if (!el.section || !el.lists) return;
+    const visible = state.admin || state.catalog.lists.some((list) => list.items.length);
+    el.section.classList.toggle("hidden", !visible);
+    if (visible) document.getElementById("homeEmpty")?.classList.add("hidden");
+    el.actions?.classList.toggle("hidden", !state.admin);
+    el.lists.replaceChildren();
+
+    for (const [listIndex, list] of state.catalog.lists.entries()) {
+      if (!state.admin && !list.items.length) continue;
+      const block = document.createElement("section");
+      block.className = "curated-list";
+      block.appendChild(listHeader(list, listIndex));
+      if (!list.items.length) {
+        const empty = document.createElement("div");
+        empty.className = "curated-empty";
+        empty.textContent = "Пустой список — добавь тайтл из загруженного плеера.";
+        block.appendChild(empty);
+      } else {
+        const row = document.createElement("div");
+        row.className = "curated-row";
+        list.items.forEach((item, itemIndex) => {
+          const card = makePublicCard(item);
+          addAdminItemControls(card, listIndex, itemIndex);
+          row.appendChild(card);
+        });
+        block.appendChild(row);
+      }
+      el.lists.appendChild(block);
+    }
+    updateAddButton();
+  }
+
+  function createList() {
+    if (!state.admin) return;
+    state.catalog.lists.push({ id: uid(), title: "Новый список", items: [] });
+    markDirty();
+    render();
+  }
+
+  function addItem(listIndex, rawItem) {
+    const list = state.catalog.lists[listIndex];
+    const item = normalizeItem(rawItem);
+    if (!list || !item) return;
+    if (!list.items.some((entry) => entry.key === item.key)) list.items.push(item);
+    markDirty();
+    render();
+  }
+
+  function openPicker(item) {
+    if (!state.admin || !item) return;
+    state.pendingItem = item;
+    el.pickerOptions?.replaceChildren();
+    state.catalog.lists.forEach((list, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = list.title;
+      button.addEventListener("click", () => {
+        addItem(index, state.pendingItem);
+        state.pendingItem = null;
+        closeDialog(el.picker);
+      });
+      el.pickerOptions?.appendChild(button);
+    });
+    const create = document.createElement("button");
+    create.type = "button";
+    create.className = "list-picker-create";
+    create.textContent = "+ Новый список";
+    create.addEventListener("click", () => {
+      createList();
+      addItem(state.catalog.lists.length - 1, state.pendingItem);
+      state.pendingItem = null;
+      closeDialog(el.picker);
+    });
+    el.pickerOptions?.appendChild(create);
+    showDialog(el.picker);
+  }
+
+  function updateAddButton() {
+    if (!el.addCurrent) return;
+    const item = window.alphyBridge?.getCurrentCuratedItem?.();
+    el.addCurrent.classList.toggle("hidden", !(state.admin && item));
+  }
+
+  function bind() {
+    el.entry?.addEventListener("click", () => {
+      if (state.admin) {
+        logout();
+        return;
+      }
+      el.loginError?.classList.add("hidden");
+      if (el.user) el.user.value = "";
+      if (el.password) el.password.value = "";
+      showDialog(el.adminDialog);
+      setTimeout(() => el.user?.focus(), 0);
+    });
+    el.loginForm?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const ok = await login(el.user?.value || "", el.password?.value || "");
+      if (ok) {
+        closeDialog(el.adminDialog);
+      } else {
+        el.loginError.textContent = "Неверный логин или пароль";
+        el.loginError.classList.remove("hidden");
+      }
+    });
+    el.create?.addEventListener("click", createList);
+    el.save?.addEventListener("click", saveCatalog);
+    el.addCurrent?.addEventListener("click", () => {
+      const item = window.alphyBridge?.getCurrentCuratedItem?.();
+      if (item) openPicker(item);
+    });
+    window.addEventListener("alphy:player-ready", updateAddButton);
+    window.addEventListener("alphy:view", updateAddButton);
+    window.addEventListener("beforeunload", (event) => {
+      if (!state.admin || !state.dirty) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
+  }
+
+  async function init() {
+    bind();
+    await loadPublicCatalog().catch(() => {
+      setStatus("подборки временно недоступны", "error");
+    });
+    await verifyStoredAdmin();
+  }
+
+  window.alphyCatalog = {
+    init,
+    render,
+    isAdmin: () => state.admin,
+    getCatalog: () => JSON.parse(JSON.stringify(state.catalog)),
+  };
+
+  init();
+})();

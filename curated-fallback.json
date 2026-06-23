@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "revision": 6,
+  "updatedAt": "2026-06-23T23:10:00.000Z",
+  "lists": [
+    {
+      "id": "editorial-picks",
+      "title": "Выбор редакции",
+      "items": [
+        {
+          "id": "bojack-horseman",
+          "key": "zen:2097",
+          "title": "Конь БоДжек",
+          "year": "2014",
+          "poster": "https://avatars.mds.yandex.net/get-kinopoisk-image/1629390/b9f58643-a26e-4269-a4d6-02ccc736afdf/600x900",
+          "description": "Сюжет разворачивается вокруг коня по имени БоДжек, который хлещет виски, его бывшей возлюбленной и его друга-человека.",
+          "isSeries": true,
+          "rating": {
+            "kp": 8.448,
+            "imdb": 8.8
+          },
+          "target": {
+            "kind": "zen",
+            "zenithId": "2097"
+          },
+          "cachedAt": "2026-06-23T23:08:21.070Z"
+        }
+      ]
+    }
+  ]
+}
