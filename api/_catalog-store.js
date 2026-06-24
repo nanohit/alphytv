@@ -1,6 +1,9 @@
-import { list, put } from "@vercel/blob";
-
 export const CATALOG_PATH = "catalog/curated.json";
+export const CATALOG_BLOB_URL =
+  process.env.ALPHY_CATALOG_BLOB_URL ||
+  "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/curated.json";
+const BLOB_API_URL = "https://vercel.com/api/blob/";
+const BLOB_API_VERSION = "12";
 const MAX_LISTS = 24;
 const MAX_ITEMS_PER_LIST = 60;
 const MAX_BODY_BYTES = 512 * 1024;
@@ -123,20 +126,52 @@ export function normalizeCatalog(value, { nextRevision = null } = {}) {
   };
 }
 
-async function catalogBlob() {
-  const result = await list({ prefix: CATALOG_PATH, limit: 10 });
-  return (result.blobs || []).find((blob) => blob.pathname === CATALOG_PATH) || null;
-}
-
 export async function readCatalog() {
-  const blob = await catalogBlob();
-  if (!blob?.url) return { catalog: emptyCatalog(), blobUrl: "" };
-  const uncachedUrl = new URL(blob.url);
+  const uncachedUrl = new URL(CATALOG_BLOB_URL);
   uncachedUrl.searchParams.set("admin_read", Date.now().toString(36));
   const response = await fetch(uncachedUrl, { cache: "no-store" });
   if (!response.ok) throw new Error(`Blob catalog read failed: ${response.status}`);
   const catalog = normalizeCatalog(await response.json());
-  return { catalog, blobUrl: blob.url };
+  return { catalog, blobUrl: CATALOG_BLOB_URL };
+}
+
+async function putCatalogBlob(body) {
+  const token = String(process.env.BLOB_READ_WRITE_TOKEN || "").trim();
+  if (!token) throw new Error("BLOB_READ_WRITE_TOKEN is not configured");
+  const storeId = new URL(CATALOG_BLOB_URL).hostname.split(".")[0];
+  if (!storeId) throw new Error("Could not determine Blob store id");
+
+  const requestUrl = new URL(BLOB_API_URL);
+  requestUrl.searchParams.set("pathname", CATALOG_PATH);
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await fetch(requestUrl, {
+      method: "PUT",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "x-api-version": BLOB_API_VERSION,
+        "x-api-blob-request-id": `${storeId}:${Date.now()}:${crypto.randomUUID()}`,
+        "x-api-blob-request-attempt": String(attempt),
+        "x-vercel-blob-store-id": storeId,
+        "x-vercel-blob-access": "public",
+        "x-add-random-suffix": "0",
+        "x-allow-overwrite": "1",
+        "x-cache-control-max-age": "60",
+        "x-content-type": "application/json; charset=utf-8",
+      },
+      body,
+    });
+    const text = await response.text();
+    if (response.ok) {
+      const result = JSON.parse(text);
+      if (!result?.url) throw new Error("Blob write returned no URL");
+      return result;
+    }
+    lastError = new Error(`Blob write failed: ${response.status} ${text.slice(0, 180)}`);
+    if (response.status !== 429 && response.status < 500) break;
+    await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+  }
+  throw lastError || new Error("Blob write failed");
 }
 
 export async function writeCatalog(rawCatalog, expectedRevision) {
@@ -157,12 +192,8 @@ export async function writeCatalog(rawCatalog, expectedRevision) {
     error.code = "catalog_too_large";
     throw error;
   }
-  const blob = await put(CATALOG_PATH, body, {
-    access: "public",
-    allowOverwrite: true,
-    addRandomSuffix: false,
-    cacheControlMaxAge: 60,
-    contentType: "application/json; charset=utf-8",
-  });
+  // A direct Blob API request keeps the Function bundle tiny and avoids the
+  // SDK's cold-start module crash observed in Vercel's Node runtime.
+  const blob = await putCatalogBlob(body);
   return { catalog, blobUrl: blob.url };
 }

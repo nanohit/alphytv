@@ -644,10 +644,20 @@
     }
     const hover = document.createElement("div");
     hover.className = "card-hover-meta";
+    hover.setAttribute("aria-hidden", "true");
     hover.innerHTML = `
-      <span><b>${formatRating(rating?.kp)}</b> КиноПоиск</span>
-      <span><b>${formatRating(rating?.imdb)}</b> IMDb</span>
-      <span><b>${isSeries ? "сериал" : movieLength ? `${Math.round(movieLength)} мин` : "—"}</b></span>
+      <div class="hover-ratings">
+        <div class="hover-rating">
+          <span class="hover-rating-name">IMDb</span>
+          <b class="hover-rating-value">${formatRating(rating?.imdb)}</b>
+        </div>
+        <i class="hover-rating-divider"></i>
+        <div class="hover-rating">
+          <span class="hover-rating-name">КП</span>
+          <b class="hover-rating-value">${formatRating(rating?.kp)}</b>
+        </div>
+      </div>
+      <div class="hover-duration">${formatDuration(movieLength, isSeries)}</div>
     `;
     media.appendChild(hover);
     if (onRemove) {
@@ -693,6 +703,19 @@
   function formatRating(value) {
     const number = Number(value);
     return Number.isFinite(number) && number > 0 ? number.toFixed(1) : "—";
+  }
+
+  function formatDuration(value, isSeries = false) {
+    const minutes = Math.round(Number(value));
+    if (Number.isFinite(minutes) && minutes > 0) {
+      if (minutes >= 60) {
+        const hours = Math.floor(minutes / 60);
+        const rest = minutes % 60;
+        return `${hours} ч${rest ? ` ${rest} м` : ""}`;
+      }
+      return `${minutes} мин`;
+    }
+    return isSeries ? "СЕРИАЛ" : "—";
   }
 
   // =====================================================================

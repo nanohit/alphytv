@@ -10,8 +10,8 @@
   --muted: #6f6f6f;
   --muted-strong: #8a8a8a;
   --accent: #ffff00;
-  --card-min: 142px;
-  --card-gap: 18px;
+  --card-min: 178px;
+  --card-gap: 24px;
 }
 
 body {
@@ -98,14 +98,14 @@ header {
 
 .card {
   cursor: pointer; text-align: left; position: relative; min-width: 0;
-  transition: transform .18s; outline: none;
+  transition: transform .22s cubic-bezier(.2,.8,.2,1); outline: none;
 }
-.card:hover { transform: translateY(-3px); }
+.card:hover { transform: translateY(-5px); }
 .card-media {
-  position: relative; overflow: hidden; border-radius: 13px;
+  position: relative; overflow: hidden; border-radius: 18px;
   border: 1px solid var(--stroke);
   background: #101010;
-  transition: border-color .18s, box-shadow .18s;
+  transition: border-color .22s, box-shadow .22s;
 }
 .card .poster {
   width: 100%; aspect-ratio: 2 / 3; background: #111;
@@ -114,28 +114,75 @@ header {
 }
 .card.square .poster { aspect-ratio: 1 / 1; }
 .card .ctitle {
-  font-size: 14px; font-weight: 600; line-height: 1.25; margin: 9px 2px 3px;
+  font-size: 17px; font-weight: 600; line-height: 1.24; margin: 12px 3px 4px;
+  text-align: center;
   white-space: normal; overflow-wrap: anywhere;
 }
-.card .cmeta { font-size: 11px; color: var(--muted-strong); margin: 0 2px; }
+.card .cmeta {
+  font-size: 14px; color: var(--muted-strong); margin: 0 3px;
+  text-align: center;
+}
 .card-hover-meta {
   position: absolute; inset: 0; z-index: 1;
-  display: flex; flex-direction: column; justify-content: flex-end; gap: 5px;
-  padding: 11px;
-  background: linear-gradient(180deg, rgba(0,0,0,.3), rgba(0,0,0,.92));
-  color: #d5d5d5; opacity: 0;
-  transition: opacity .18s;
-  font-size: 10px; letter-spacing: .04em;
+  display: grid; place-content: center; justify-items: center; gap: 24px;
+  padding: 18px;
+  background:
+    radial-gradient(circle at 50% 32%, rgba(26,29,29,.52), rgba(4,4,4,.86) 68%),
+    rgba(0,0,0,.72);
+  color: #fff; opacity: 0;
+  transition: opacity .22s;
+  backdrop-filter: blur(2px);
 }
-.card-hover-meta span { display: flex; align-items: baseline; gap: 5px; }
-.card-hover-meta b { color: var(--accent); font-size: 13px; font-weight: 600; }
+.hover-ratings {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) 1px minmax(0,1fr);
+  align-items: center;
+  width: min(100%, 190px);
+}
+.hover-rating {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.hover-rating-name {
+  color: #fff;
+  font-size: clamp(11px, 1.05vw, 14px);
+  font-weight: 500;
+  letter-spacing: .035em;
+  text-transform: uppercase;
+}
+.hover-rating-value {
+  color: var(--accent);
+  font-size: clamp(27px, 3vw, 42px);
+  font-weight: 500;
+  line-height: .95;
+  letter-spacing: -.045em;
+}
+.hover-rating-divider {
+  display: block;
+  width: 1px;
+  height: clamp(50px, 5.2vw, 72px);
+  background: rgba(255,255,255,.82);
+}
+.hover-duration {
+  color: #fff;
+  font-size: clamp(17px, 1.65vw, 23px);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: .02em;
+  text-align: center;
+}
 .card:hover .card-media,
 .card:focus-visible .card-media {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px rgba(255,255,0,.2);
+  box-shadow:
+    0 0 0 4px var(--accent),
+    0 14px 36px rgba(0,0,0,.72),
+    0 0 28px rgba(255,255,0,.11);
 }
 .card:hover .poster,
-.card:focus-visible .poster { filter: brightness(.4); transform: scale(1.015); }
+.card:focus-visible .poster { filter: brightness(.34); transform: scale(1.035); }
 .card:hover .card-hover-meta,
 .card:focus-visible .card-hover-meta { opacity: 1; }
 .card .rating-pill {
@@ -159,8 +206,9 @@ header {
 .continue-featured { grid-column: span 2; }
 .continue-featured .poster { aspect-ratio: 16 / 9; }
 .continue-featured .card-hover-meta {
-  opacity: 1;
-  background: linear-gradient(180deg, rgba(0,0,0,.18), rgba(0,0,0,.82));
+  background:
+    radial-gradient(circle at 50% 35%, rgba(20,22,22,.35), rgba(0,0,0,.78) 72%),
+    rgba(0,0,0,.55);
 }
 .continue-featured .poster { filter: brightness(.68); }
 
@@ -223,11 +271,11 @@ header {
 .curated-row {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: clamp(138px, 14vw, 162px);
-  gap: 16px;
+  grid-auto-columns: clamp(172px, 17vw, 202px);
+  gap: 24px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 3px 2px 14px;
+  padding: 5px 5px 18px;
   scroll-snap-type: x proximity;
   scrollbar-width: thin;
   scrollbar-color: #292929 transparent;
@@ -254,35 +302,36 @@ header {
 
 /* ---------- login / list picker ---------- */
 .compact-dialog {
-  width: min(360px, calc(100vw - 28px)); max-height: min(560px, calc(100dvh - 28px));
-  margin: auto; padding: 0; border: 1px solid #353535; border-radius: 14px;
+  width: min(420px, calc(100vw - 28px)); max-height: min(620px, calc(100dvh - 28px));
+  margin: auto; padding: 0; border: 1px solid #353535; border-radius: 20px;
   background: #0d0d0d; color: var(--text); box-shadow: 0 24px 70px rgba(0,0,0,.75);
 }
 .compact-dialog::backdrop { background: rgba(0,0,0,.72); backdrop-filter: blur(3px); }
-.compact-dialog form { display: grid; gap: 12px; padding: 16px; }
+.compact-dialog form { display: grid; gap: 16px; padding: 24px; }
 .dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.dialog-head strong { font-size: 14px; }
+.dialog-head strong { font-size: 20px; }
 .dialog-close {
-  width: 28px; height: 28px; border: 0; border-radius: 7px;
-  background: #171717; color: #aaa; cursor: pointer; font-size: 18px;
+  width: 38px; height: 38px; border: 0; border-radius: 10px;
+  background: #171717; color: #aaa; cursor: pointer; font-size: 24px;
 }
 .compact-dialog label {
-  display: grid; gap: 5px; color: var(--muted-strong);
-  font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  display: grid; gap: 7px; color: var(--muted-strong);
+  font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
 }
 .compact-dialog input {
-  width: 100%; padding: 10px 11px; border: 1px solid var(--stroke-strong);
-  border-radius: 8px; background: #080808; color: #fff; font-size: 14px;
+  width: 100%; padding: 13px 14px; border: 1px solid var(--stroke-strong);
+  border-radius: 11px; background: #080808; color: #fff; font-size: 16px;
 }
 .compact-dialog input:focus { outline: 0; border-color: var(--accent); }
 .dialog-primary,
 .list-picker-options button {
-  width: 100%; min-height: 38px; padding: 8px 10px;
-  border: 1px solid var(--stroke-strong); border-radius: 8px;
+  width: 100%; min-height: 48px; padding: 10px 12px;
+  border: 1px solid var(--stroke-strong); border-radius: 11px;
   background: #151515; color: #fff; cursor: pointer; text-align: left;
 }
 .dialog-primary { text-align: center; color: #000; background: var(--accent); border-color: var(--accent); }
-.dialog-error { color: #e89b9b; font-size: 12px; }
+.dialog-primary:disabled { opacity: .55; cursor: wait; }
+.dialog-error { color: #f1a1a1; font-size: 13px; line-height: 1.35; }
 .list-picker-options { display: grid; gap: 7px; overflow-y: auto; }
 .list-picker-options button:hover { border-color: var(--accent); }
 .list-picker-options .list-picker-create { color: var(--accent); }
@@ -358,6 +407,8 @@ header {
   .search-box input { min-width: 0; padding: 11px 12px; font-size: 15px; }
   .search-button, .icon-btn { width: 44px; height: 44px; border-radius: 11px; }
   .card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .card .ctitle { font-size: 15px; }
+  .card .cmeta { font-size: 12px; }
   .continue-featured { grid-column: 1 / -1; }
   .curated-row { grid-auto-columns: min(43vw, 156px); gap: 12px; }
   .curated-toolbar { align-items: center; }
@@ -376,10 +427,21 @@ header {
 
 @media (hover: none) {
   .card-hover-meta {
-    inset: auto 0 0; min-height: 44%;
-    opacity: 1; padding: 8px;
-    background: linear-gradient(180deg, transparent, rgba(0,0,0,.9));
+    inset: auto 8px 8px;
+    opacity: 1;
+    display: grid;
+    gap: 8px;
+    min-height: 0;
+    padding: 10px 12px;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 12px;
+    background: rgba(0,0,0,.76);
+    backdrop-filter: blur(7px);
   }
-  .card-hover-meta span { font-size: 9px; }
-  .card-hover-meta b { font-size: 11px; }
+  .hover-ratings { width: min(100%, 150px); }
+  .hover-rating { gap: 3px; }
+  .hover-rating-name { font-size: 8px; }
+  .hover-rating-value { font-size: 18px; }
+  .hover-rating-divider { height: 28px; }
+  .hover-duration { font-size: 10px; }
 }

@@ -26,12 +26,20 @@ The frontend keeps credentials in `sessionStorage` for the current tab. It
 sends HTTP Basic authorization only to the same-origin admin endpoints. No
 credential is embedded in static assets, localStorage, catalog JSON, or links.
 
+Admin mode is enabled atomically only after both the credential check and the
+catalog read succeed. A storage failure is reported separately from invalid
+credentials, and editing controls are never rendered during verification.
+
 ## Save semantics
 
 The catalog has an integer `revision`. PUT requests include `baseRevision`.
 Conflicts return HTTP 409 with the current snapshot. The client retries once
 against that revision, keeps an unsaved local draft, and shows explicit
 dirty/saving/saved/error state.
+
+The Function reads the known public Blob URL directly. Writes use the Blob REST
+endpoint only on authenticated PUT requests, keeping the public path and admin
+GET cold start free of the Blob SDK module graph.
 
 The server validates and caps the payload:
 

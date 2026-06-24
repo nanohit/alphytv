@@ -48,6 +48,7 @@ export default async function handler(req, res) {
       res.end(JSON.stringify({ ok: false, error: error.code || error.message }));
       return;
     }
+    console.error("[catalog]", error?.code || error?.message || String(error));
     res.statusCode = 500;
     res.end(JSON.stringify({ ok: false, error: "catalog_storage_failed" }));
   }

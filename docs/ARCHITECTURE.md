@@ -182,6 +182,10 @@ Only authenticated admin activity reaches Vercel Functions:
 - `GET /api/admin/catalog`;
 - `PUT /api/admin/catalog`.
 
+The client does not enter admin mode after `/check` alone. It first obtains a
+valid catalog snapshot, then reveals editing controls in one state change.
+Authentication failures and storage failures remain distinct.
+
 The PUT validates all targets and public URLs, caps the catalog size, compares
 `baseRevision`, then overwrites the stable Blob pathname. Admin edits are
 debounced and backed up locally until a successful save.

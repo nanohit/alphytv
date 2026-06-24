@@ -34,6 +34,7 @@
     user: document.getElementById("adminUserInput"),
     password: document.getElementById("adminPasswordInput"),
     loginError: document.getElementById("adminLoginError"),
+    loginButton: document.getElementById("adminLoginBtn"),
     picker: document.getElementById("listPickerDialog"),
     pickerOptions: document.getElementById("listPickerOptions"),
   };
@@ -306,29 +307,36 @@
     if (!loadAuth()) return false;
     try {
       await fetchJson(ADMIN_CHECK_URL, { headers: adminHeaders(), cache: "no-store" });
-      setAdminMode(true);
       await loadAdminCatalog();
+      setAdminMode(true);
       if (restoreDraft()) render();
       return true;
-    } catch {
-      saveAuth(null);
+    } catch (error) {
+      if (error.status === 401) saveAuth(null);
       setAdminMode(false);
+      if (error.status !== 401) setStatus("админ-каталог временно недоступен", "error");
       return false;
     }
   }
 
   async function login(user, password) {
     saveAuth({ user, password });
+    let authenticated = false;
     try {
       await fetchJson(ADMIN_CHECK_URL, { headers: adminHeaders(), cache: "no-store" });
-      setAdminMode(true);
+      authenticated = true;
       await loadAdminCatalog();
+      setAdminMode(true);
       if (restoreDraft()) render();
-      return true;
-    } catch {
-      saveAuth(null);
+      return { ok: true };
+    } catch (error) {
+      if (!authenticated || error.status === 401) saveAuth(null);
       setAdminMode(false);
-      return false;
+      if (error.status === 401) return { ok: false, reason: "credentials" };
+      return {
+        ok: false,
+        reason: authenticated ? "catalog" : "network",
+      };
     }
   }
 
@@ -348,9 +356,16 @@
   }
 
   function durationLabel(item) {
-    if (item.isSeries) return "сериал";
-    if (item.movieLength) return `${Math.round(item.movieLength)} мин`;
-    return "—";
+    const minutes = Math.round(Number(item.movieLength));
+    if (Number.isFinite(minutes) && minutes > 0) {
+      if (minutes >= 60) {
+        const hours = Math.floor(minutes / 60);
+        const rest = minutes % 60;
+        return `${hours} ч${rest ? ` ${rest} м` : ""}`;
+      }
+      return `${minutes} мин`;
+    }
+    return item.isSeries ? "СЕРИАЛ" : "—";
   }
 
   function makePublicCard(item) {
@@ -374,10 +389,20 @@
     media.appendChild(image);
     const overlay = document.createElement("div");
     overlay.className = "card-hover-meta";
+    overlay.setAttribute("aria-hidden", "true");
     overlay.innerHTML = `
-      <span><b>${ratingLabel(item.rating?.kp)}</b> КиноПоиск</span>
-      <span><b>${ratingLabel(item.rating?.imdb)}</b> IMDb</span>
-      <span><b>${durationLabel(item)}</b></span>
+      <div class="hover-ratings">
+        <div class="hover-rating">
+          <span class="hover-rating-name">IMDb</span>
+          <b class="hover-rating-value">${ratingLabel(item.rating?.imdb)}</b>
+        </div>
+        <i class="hover-rating-divider"></i>
+        <div class="hover-rating">
+          <span class="hover-rating-name">КП</span>
+          <b class="hover-rating-value">${ratingLabel(item.rating?.kp)}</b>
+        </div>
+      </div>
+      <div class="hover-duration">${durationLabel(item)}</div>
     `;
     media.appendChild(overlay);
     card.appendChild(media);
@@ -618,6 +643,9 @@
   }
 
   function bind() {
+    for (const button of document.querySelectorAll("[data-close-dialog]")) {
+      button.addEventListener("click", () => closeDialog(button.closest("dialog")));
+    }
     el.entry?.addEventListener("click", () => {
       if (state.admin) {
         logout();
@@ -631,11 +659,31 @@
     });
     el.loginForm?.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const ok = await login(el.user?.value || "", el.password?.value || "");
-      if (ok) {
+      const user = el.user?.value.trim() || "";
+      const password = el.password?.value || "";
+      if (!user || !password) {
+        el.loginError.textContent = "Введите логин и пароль";
+        el.loginError.classList.remove("hidden");
+        return;
+      }
+      el.loginError?.classList.add("hidden");
+      if (el.loginButton) {
+        el.loginButton.disabled = true;
+        el.loginButton.textContent = "Проверяем…";
+      }
+      const result = await login(user, password);
+      if (el.loginButton) {
+        el.loginButton.disabled = false;
+        el.loginButton.textContent = "Войти";
+      }
+      if (result.ok) {
         closeDialog(el.adminDialog);
       } else {
-        el.loginError.textContent = "Неверный логин или пароль";
+        el.loginError.textContent = result.reason === "credentials"
+          ? "Неверный логин или пароль"
+          : result.reason === "catalog"
+            ? "Логин принят, но каталог сейчас недоступен. Повторите через минуту."
+            : "Не удалось связаться с сервером. Проверьте соединение и повторите.";
         el.loginError.classList.remove("hidden");
       }
     });
