@@ -480,6 +480,7 @@
     el.searchInput.value = "";
     const hist = loadList(STORE_HISTORY);
     const bms = loadList(STORE_BOOKMARKS);
+    renderContinueHeader(hist.length);
     renderHomeGrid(el.continueGrid, el.continueSection, hist, {
       withProgress: true,
       store: STORE_HISTORY,
@@ -494,22 +495,18 @@
     if (!entries.length) { section.classList.add("hidden"); return; }
     section.classList.remove("hidden");
     entries.slice(0, 20).forEach((entry, index) => {
-      let sub = entry.year ? String(entry.year) : "";
-      if (opts.withProgress && entry.duration > 0) {
-        const pct = Math.round((entry.progress || 0) * 100);
-        const left = Math.max(0, Math.ceil((entry.duration - (entry.position || 0)) / 60));
-        sub = `${pct}% · ост. ${left} мин`;
+      if (opts.withProgress) {
+        grid.appendChild(makeContinueCard(entry, index, opts));
+        return;
       }
+      let sub = entry.year ? String(entry.year) : "";
       const card = makeCard({
         title: entry.title || "(без названия)",
         sub,
         poster: entry.poster,
-        snapshot: entry.snapshot,
-        wide: !!opts.featureLatest && index === 0,
         rating: entry.rating,
         movieLength: entry.movieLength,
         isSeries: entry.isSeries,
-        progress: opts.withProgress && entry.duration > 0 ? entry.progress || 0 : null,
         onClick: () => go(hashFor(entry.target)),
         onRemove: () => {
           const list = loadList(opts.store).filter((x) => x.key !== entry.key);
@@ -519,6 +516,116 @@
       });
       grid.appendChild(card);
     });
+  }
+
+  function renderContinueHeader(count) {
+    if (!el.continueHeader) return;
+    el.continueHeader.replaceChildren(document.createTextNode("Продолжить просмотр"));
+    if (!count) return;
+    const badge = document.createElement("span");
+    badge.className = "continue-count";
+    badge.textContent = String(count);
+    el.continueHeader.appendChild(badge);
+  }
+
+  function makeContinueCard(entry, index, opts) {
+    const featured = !!opts.featureLatest && index === 0;
+    const card = document.createElement("article");
+    card.className = `card continue-card${featured ? " continue-featured" : ""}`;
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+
+    const media = document.createElement("div");
+    media.className = "card-media continue-media";
+    const imageUrl = featured && entry.snapshot ? entry.snapshot : entry.poster || entry.snapshot;
+    if (imageUrl) {
+      const image = document.createElement("img");
+      image.className = "poster";
+      image.loading = featured ? "eager" : "lazy";
+      image.src = imageUrl;
+      image.alt = "";
+      image.addEventListener("error", () => image.replaceWith(blankPoster()));
+      media.appendChild(image);
+    } else {
+      media.appendChild(blankPoster());
+    }
+
+    const play = document.createElement("span");
+    play.className = "continue-play";
+    play.setAttribute("aria-hidden", "true");
+    media.appendChild(play);
+
+    const progress = continueProgress(entry);
+    const overlay = document.createElement("div");
+    overlay.className = "continue-overlay";
+    overlay.innerHTML = `
+      <div class="continue-status">${escapeHtml(continueStatus(entry))}</div>
+      <div class="continue-progress" aria-hidden="true">
+        <div class="continue-progress-bar" style="width:${Math.round(progress * 100)}%"></div>
+      </div>
+    `;
+    media.appendChild(overlay);
+
+    const remove = document.createElement("button");
+    remove.className = "card-remove";
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", "Убрать из продолжения");
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const list = loadList(opts.store).filter((item) => item.key !== entry.key);
+      saveList(opts.store, list);
+      showHome();
+    });
+    media.appendChild(remove);
+    card.appendChild(media);
+
+    const title = document.createElement("div");
+    title.className = "ctitle";
+    title.textContent = entry.title || "(без названия)";
+    card.appendChild(title);
+    if (entry.year) {
+      const year = document.createElement("div");
+      year.className = "cmeta";
+      year.textContent = String(entry.year);
+      card.appendChild(year);
+    }
+
+    const open = () => go(hashFor(entry.target));
+    card.addEventListener("click", open);
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
+    });
+    return card;
+  }
+
+  function continueProgress(entry) {
+    const value = Number(entry?.progress);
+    const duration = Number(entry?.duration);
+    const position = Number(entry?.position);
+    const derived = duration > 0 && position > 0 ? Math.min(1, position / duration) : 0;
+    if (Number.isFinite(value) && value > 0) return Math.min(1, value);
+    return derived;
+  }
+
+  function continueStatus(entry) {
+    const selection = entry?.serialSelection || entry?.opravarSelection || null;
+    const season = positiveInt(selection?.season);
+    const episode = positiveInt(selection?.episode);
+    const episodeLabel = season && episode ? `S${season}E${episode}` : "";
+    const duration = Number(entry?.duration);
+    const position = Number(entry?.position);
+    const left = duration > 0
+      ? Math.max(0, Math.ceil((duration - Math.max(0, position || 0)) / 60))
+      : null;
+    if (episodeLabel && left != null) return `${episodeLabel} · ${left} мин осталось`;
+    if (episodeLabel) return episodeLabel;
+    if (left != null) return `${left} мин осталось`;
+    const progress = Math.round(continueProgress(entry) * 100);
+    return progress > 0 ? `${progress}% просмотрено` : "Продолжить";
   }
 
   async function showSearch(query, token) {
@@ -608,27 +715,24 @@
     title,
     sub,
     poster,
-    snapshot,
-    wide = false,
     ratingPill,
     rating,
     movieLength,
     isSeries,
-    progress,
     onClick,
     onRemove,
   }) {
     const card = document.createElement("article");
-    card.className = `card${wide ? " continue-featured" : ""}`;
+    card.className = "card";
     card.tabIndex = 0;
     card.setAttribute("role", "button");
     const media = document.createElement("div");
     media.className = "card-media";
-    const imageUrl = wide && snapshot ? snapshot : poster;
+    const imageUrl = poster;
     if (imageUrl) {
       const img = document.createElement("img");
       img.className = "poster";
-      img.loading = wide ? "eager" : "lazy";
+      img.loading = "lazy";
       img.src = imageUrl;
       img.alt = "";
       img.addEventListener("error", () => { img.replaceWith(blankPoster()); });
@@ -678,12 +782,6 @@
       s.className = "cmeta";
       s.textContent = sub;
       card.appendChild(s);
-    }
-    if (progress != null) {
-      const bar = document.createElement("div");
-      bar.className = "progress";
-      bar.innerHTML = `<div class="progress-bar" style="width:${Math.round(progress * 100)}%"></div>`;
-      card.appendChild(bar);
     }
     card.addEventListener("click", onClick);
     card.addEventListener("keydown", (event) => {

@@ -81,3 +81,8 @@ Shaka captures a 480×270 JPEG after `loadeddata`, `playing`, `pause`, or
 `seeked`. The injected Ortified cleanroom hook attempts the same capture from
 inside the player document. If the provider taints canvas, the wide card falls
 back to a darkened poster.
+
+Continue uses its own layout rather than the ordinary poster-card component.
+The latest entry is a wide 16:9 card; the remaining entries are narrow posters
+with the same media height. Episode/season, remaining minutes, and progress are
+rendered inside the image, and the section heading shows the item count.
