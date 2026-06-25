@@ -7,7 +7,7 @@
   <meta name="referrer" content="no-referrer">
   <title>alphy</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260625-bookmarks1">
+  <link rel="stylesheet" href="/styles.css?v=20260625-bookmarks2">
   <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.11.17/dist/shaka-player.compiled.js"></script>
 </head>
 <body>
@@ -20,7 +20,7 @@
       </div>
       <div class="search-box">
         <input type="text" id="searchInput" spellcheck="false" autocomplete="off"
-               placeholder="Название, или ссылка newdeaf / ortified / zenith…">
+               placeholder="Поиск фильмов, сериалов, мультфильмов и аниме">
         <button class="search-button" id="searchBtn" type="button" aria-label="Поиск">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="11" cy="11" r="7"></circle>
@@ -29,7 +29,7 @@
         </button>
         <button class="icon-btn bookmark-nav-btn" id="bookmarksToggle" type="button" aria-label="Закладки">
           <svg viewBox="0 0 24 30" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
-            <path d="M3-1h18v29l-9-7-9 7z"></path>
+            <path d="M3 1h18v27l-9-7-9 7z"></path>
           </svg>
           <span id="bookmarksNavCount" class="bookmark-nav-count hidden">0</span>
         </button>
@@ -53,10 +53,7 @@
       </div>
       <section id="curatedSection" class="curated-section hidden" aria-label="Подборки">
         <div class="curated-toolbar">
-          <div>
-            <h2>Подборки</h2>
-            <span id="catalogState" class="catalog-state"></span>
-          </div>
+          <span id="catalogState" class="catalog-state"></span>
           <div id="adminCatalogActions" class="admin-catalog-actions hidden">
             <button id="createListBtn" type="button">+ список</button>
             <button id="saveCatalogBtn" type="button">Сохранить</button>
@@ -141,7 +138,7 @@
   </dialog>
 
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
-  <script src="/app.js?v=20260625-bookmarks1"></script>
-  <script src="/catalog.js?v=20260625-bookmarks1"></script>
+  <script src="/app.js?v=20260625-bookmarks2"></script>
+  <script src="/catalog.js?v=20260625-bookmarks2"></script>
 </body>
 </html>

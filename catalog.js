@@ -585,6 +585,7 @@
           addAdminItemControls(card, listIndex, itemIndex);
           row.appendChild(card);
         });
+        window.alphyBridge?.layoutMobileGrid?.(row);
         block.appendChild(row);
       }
       el.lists.appendChild(block);

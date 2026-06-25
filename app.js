@@ -283,7 +283,7 @@
     button.dataset.bookmarkKey = key;
     button.innerHTML = `
       <svg viewBox="0 0 24 30" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
-        <path d="M3-1h18v29l-9-7-9 7z"></path>
+        <path d="M3 1h18v27l-9-7-9 7z"></path>
       </svg>
     `;
     syncBookmarkButton(button, key);
@@ -571,6 +571,7 @@
       });
       el.bookmarksGrid.appendChild(card);
     });
+    layoutMobileGrid(el.bookmarksGrid);
   }
 
   function renderHomeGrid(grid, section, entries, opts) {
@@ -600,6 +601,19 @@
       });
       grid.appendChild(card);
     });
+    layoutMobileGrid(grid);
+  }
+
+  function layoutMobileGrid(grid) {
+    if (!grid) return;
+    const cards = [...grid.children].filter((child) => child.classList.contains("card"));
+    grid.classList.toggle("mobile-two-row", cards.length > 5);
+    cards.forEach((card, index) => {
+      const page = Math.floor(index / 10);
+      const pageIndex = index % 10;
+      card.style.setProperty("--mobile-row", pageIndex < 5 ? "1" : "2");
+      card.style.setProperty("--mobile-column", String(page * 5 + (pageIndex % 5) + 1));
+    });
   }
 
   function renderContinueHeader(count) {
@@ -613,7 +627,8 @@
   }
 
   function makeContinueCard(entry, index, opts) {
-    const featured = !!opts.featureLatest && index === 0;
+    const compact = window.matchMedia("(max-width: 560px)").matches;
+    const featured = !!opts.featureLatest && index === 0 && !compact;
     const card = document.createElement("article");
     card.className = `card continue-card${featured ? " continue-featured" : ""}`;
     card.tabIndex = 0;
@@ -621,7 +636,7 @@
 
     const media = document.createElement("div");
     media.className = "card-media continue-media";
-    const imageUrl = featured && entry.snapshot ? entry.snapshot : entry.poster || entry.snapshot;
+    const imageUrl = !compact && featured && entry.snapshot ? entry.snapshot : entry.poster || entry.snapshot;
     if (imageUrl) {
       const image = document.createElement("img");
       image.className = "poster";
@@ -817,6 +832,7 @@
       p.textContent = `Ничего не найдено по «${query}».`;
       el.resultsGrid.appendChild(p);
     }
+    layoutMobileGrid(el.resultsGrid);
   }
 
   function makeCard({
@@ -2697,6 +2713,7 @@ addEventListener('message', async (event) => {
     getCurrentCuratedItem: currentCuratedItem,
     openCuratedItem,
     addCardBookmark,
+    layoutMobileGrid,
   };
 
   boot();
