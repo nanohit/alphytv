@@ -58,6 +58,7 @@
     backBtn: document.getElementById("backBtn"),
     watchTitle: document.getElementById("watchTitle"),
     playerHost: document.getElementById("playerHost"),
+    serialPanel: document.getElementById("serialPanel"),
     trackPanel: document.getElementById("trackPanel"),
     metaPanel: document.getElementById("metaPanel"),
     loading: document.getElementById("loading"),
@@ -954,6 +955,7 @@
     state.zenithEmbedUrl = "";
     window.dispatchEvent(new CustomEvent("alphy:player-ready", { detail: { ready: false } }));
     el.metaPanel.classList.add("hidden");
+    el.serialPanel.classList.add("hidden");
     el.trackPanel.classList.add("hidden");
     // Show the loading state immediately so the previous title's player is never
     // left on screen while the new one resolves (or fails to resolve).
@@ -1411,6 +1413,7 @@
     iframe.referrerPolicy = "no-referrer";
     iframe.srcdoc = sanitized.html;
     el.playerHost.replaceChildren(iframe);
+    el.serialPanel.classList.add("hidden");
     el.trackPanel.classList.add("hidden");
     await new Promise((resolve) => {
       let settled = false;
@@ -1518,6 +1521,7 @@
     player.configure({
       streaming: { retryParameters: { maxAttempts: 2, baseDelay: 500, backoffFactor: 1.4 } },
       manifest: { dash: { ignoreMinBufferTime: true } },
+      abr: { enabled: false },
     });
     player.addEventListener("trackschanged", renderTracks);
     player.addEventListener("variantchanged", renderTracks);
@@ -1537,6 +1541,7 @@
     }
     // Restore saved озвучка (audio language) and resume position from history.
     if (opts.audioLang) { try { player.selectAudioLanguage(opts.audioLang); } catch { /* ignore */ } }
+    selectHighestShakaVariant(player, opts.audioLang);
     if (opts.resume > 5) { try { video.currentTime = opts.resume; } catch { /* ignore */ } }
     video.playbackRate = state.playbackRate;
     renderTracks();
@@ -1552,6 +1557,21 @@
     video.addEventListener("seeked", snapshotCurrentFrame);
     setTimeout(snapshotCurrentFrame, 2200);
     try { await video.play(); } catch { /* user gesture may be required */ }
+  }
+
+  function selectHighestShakaVariant(player, preferredLanguage = "") {
+    const variants = player?.getVariantTracks?.() || [];
+    if (!variants.length) return null;
+    const active = variants.find((track) => track.active);
+    const language = preferredLanguage || active?.language || "";
+    const candidates = variants.filter((track) => !language || track.language === language);
+    const best = [...(candidates.length ? candidates : variants)].sort(
+      (a, b) => (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0),
+    )[0];
+    if (!best) return null;
+    player.configure({ abr: { enabled: false } });
+    player.selectVariantTrack(best, true);
+    return best;
   }
 
   function startTracking(histKey, target) {
@@ -1680,6 +1700,8 @@
     // new one errors before mounting (the "плеер залочен на старом контенте" bug).
     el.playerHost.replaceChildren();
     if (state.playerPlaceholder) el.playerHost.innerHTML = state.playerPlaceholder;
+    el.serialPanel.replaceChildren();
+    el.serialPanel.classList.add("hidden");
     el.trackPanel.replaceChildren();
     el.trackPanel.classList.add("hidden");
   }
@@ -1691,6 +1713,8 @@
   function renderTracks() {
     const player = state.player;
     if (!player) return;
+    el.serialPanel.replaceChildren();
+    el.serialPanel.classList.add("hidden");
     el.trackPanel.replaceChildren();
     el.trackPanel.classList.remove("hidden");
     const variants = player.getVariantTracks ? player.getVariantTracks() : [];
@@ -1707,6 +1731,7 @@
         if (track.active) btn.className = "active";
         btn.addEventListener("click", () => {
           player.selectAudioLanguage(track.language, (track.roles || [])[0]);
+          selectHighestShakaVariant(player, track.language);
           persistAudio(track.language);
           setTimeout(renderTracks, 250);
         });
@@ -1769,9 +1794,9 @@
     const season = seasons.find((item) => item.season === current?.season);
     const episode = season?.episodes.find((item) => item.episode === current?.episode);
 
-    addTrackGroup("Сезон", seasons, (item) => {
+    addTrackGroup("", seasons, (item) => {
       const btn = document.createElement("button");
-      btn.textContent = String(item.season);
+      btn.textContent = `Сезон ${item.season}`;
       if (item.season === current?.season) btn.className = "active";
       btn.addEventListener("click", () => {
         const preferredEpisode =
@@ -1781,9 +1806,9 @@
         switchOpravarSelection({ season: item.season, episode: preferredEpisode?.episode, voiceId: current?.voiceId });
       });
       return btn;
-    });
+    }, { panel: el.serialPanel, hideLabel: true, className: "serial-seasons" });
 
-    addTrackGroup("Серия", season?.episodes || [], (item) => {
+    addTrackGroup("", season?.episodes || [], (item) => {
       const btn = document.createElement("button");
       btn.textContent = item.episode > 0 ? String(item.episode) : `S${Math.abs(item.episode)}`;
       if (item.episode === current?.episode) btn.className = "active";
@@ -1791,7 +1816,7 @@
         switchOpravarSelection({ season: current?.season, episode: item.episode, voiceId: current?.voiceId });
       });
       return btn;
-    });
+    }, { panel: el.serialPanel, hideLabel: true, className: "serial-episodes" });
 
     addTrackGroup("Озвучка", episode?.voices || [], (item) => {
       const btn = document.createElement("button");
@@ -1809,9 +1834,9 @@
     const current = chooseSerialSelection(seasons, context.selection);
     const season = seasons.find((item) => item.season === current?.season);
 
-    addTrackGroup("Сезон", seasons, (item) => {
+    addTrackGroup("", seasons, (item) => {
       const btn = document.createElement("button");
-      btn.textContent = String(item.season);
+      btn.textContent = `Сезон ${item.season}`;
       btn.disabled = !!context.switching;
       if (item.season === current?.season) btn.className = "active";
       btn.addEventListener("click", () => {
@@ -1820,9 +1845,9 @@
         switchZenithSelection({ season: item.season, episode: episode?.episode });
       });
       return btn;
-    });
+    }, { panel: el.serialPanel, hideLabel: true, className: "serial-seasons" });
 
-    addTrackGroup("Серия", season?.episodes || [], (item) => {
+    addTrackGroup("", season?.episodes || [], (item) => {
       const btn = document.createElement("button");
       btn.textContent = String(item.episode);
       btn.disabled = !!context.switching;
@@ -1832,12 +1857,13 @@
         switchZenithSelection({ season: current?.season, episode: item.episode });
       });
       return btn;
-    });
+    }, { panel: el.serialPanel, hideLabel: true, className: "serial-episodes" });
   }
 
-  function addTrackGroup(title, items, renderButton) {
+  function addTrackGroup(title, items, renderButton, options = {}) {
+    const panel = options.panel || el.trackPanel;
     const group = document.createElement("div");
-    group.className = "track-group";
+    group.className = `track-group${options.className ? ` ${options.className}` : ""}`;
     const label = document.createElement("strong");
     label.textContent = title;
     const buttons = document.createElement("div");
@@ -1850,8 +1876,10 @@
     } else {
       items.forEach((item, index) => buttons.appendChild(renderButton(item, index)));
     }
-    group.append(label, buttons);
-    el.trackPanel.appendChild(group);
+    if (!options.hideLabel) group.appendChild(label);
+    group.appendChild(buttons);
+    panel.appendChild(group);
+    panel.classList.remove("hidden");
   }
 
   // =====================================================================
@@ -2676,7 +2704,11 @@ addEventListener('message', async (event) => {
     el.resolverInput.value = state.resolverBaseUrl;
     el.resolverState.textContent = "сохранён";
 
-    el.logoBtn.addEventListener("click", () => go("/"));
+    el.logoBtn.addEventListener("click", (event) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      go("/");
+    });
     el.searchBtn.addEventListener("click", onSearchSubmit);
     el.searchInput.addEventListener("keydown", (e) => { if (e.key === "Enter") onSearchSubmit(); });
     el.bookmarksToggle.addEventListener("click", () => go("/bookmarks"));

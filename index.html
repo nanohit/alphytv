@@ -7,16 +7,16 @@
   <meta name="referrer" content="no-referrer">
   <title>alphy</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260625-bookmarks4">
+  <link rel="stylesheet" href="/styles.css?v=20260625-player1">
   <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.11.17/dist/shaka-player.compiled.js"></script>
 </head>
 <body>
   <div class="container">
     <header>
       <div class="brand">
-        <button class="logo-btn" id="logoBtn" type="button" aria-label="На главную">
+        <a class="logo-btn" id="logoBtn" href="/#/" aria-label="На главную">
           <img class="logo-image" src="/Logo.png" alt="alphy">
-        </button>
+        </a>
       </div>
       <div class="search-box">
         <input type="text" id="searchInput" spellcheck="false" autocomplete="off"
@@ -89,7 +89,7 @@
     <!-- WATCH -->
     <section id="watchView" class="view hidden">
       <div class="watch-head">
-        <button class="back-btn" id="backBtn" type="button">← Назад</button>
+        <button class="watch-back" id="backBtn" type="button" aria-label="Назад">←</button>
         <h2 id="watchTitle" class="watch-title"></h2>
         <div class="watch-actions">
           <button class="add-list-btn hidden" id="addToListBtn" type="button">+ В подборку</button>
@@ -97,6 +97,7 @@
       </div>
       <div class="watch-layout">
         <div class="watch-main">
+          <div id="serialPanel" class="serial-panel hidden"></div>
           <div id="playerHost" class="player-host">
             <div class="placeholder"><div class="spinner"></div><span>Загрузка плеера…</span></div>
           </div>
@@ -138,7 +139,7 @@
   </dialog>
 
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
-  <script src="/app.js?v=20260625-bookmarks4"></script>
-  <script src="/catalog.js?v=20260625-bookmarks4"></script>
+  <script src="/app.js?v=20260625-player1"></script>
+  <script src="/catalog.js?v=20260625-player1"></script>
 </body>
 </html>
