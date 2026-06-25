@@ -669,7 +669,7 @@
     const remove = document.createElement("button");
     remove.className = "card-remove";
     remove.type = "button";
-    remove.textContent = "×";
+    remove.innerHTML = `<span class="card-remove-glyph" aria-hidden="true">×</span>`;
     remove.setAttribute("aria-label", "Убрать из продолжения");
     remove.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -896,7 +896,7 @@
       const x = document.createElement("button");
       x.className = "card-remove";
       x.type = "button";
-      x.textContent = "×";
+      x.innerHTML = `<span class="card-remove-glyph" aria-hidden="true">×</span>`;
       x.addEventListener("click", (event) => { event.stopPropagation(); onRemove(); });
       media.appendChild(x);
     }
