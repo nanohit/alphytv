@@ -35,7 +35,8 @@
     logoBtn: document.getElementById("logoBtn"),
     searchInput: document.getElementById("searchInput"),
     searchBtn: document.getElementById("searchBtn"),
-    settingsToggle: document.getElementById("settingsToggle"),
+    bookmarksToggle: document.getElementById("bookmarksToggle"),
+    bookmarksNavCount: document.getElementById("bookmarksNavCount"),
     settingsPanel: document.getElementById("settingsPanel"),
     resolverInput: document.getElementById("resolverInput"),
     saveResolverBtn: document.getElementById("saveResolverBtn"),
@@ -45,8 +46,10 @@
     continueSection: document.getElementById("continueSection"),
     continueHeader: document.getElementById("continueHeader"),
     continueGrid: document.getElementById("continueGrid"),
-    bookmarksSection: document.getElementById("bookmarksSection"),
+    bookmarksView: document.getElementById("bookmarksView"),
+    bookmarksCount: document.getElementById("bookmarksCount"),
     bookmarksGrid: document.getElementById("bookmarksGrid"),
+    bookmarksEmpty: document.getElementById("bookmarksEmpty"),
     homeEmpty: document.getElementById("homeEmpty"),
     searchView: document.getElementById("searchView"),
     resultsTitle: document.getElementById("resultsTitle"),
@@ -54,7 +57,6 @@
     watchView: document.getElementById("watchView"),
     backBtn: document.getElementById("backBtn"),
     watchTitle: document.getElementById("watchTitle"),
-    bookmarkBtn: document.getElementById("bookmarkBtn"),
     playerHost: document.getElementById("playerHost"),
     trackPanel: document.getElementById("trackPanel"),
     metaPanel: document.getElementById("metaPanel"),
@@ -218,29 +220,81 @@
   function isBookmarked(key) {
     return loadList(STORE_BOOKMARKS).some((b) => b.key === key);
   }
-  function toggleBookmark(target) {
+  function toggleBookmark(target, details = {}) {
     const key = keyFor(target);
     let bms = loadList(STORE_BOOKMARKS);
+    let added = false;
     if (bms.some((b) => b.key === key)) {
       bms = bms.filter((b) => b.key !== key);
     } else {
+      added = true;
       bms.unshift({
         key,
         kind: target.kind,
         target: cleanTarget(target),
-        title: target.title || "",
-        poster: target.poster || "",
-        year: target.year || "",
+        title: details.title || target.title || "",
+        poster: details.poster || target.poster || "",
+        year: details.year || target.year || "",
+        rating: details.rating || target.rating || {},
+        movieLength: details.movieLength || target.movieLength || null,
+        isSeries: details.isSeries ?? target.isSeries ?? false,
         addedAt: Date.now(),
       });
     }
     saveList(STORE_BOOKMARKS, bms.slice(0, 100));
-    updateBookmarkBtn(target);
+    updateBookmarkBtn(state.currentTarget);
+    syncBookmarkControls(key);
+    updateBookmarksNav();
+    return added;
   }
   function updateBookmarkBtn(target) {
-    const on = isBookmarked(keyFor(target));
-    el.bookmarkBtn.textContent = on ? "★ В закладках" : "☆ В закладки";
-    el.bookmarkBtn.classList.toggle("on", on);
+    if (!target) return;
+    syncBookmarkControls(keyFor(target));
+  }
+
+  function updateBookmarksNav() {
+    const count = loadList(STORE_BOOKMARKS).length;
+    el.bookmarksNavCount.textContent = String(count);
+    el.bookmarksNavCount.classList.toggle("hidden", count === 0);
+  }
+
+  function syncBookmarkButton(button, key) {
+    const on = isBookmarked(key);
+    button.classList.toggle("on", on);
+    button.setAttribute("aria-pressed", String(on));
+    button.setAttribute("aria-label", on ? "Убрать из закладок" : "Добавить в закладки");
+    button.title = on ? "Убрать из закладок" : "Добавить в закладки";
+  }
+
+  function syncBookmarkControls(key) {
+    document.querySelectorAll(".card-bookmark").forEach((button) => {
+      if (!key || button.dataset.bookmarkKey === key) {
+        syncBookmarkButton(button, button.dataset.bookmarkKey);
+      }
+    });
+  }
+
+  function addCardBookmark(media, target, details = {}, onChange) {
+    if (!target?.kind) return null;
+    const key = keyFor(target);
+    const button = document.createElement("button");
+    button.className = "card-bookmark";
+    button.type = "button";
+    button.dataset.bookmarkKey = key;
+    button.innerHTML = `
+      <svg viewBox="0 0 24 30" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3-1h18v29l-9-7-9 7z"></path>
+      </svg>
+    `;
+    syncBookmarkButton(button, key);
+    button.addEventListener("keydown", (event) => event.stopPropagation());
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const added = toggleBookmark(target, details);
+      onChange?.(added);
+    });
+    media.appendChild(button);
+    return button;
   }
 
   // =====================================================================
@@ -433,6 +487,7 @@
     const h = location.hash.replace(/^#/, "");
     if (!h || h === "/") return { view: "home" };
     const segs = h.split("/").filter(Boolean);
+    if (segs[0] === "bookmarks") return { view: "bookmarks" };
     if (segs[0] === "search") return { view: "search", q: decodeURIComponent(segs.slice(1).join("/") || "") };
     if (segs[0] === "watch") return { view: "watch", kind: segs[1], raw: decodeURIComponent(segs.slice(2).join("/") || "") };
     return { view: "home" };
@@ -454,6 +509,8 @@
     try {
       if (r.view === "search") {
         await showSearch(r.q, token);
+      } else if (r.view === "bookmarks") {
+        showBookmarks();
       } else if (r.view === "watch") {
         await showWatch(r, token);
       } else {
@@ -469,8 +526,10 @@
   // =====================================================================
   function setView(name) {
     el.homeView.classList.toggle("hidden", name !== "home");
+    el.bookmarksView.classList.toggle("hidden", name !== "bookmarks");
     el.searchView.classList.toggle("hidden", name !== "search");
     el.watchView.classList.toggle("hidden", name !== "watch");
+    el.bookmarksToggle.classList.toggle("active", name === "bookmarks");
     window.dispatchEvent(new CustomEvent("alphy:view", { detail: { view: name } }));
   }
 
@@ -479,15 +538,39 @@
     document.title = "alphy";
     el.searchInput.value = "";
     const hist = loadList(STORE_HISTORY);
-    const bms = loadList(STORE_BOOKMARKS);
     renderContinueHeader(hist.length);
     renderHomeGrid(el.continueGrid, el.continueSection, hist, {
       withProgress: true,
       store: STORE_HISTORY,
       featureLatest: true,
     });
-    renderHomeGrid(el.bookmarksGrid, el.bookmarksSection, bms, { withProgress: false, store: STORE_BOOKMARKS });
-    el.homeEmpty.classList.toggle("hidden", hist.length > 0 || bms.length > 0);
+    el.homeEmpty.classList.toggle("hidden", hist.length > 0);
+  }
+
+  function showBookmarks() {
+    setView("bookmarks");
+    document.title = "Закладки — alphy";
+    el.searchInput.value = "";
+    const entries = loadList(STORE_BOOKMARKS);
+    el.bookmarksGrid.replaceChildren();
+    el.bookmarksCount.textContent = String(entries.length);
+    el.bookmarksCount.classList.toggle("hidden", entries.length === 0);
+    el.bookmarksEmpty.classList.toggle("hidden", entries.length > 0);
+    entries.forEach((entry) => {
+      const target = entry.target;
+      const card = makeCard({
+        title: entry.title || "(без названия)",
+        sub: [entry.year, entry.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · "),
+        poster: entry.poster,
+        rating: entry.rating,
+        movieLength: entry.movieLength,
+        isSeries: entry.isSeries,
+        bookmark: { target, details: entry },
+        onBookmarkChange: () => showBookmarks(),
+        onClick: () => go(hashFor(target)),
+      });
+      el.bookmarksGrid.appendChild(card);
+    });
   }
 
   function renderHomeGrid(grid, section, entries, opts) {
@@ -507,6 +590,7 @@
         rating: entry.rating,
         movieLength: entry.movieLength,
         isSeries: entry.isSeries,
+        bookmark: opts.store === STORE_BOOKMARKS ? { target: entry.target, details: entry } : null,
         onClick: () => go(hashFor(entry.target)),
         onRemove: () => {
           const list = loadList(opts.store).filter((x) => x.key !== entry.key);
@@ -565,6 +649,8 @@
       </div>
     `;
     media.appendChild(overlay);
+
+    addCardBookmark(media, entry.target, entry);
 
     const remove = document.createElement("button");
     remove.className = "card-remove";
@@ -673,26 +759,48 @@
     for (const item of ndCandidates) {
       const match = matchNewdeafMetadata(item, pkResults);
       if (match) cacheSet("ndenriched", item.url, match, TTL.enriched);
+      const title = item.title || "Newdeaf";
+      const target = { kind: "nd", pageUrl: item.url };
+      const details = {
+        title,
+        year: match?.year || "",
+        poster: match?.poster || item.poster || "",
+        rating: match?.rating || {},
+        movieLength: match?.movieLength || null,
+        isSeries: match?.isSeries ?? false,
+      };
       const card = makeCard({
-        title: item.title || "Newdeaf",
+        title,
         sub: [match?.year, match?.isSeries ? "сериал" : "Newdeaf"].filter(Boolean).join(" · "),
-        poster: match?.poster || item.poster,
+        poster: details.poster,
         rating: match?.rating,
         movieLength: match?.movieLength,
         isSeries: match?.isSeries,
+        bookmark: { target, details },
         onClick: () => go(`/watch/nd/${encodeURIComponent(item.url)}`),
       });
       el.resultsGrid.appendChild(card);
     }
     for (const movie of pkResults) {
       if (movie.kpId == null) continue;
+      const title = movieTitle(movie);
+      const target = { kind: "kp", kpId: movie.kpId };
+      const details = {
+        title,
+        year: movie.year || "",
+        poster: movie.poster || "",
+        rating: movie.rating || {},
+        movieLength: movie.movieLength || null,
+        isSeries: !!movie.isSeries,
+      };
       const card = makeCard({
-        title: movieTitle(movie),
+        title,
         sub: [movie.year, movie.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · "),
         poster: movie.poster,
         rating: movie.rating,
         movieLength: movie.movieLength,
         isSeries: movie.isSeries,
+        bookmark: { target, details },
         onClick: () => go(`/watch/kp/${encodeURIComponent(movie.kpId)}`),
       });
       el.resultsGrid.appendChild(card);
@@ -719,6 +827,8 @@
     rating,
     movieLength,
     isSeries,
+    bookmark,
+    onBookmarkChange,
     onClick,
     onRemove,
   }) {
@@ -764,6 +874,9 @@
       <div class="hover-duration">${formatDuration(movieLength, isSeries)}</div>
     `;
     media.appendChild(hover);
+    if (bookmark?.target) {
+      addCardBookmark(media, bookmark.target, bookmark.details, onBookmarkChange);
+    }
     if (onRemove) {
       const x = document.createElement("button");
       x.className = "card-remove";
@@ -1242,7 +1355,7 @@
     });
     const sub = [year, meta.movieLength ? `${meta.movieLength} мин` : ""].filter(Boolean).join(" · ");
     let html = "";
-    if (poster) html += `<img src="${escapeAttr(poster)}" alt="">`;
+    if (poster) html += `<div class="meta-poster"><img src="${escapeAttr(poster)}" alt=""></div>`;
     html += `<div class="mp-title">${escapeHtml(title)}</div>`;
     if (sub) html += `<div class="mp-sub">${escapeHtml(sub)}</div>`;
     if (kp || imdb) {
@@ -1253,6 +1366,17 @@
     }
     if (desc) html += `<div class="meta-desc">${escapeHtml(desc)}</div>`;
     el.metaPanel.innerHTML = html;
+    const posterHost = el.metaPanel.querySelector(".meta-poster");
+    if (posterHost) {
+      addCardBookmark(posterHost, target, {
+        title,
+        year,
+        poster,
+        rating: meta.rating || {},
+        movieLength: meta.movieLength || null,
+        isSeries: meta.isSeries ?? target?.isSeries ?? false,
+      });
+    }
     el.metaPanel.classList.remove("hidden");
   }
 
@@ -2540,12 +2664,17 @@ addEventListener('message', async (event) => {
     el.logoBtn.addEventListener("click", () => go("/"));
     el.searchBtn.addEventListener("click", onSearchSubmit);
     el.searchInput.addEventListener("keydown", (e) => { if (e.key === "Enter") onSearchSubmit(); });
-    el.settingsToggle.addEventListener("click", () => el.settingsPanel.classList.toggle("hidden"));
+    el.bookmarksToggle.addEventListener("click", () => go("/bookmarks"));
     el.saveResolverBtn.addEventListener("click", saveResolver);
     el.healthBtn.addEventListener("click", () => testResolver());
     el.backBtn.addEventListener("click", () => { if (history.length > 1) history.back(); else go("/"); });
-    el.bookmarkBtn.addEventListener("click", () => { if (state.currentTarget) toggleBookmark(state.currentTarget); });
     window.addEventListener("hashchange", route);
+    window.addEventListener("storage", (event) => {
+      if (event.key !== STORE_BOOKMARKS) return;
+      updateBookmarksNav();
+      syncBookmarkControls();
+      if (parseHash().view === "bookmarks") showBookmarks();
+    });
     window.addEventListener("message", onOrtProgress);
     bindKeyboard();
 
@@ -2560,12 +2689,14 @@ addEventListener('message', async (event) => {
       } else if (params.get("q")) replaceHash(`/search/${encodeURIComponent(params.get("q"))}`);
     }
 
+    updateBookmarksNav();
     route();
   }
 
   window.alphyBridge = {
     getCurrentCuratedItem: currentCuratedItem,
     openCuratedItem,
+    addCardBookmark,
   };
 
   boot();

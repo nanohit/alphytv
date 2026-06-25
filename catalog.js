@@ -405,6 +405,7 @@
       <div class="hover-duration">${durationLabel(item)}</div>
     `;
     media.appendChild(overlay);
+    window.alphyBridge?.addCardBookmark?.(media, item.target, item);
     card.appendChild(media);
 
     const title = document.createElement("div");

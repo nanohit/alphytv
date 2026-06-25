@@ -7,7 +7,7 @@
   <meta name="referrer" content="no-referrer">
   <title>alphy</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260625-continue1">
+  <link rel="stylesheet" href="/styles.css?v=20260625-bookmarks1">
   <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.11.17/dist/shaka-player.compiled.js"></script>
 </head>
 <body>
@@ -27,7 +27,12 @@
             <line x1="16.65" y1="16.65" x2="21" y2="21"></line>
           </svg>
         </button>
-        <button class="icon-btn" id="settingsToggle" type="button" aria-label="Настройки">⚙</button>
+        <button class="icon-btn bookmark-nav-btn" id="bookmarksToggle" type="button" aria-label="Закладки">
+          <svg viewBox="0 0 24 30" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3-1h18v29l-9-7-9 7z"></path>
+          </svg>
+          <span id="bookmarksNavCount" class="bookmark-nav-count hidden">0</span>
+        </button>
       </div>
     </header>
 
@@ -59,13 +64,22 @@
         </div>
         <div id="curatedLists" class="curated-lists"></div>
       </section>
-      <div id="bookmarksSection" class="row hidden">
-        <h3>Закладки</h3>
-        <div id="bookmarksGrid" class="card-grid"></div>
-      </div>
       <div id="homeEmpty" class="home-empty hidden">
-        <strong>Тут появится твоя история и закладки</strong>
+        <strong>Тут появится история просмотра</strong>
         <span>Найди фильм или сериал в поиске — и продолжай с того места, где остановился.</span>
+      </div>
+    </section>
+
+    <!-- LOCAL BOOKMARKS -->
+    <section id="bookmarksView" class="view hidden">
+      <h2 class="results-title bookmarks-title">
+        Закладки
+        <span id="bookmarksCount" class="continue-count hidden">0</span>
+      </h2>
+      <div id="bookmarksGrid" class="card-grid"></div>
+      <div id="bookmarksEmpty" class="home-empty hidden">
+        <strong>Закладок пока нет</strong>
+        <span>Наведи курсор на карточку и нажми на белую закладку.</span>
       </div>
     </section>
 
@@ -82,7 +96,6 @@
         <h2 id="watchTitle" class="watch-title"></h2>
         <div class="watch-actions">
           <button class="add-list-btn hidden" id="addToListBtn" type="button">+ В подборку</button>
-          <button class="bookmark-btn" id="bookmarkBtn" type="button" aria-label="В закладки">☆</button>
         </div>
       </div>
       <div class="watch-layout">
@@ -128,7 +141,7 @@
   </dialog>
 
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
-  <script src="/app.js?v=20260625-continue1"></script>
-  <script src="/catalog.js?v=20260625-continue1"></script>
+  <script src="/app.js?v=20260625-bookmarks1"></script>
+  <script src="/catalog.js?v=20260625-bookmarks1"></script>
 </body>
 </html>

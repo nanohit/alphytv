@@ -60,6 +60,22 @@ header {
   cursor: pointer; transition: border-color .2s, box-shadow .2s, transform .2s; flex: none;
 }
 .icon-btn { color: var(--muted); font-size: 20px; }
+.bookmark-nav-btn { position: relative; color: #fff; }
+.bookmark-nav-btn > svg {
+  width: 19px; height: 24px;
+  fill: transparent;
+  transition: fill .16s, color .16s;
+}
+.bookmark-nav-btn.active { color: var(--accent); border-color: #4b4b26; }
+.bookmark-nav-btn.active > svg { fill: currentColor; }
+.bookmark-nav-count {
+  position: absolute; right: -5px; top: -5px;
+  min-width: 18px; height: 18px; padding: 0 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 2px solid var(--bg); border-radius: 999px;
+  background: var(--accent); color: #000;
+  font-size: 9px; font-weight: 600; line-height: 1;
+}
 .search-button:hover, .icon-btn:hover {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(255, 255, 0, 0.12), 0 8px 20px rgba(0, 0, 0, 0.55);
@@ -97,6 +113,7 @@ header {
   color: var(--muted-strong); font-size: 11px; font-weight: 500;
 }
 .results-title { font-size: 20px; margin: 4px 0 18px; letter-spacing: .02em; }
+.bookmarks-title { display: flex; align-items: center; gap: 9px; }
 
 .card-grid {
   display: grid;
@@ -198,6 +215,37 @@ header {
 .card:focus-visible .poster { filter: brightness(.66); transform: scale(1.015); }
 .card:hover .card-hover-meta,
 .card:focus-visible .card-hover-meta { opacity: 1; }
+.card-bookmark {
+  position: absolute; z-index: 4; top: -1px; right: 8px;
+  width: 28px; height: 36px; padding: 0;
+  border: 0; background: transparent; color: #fff;
+  display: inline-flex; align-items: flex-start; justify-content: center;
+  cursor: pointer; opacity: 0;
+  filter: drop-shadow(0 2px 5px rgba(0,0,0,.75));
+  transform: translateY(-2px);
+  transition: opacity .15s, transform .15s, color .15s;
+}
+.card-bookmark svg {
+  width: 24px; height: 32px;
+  fill: transparent;
+  stroke: currentColor;
+  transition: fill .15s, color .15s, transform .15s;
+}
+.card:hover .card-bookmark,
+.card:focus-within .card-bookmark,
+.card-bookmark.on {
+  opacity: 1;
+  transform: translateY(0);
+}
+.card-bookmark:hover svg { transform: scale(1.06); }
+.card-bookmark.on { color: var(--accent); }
+.card-bookmark.on svg { fill: currentColor; }
+.card-bookmark:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
 .card .rating-pill {
   position: absolute; top: 8px; left: 8px; padding: 3px 7px; border-radius: 8px;
   z-index: 2; font-size: 11px; font-weight: 600; background: rgba(0,0,0,.72); color: var(--accent);
@@ -210,6 +258,7 @@ header {
 }
 .card:hover .card-remove { opacity: 1; }
 .card-remove:hover { background: rgba(255,255,0,.8); color: #000; }
+.continue-card .card-remove { left: 6px; right: auto; }
 .continue-section .card-grid {
   --continue-media-height: clamp(222px, 21vw, 258px);
   display: flex;
@@ -217,7 +266,7 @@ header {
   gap: 18px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 3px 3px 14px;
+  padding: 8px 3px 14px;
   scroll-snap-type: x proximity;
   scrollbar-width: thin;
   scrollbar-color: #292929 transparent;
@@ -314,12 +363,11 @@ header {
 .watch-head { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
 .watch-title { font-size: 20px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .watch-actions { display: flex; gap: 10px; }
-.back-btn, .bookmark-btn, .add-list-btn {
+.back-btn, .add-list-btn {
   padding: 9px 16px; border: 1px solid var(--stroke-strong); border-radius: 10px;
   background: var(--panel); color: var(--text); cursor: pointer; font-size: 14px;
 }
-.back-btn:hover, .bookmark-btn:hover, .add-list-btn:hover { border-color: var(--accent); }
-.bookmark-btn.on { color: var(--accent); border-color: var(--accent); }
+.back-btn:hover, .add-list-btn:hover { border-color: var(--accent); }
 
 /* ---------- curated lists / compact admin ---------- */
 .curated-section { margin: 8px 0 38px; }
@@ -367,7 +415,7 @@ header {
   gap: 16px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 3px 3px 14px;
+  padding: 8px 3px 14px;
   scroll-snap-type: x proximity;
   scrollbar-width: thin;
   scrollbar-color: #292929 transparent;
@@ -448,7 +496,9 @@ header {
   background: var(--panel); border: 1px solid var(--stroke); border-radius: 14px;
   padding: 16px; display: flex; flex-direction: column; gap: 12px;
 }
-.meta-panel img { width: 100%; border-radius: 10px; border: 1px solid var(--stroke); object-fit: cover; }
+.meta-poster { position: relative; overflow: hidden; border-radius: 10px; }
+.meta-panel img { width: 100%; display: block; border-radius: 10px; border: 1px solid var(--stroke); object-fit: cover; }
+.meta-poster .card-bookmark { opacity: 1; }
 .meta-panel .mp-title { font-size: 16px; font-weight: 600; }
 .meta-panel .mp-sub { font-size: 12px; color: var(--muted-strong); }
 .meta-ratings { display: flex; gap: 16px; }
@@ -484,7 +534,8 @@ header {
   .brand { display: flex; justify-content: center; }
   .watch-layout { grid-template-columns: 1fr; }
   .meta-panel { flex-direction: row; flex-wrap: wrap; }
-  .meta-panel img { width: 110px; }
+  .meta-poster { width: 110px; flex: none; }
+  .meta-panel img { width: 100%; }
   .watch-head { align-items: flex-start; flex-wrap: wrap; }
   .watch-title { order: -1; flex-basis: 100%; white-space: normal; }
   .watch-actions { margin-left: auto; }
@@ -522,17 +573,20 @@ header {
   .curated-list-head { align-items: stretch; }
   .curated-title-input { font-size: 13px; }
   .admin-catalog-actions button { padding: 0 8px; }
-  .watch-actions { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
+  .watch-actions { width: 100%; justify-content: flex-end; }
   .back-btn { flex: 1; }
-  .bookmark-btn, .add-list-btn { width: 100%; padding: 9px 8px; font-size: 12px; }
+  .add-list-btn { padding: 9px 12px; font-size: 12px; }
   .track-group { gap: 7px; }
   .track-group > strong { width: 100%; min-width: 0; }
   .meta-panel { display: grid; grid-template-columns: 92px minmax(0,1fr); }
-  .meta-panel img { width: 92px; grid-row: span 4; }
+  .meta-poster { width: 92px; grid-row: span 4; }
+  .meta-panel img { width: 100%; }
 }
 
 @media (hover: none) {
   .card-hover-meta { display: none; }
+  .card-bookmark { opacity: .82; transform: none; }
+  .card-bookmark.on { opacity: 1; }
   .card:hover { transform: none; }
   .card:hover .poster { filter: none; transform: none; }
   .continue-card:hover .poster { filter: brightness(.88); }
