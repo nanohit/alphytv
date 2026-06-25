@@ -601,7 +601,7 @@
       });
       grid.appendChild(card);
     });
-    layoutMobileGrid(grid);
+    if (!opts.withProgress) layoutMobileGrid(grid);
   }
 
   function layoutMobileGrid(grid) {
@@ -627,8 +627,7 @@
   }
 
   function makeContinueCard(entry, index, opts) {
-    const compact = window.matchMedia("(max-width: 560px)").matches;
-    const featured = !!opts.featureLatest && index === 0 && !compact;
+    const featured = !!opts.featureLatest && index === 0;
     const card = document.createElement("article");
     card.className = `card continue-card${featured ? " continue-featured" : ""}`;
     card.tabIndex = 0;
@@ -636,7 +635,7 @@
 
     const media = document.createElement("div");
     media.className = "card-media continue-media";
-    const imageUrl = !compact && featured && entry.snapshot ? entry.snapshot : entry.poster || entry.snapshot;
+    const imageUrl = featured && entry.snapshot ? entry.snapshot : entry.poster || entry.snapshot;
     if (imageUrl) {
       const image = document.createElement("img");
       image.className = "poster";
