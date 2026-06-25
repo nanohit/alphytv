@@ -55,7 +55,6 @@
     resultsTitle: document.getElementById("resultsTitle"),
     resultsGrid: document.getElementById("resultsGrid"),
     watchView: document.getElementById("watchView"),
-    backBtn: document.getElementById("backBtn"),
     watchTitle: document.getElementById("watchTitle"),
     playerHost: document.getElementById("playerHost"),
     serialPanel: document.getElementById("serialPanel"),
@@ -2714,7 +2713,6 @@ addEventListener('message', async (event) => {
     el.bookmarksToggle.addEventListener("click", () => go("/bookmarks"));
     el.saveResolverBtn.addEventListener("click", saveResolver);
     el.healthBtn.addEventListener("click", () => testResolver());
-    el.backBtn.addEventListener("click", () => { if (history.length > 1) history.back(); else go("/"); });
     window.addEventListener("hashchange", route);
     window.addEventListener("storage", (event) => {
       if (event.key !== STORE_BOOKMARKS) return;

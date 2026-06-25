@@ -369,12 +369,6 @@ header {
 
 /* ---------- watch ---------- */
 .watch-head { display: flex; align-items: center; gap: 8px; margin-bottom: 11px; }
-.watch-back {
-  flex: none; width: 28px; height: 30px; padding: 0;
-  border: 0; background: transparent; color: #d8d8d8;
-  font: 400 27px/1 Arial, sans-serif; cursor: pointer;
-}
-.watch-back:hover { color: var(--accent); }
 .watch-title { font-size: 18px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .watch-actions { display: flex; gap: 10px; }
 .add-list-btn {
@@ -693,7 +687,6 @@ header {
   .curated-title-input { font-size: 13px; }
   .admin-catalog-actions button { padding: 0 8px; }
   .watch-head { gap: 5px; }
-  .watch-back { width: 24px; height: 27px; font-size: 24px; }
   .watch-title { font-size: 16px; }
   .watch-actions { width: 100%; justify-content: flex-end; }
   .add-list-btn { padding: 9px 12px; font-size: 12px; }

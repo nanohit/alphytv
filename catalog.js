@@ -1,7 +1,8 @@
 (() => {
   "use strict";
 
-  const CONFIG_URL = "/curated-config.json";
+  const CATALOG_CACHE_VERSION = "20260625-r70";
+  const CONFIG_URL = `/curated-config.json?v=${CATALOG_CACHE_VERSION}`;
   const ADMIN_CHECK_URL = "/api/admin/check";
   const ADMIN_CATALOG_URL = "/api/admin/catalog";
   const AUTH_KEY = "alphy.admin.auth.v1";
@@ -11,7 +12,7 @@
   const state = {
     catalog: { schema: 1, revision: 0, updatedAt: null, lists: [] },
     blobUrl: "",
-    fallbackUrl: "/curated-fallback.json",
+    fallbackUrl: `/curated-fallback.json?v=${CATALOG_CACHE_VERSION}`,
     admin: false,
     dirty: false,
     saving: false,
@@ -173,7 +174,7 @@
   async function loadPublicCatalog() {
     let config = {};
     try {
-      config = await fetchJson(CONFIG_URL, { cache: "force-cache" });
+      config = await fetchJson(CONFIG_URL, { cache: "no-cache" });
     } catch {
       // The baked fallback below keeps the homepage usable.
     }
@@ -191,7 +192,7 @@
         // Fall through to the deployment-baked snapshot.
       }
     }
-    if (!payload) payload = await fetchJson(state.fallbackUrl, { cache: "force-cache" });
+    if (!payload) payload = await fetchJson(state.fallbackUrl, { cache: "no-cache" });
     state.catalog = normalizeCatalog(payload);
     render();
   }

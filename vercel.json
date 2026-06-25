@@ -1,5 +1,11 @@
 {
   "cleanUrls": true,
+  "rewrites": [
+    {
+      "source": "/curated-live.json",
+      "destination": "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/curated.json"
+    }
+  ],
   "headers": [
     {
       "source": "/(.*)",

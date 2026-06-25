@@ -6,6 +6,7 @@
   "description": "Static AlphyTV MVP with Newdeaf/Ortified and Zona/Zenith playback flow.",
   "scripts": {
     "check": "node --check app.js && node --check catalog.js && node --check api/_admin-auth.js && node --check api/_catalog-store.js && node --check api/admin/check.js && node --check api/admin/catalog.js && deno check resolver-deno/main.js",
+    "sync:catalog": "node scripts/sync-curated-fallback.mjs",
     "test": "node --test tests/*.test.js",
     "deploy": "npx vercel@latest --prod"
   }

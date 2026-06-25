@@ -3,14 +3,18 @@
 ## Runtime shape
 
 - Public data: `catalog/curated.json` in the public `alphy-curated` Vercel Blob
-  store.
+  store, exposed to the browser through the same-origin
+  `/curated-live.json` edge rewrite.
 - Public pointer: `/curated-config.json`.
 - Deployment fallback: `/curated-fallback.json`.
 - Admin authentication and writes: Vercel Functions under `/api/admin/*`.
 - Playback and metadata resolver: unchanged Deno deployment.
 
 Normal homepage traffic does not execute a Function and does not touch Deno.
-The browser downloads one small CDN-cached JSON document.
+The browser downloads one small CDN-cached JSON document through the alphy.tv
+origin, which also works in privacy browsers that block cross-site fetches.
+`npm run sync:catalog` snapshots the live catalog into the deployment fallback
+and a revisioned file under `docs/catalog-backups/`.
 
 ## Authentication
 

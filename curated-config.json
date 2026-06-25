@@ -1,4 +1,4 @@
 {
-  "blobUrl": "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/curated.json",
+  "blobUrl": "/curated-live.json",
   "fallbackUrl": "/curated-fallback.json"
 }
