@@ -2140,11 +2140,20 @@ LIMIT 1`;
 
   function wyzieDownloadUrl(item, options = {}) {
     const url = item.url || "";
-    const addCacheBust = (value) => {
-      if (!options.cacheBust) return value;
+    const key = options.key || WYZIE_KEYS[0];
+    // The Wyzie /c/ content proxy (and any sub.wyzie.io endpoint) needs the API
+    // key as a `key` query param, exactly like /search and /sources. Without it
+    // the proxy answers with an empty body, so the download silently fails and
+    // the subtitle never reaches the player. This is the whole reason Wyzie subs
+    // would not embed. The proxy returns CORS `access-control-allow-origin: *`,
+    // so once the key is attached the fetch is fully client-side.
+    const finalizeUrl = (value) => {
       try {
         const parsed = new URL(value);
-        parsed.searchParams.set("_", String(Date.now()));
+        if (key && /(^|\.)wyzie\.io$/i.test(parsed.hostname) && !parsed.searchParams.has("key")) {
+          parsed.searchParams.set("key", key);
+        }
+        if (options.cacheBust) parsed.searchParams.set("_", String(Date.now()));
         return parsed.href;
       } catch {
         return value;
@@ -2156,13 +2165,13 @@ LIMIT 1`;
         const match = parsed.pathname.match(/\/vrf-([^/]+)\/file\/(\d+)/i);
         if (match) {
           const format = item.format === "vtt" ? "vtt" : "srt";
-          return addCacheBust(`${WYZIE_BASE_URL}/c/${encodeURIComponent(match[1])}/id/${encodeURIComponent(match[2])}?format=${format}&encoding=UTF-8`);
+          return finalizeUrl(`${WYZIE_BASE_URL}/c/${encodeURIComponent(match[1])}/id/${encodeURIComponent(match[2])}?format=${format}&encoding=UTF-8`);
         }
       }
     } catch {
       // Use the original URL below; fetch will report the real failure.
     }
-    return addCacheBust(url);
+    return finalizeUrl(url);
   }
 
   async function fetchSubtitleText(url) {
