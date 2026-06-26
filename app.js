@@ -1785,9 +1785,20 @@
       return btn;
     });
 
-    const subtitleItems = texts.length ? [{ off: true }, ...texts] : [{ request: true }];
+    const subtitleItems = texts.length
+      ? [{ off: true }, ...texts]
+      : [
+          { request: true },
+          ...(state.subtitleRequest.error ? [{ note: state.subtitleRequest.error }] : []),
+        ];
     addTrackGroup("Субтитры", subtitleItems, (track) => {
       const btn = document.createElement("button");
+      if (track.note) {
+        const span = document.createElement("span");
+        span.className = "muted subtitle-note";
+        span.textContent = track.note;
+        return span;
+      }
       if (track.request) {
         btn.textContent = state.subtitleRequest.loading
           ? "ищу…"
@@ -1842,11 +1853,12 @@
       if (isStale(token) || player !== state.player) return;
       if (!context?.id) throw new Error("Не найден IMDb/TMDB ID для поиска субтитров");
 
-      const candidates = await fetchWyzieSubtitleCandidates(context, token);
+      const forceRefresh = !!state.subtitleRequest.error;
+      const candidates = await fetchWyzieSubtitleCandidates(context, token, { forceRefresh });
       if (isStale(token) || player !== state.player) return;
       if (!candidates.length) throw new Error("Wyzie не нашёл субтитры для этого тайтла");
 
-      const added = await addWyzieSubtitlesToPlayer(player, candidates, token);
+      const added = await addWyzieSubtitlesToPlayer(player, candidates, token, { forceRefresh });
       if (isStale(token) || player !== state.player) return;
       if (!added.length) throw new Error("Wyzie нашёл варианты, но файлы не скачались в браузере");
 
@@ -1997,14 +2009,14 @@ LIMIT 1`;
     }
   }
 
-  async function fetchWyzieSubtitleCandidates(context, token) {
+  async function fetchWyzieSubtitleCandidates(context, token, options = {}) {
     const cacheKey = [
       context.id,
       context.season || "movie",
       context.episode || "",
       WYZIE_LANGUAGES.join(","),
     ].join(":");
-    const cached = cacheGet("wyziesubs", cacheKey);
+    const cached = options.forceRefresh ? null : cacheGet("wyziesubs", cacheKey);
     if (Array.isArray(cached) && cached.length) return cached;
 
     let lastError = null;
@@ -2021,9 +2033,11 @@ LIMIT 1`;
         if (sources.length) params.set("source", sources.join(","));
         if (context.season) params.set("season", String(context.season));
         if (context.episode) params.set("episode", String(context.episode));
+        if (options.forceRefresh) params.set("refresh", "true");
 
         const response = await fetchWithTimeout(`${WYZIE_BASE_URL}/search?${params}`, {
           headers: { Accept: "application/json" },
+          cache: "no-store",
         }, 18000);
         const body = await response.text();
         let data;
@@ -2074,7 +2088,7 @@ LIMIT 1`;
       .filter((item) => item.url && /^https:\/\//i.test(item.url));
   }
 
-  async function addWyzieSubtitlesToPlayer(player, candidates, token) {
+  async function addWyzieSubtitlesToPlayer(player, candidates, token, options = {}) {
     const added = [];
     const seenLabels = new Set();
     const ordered = orderWyzieCandidates(candidates);
@@ -2089,7 +2103,7 @@ LIMIT 1`;
       attempts += 1;
 
       try {
-        const downloadUrl = wyzieDownloadUrl(item);
+        const downloadUrl = wyzieDownloadUrl(item, { cacheBust: options.forceRefresh });
         const raw = await fetchSubtitleText(downloadUrl);
         const vtt = subtitleTextToVtt(raw, item.format);
         const blobUrl = URL.createObjectURL(new Blob([vtt], { type: "text/vtt;charset=utf-8" }));
@@ -2124,26 +2138,37 @@ LIMIT 1`;
     );
   }
 
-  function wyzieDownloadUrl(item) {
+  function wyzieDownloadUrl(item, options = {}) {
     const url = item.url || "";
+    const addCacheBust = (value) => {
+      if (!options.cacheBust) return value;
+      try {
+        const parsed = new URL(value);
+        parsed.searchParams.set("_", String(Date.now()));
+        return parsed.href;
+      } catch {
+        return value;
+      }
+    };
     try {
       const parsed = new URL(url);
       if (/dl\.opensubtitles\.org$/i.test(parsed.hostname)) {
         const match = parsed.pathname.match(/\/vrf-([^/]+)\/file\/(\d+)/i);
         if (match) {
           const format = item.format === "vtt" ? "vtt" : "srt";
-          return `${WYZIE_BASE_URL}/c/${encodeURIComponent(match[1])}/id/${encodeURIComponent(match[2])}?format=${format}&encoding=UTF-8`;
+          return addCacheBust(`${WYZIE_BASE_URL}/c/${encodeURIComponent(match[1])}/id/${encodeURIComponent(match[2])}?format=${format}&encoding=UTF-8`);
         }
       }
     } catch {
       // Use the original URL below; fetch will report the real failure.
     }
-    return url;
+    return addCacheBust(url);
   }
 
   async function fetchSubtitleText(url) {
     const response = await fetchWithTimeout(url, {
       headers: { Accept: "text/vtt,text/plain,*/*" },
+      cache: "no-store",
     }, 20000);
     const text = await response.text();
     if (!response.ok) throw new Error(`download ${response.status}`);
