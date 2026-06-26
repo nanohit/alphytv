@@ -1909,6 +1909,18 @@
       }
     }
 
+    if (!external.id && kpId) {
+      const externalId = await fetchWikidataExternalIds(kpId);
+      if (isStale(token)) return null;
+      if (externalId) {
+        meta = mergeMetadata(meta, { kpId, externalId });
+        state.currentMeta = meta;
+        cacheSet("meta", kpId, meta, TTL.meta);
+        if (state.currentTarget) renderMeta(meta, state.currentTarget);
+        external = subtitleExternalId(meta);
+      }
+    }
+
     const selection = currentSubtitleSelection(meta, target);
     return {
       id: external.id,
@@ -1947,6 +1959,42 @@
     if (/^tt\d{5,}$/i.test(imdb)) return { id: imdb, kind: "imdb" };
     if (/^\d+$/.test(tmdb)) return { id: tmdb, kind: "tmdb" };
     return { id: "", kind: "" };
+  }
+
+  async function fetchWikidataExternalIds(kpId) {
+    const id = String(kpId || "").trim();
+    if (!/^\d+$/.test(id)) return null;
+    const cached = cacheGet("wikidataids", id);
+    if (cached && typeof cached === "object") return cached;
+    const query = `
+SELECT ?imdb ?tmdbMovie ?tmdbTv WHERE {
+  ?item wdt:P2603 "${id}".
+  OPTIONAL { ?item wdt:P345 ?imdb. }
+  OPTIONAL { ?item wdt:P4947 ?tmdbMovie. }
+  OPTIONAL { ?item wdt:P4983 ?tmdbTv. }
+}
+LIMIT 1`;
+    const url = `https://query.wikidata.org/sparql?${new URLSearchParams({ query, format: "json" })}`;
+    try {
+      const response = await fetchWithTimeout(url, {
+        headers: { Accept: "application/sparql-results+json,application/json" },
+      }, 12000);
+      const data = JSON.parse(await response.text());
+      if (!response.ok) throw new Error(`Wikidata ${response.status}`);
+      const binding = data?.results?.bindings?.[0] || {};
+      const externalId = {
+        imdb: compact(binding.imdb?.value || ""),
+        tmdb: compact(binding.tmdbMovie?.value || binding.tmdbTv?.value || ""),
+      };
+      if (!/^tt\d{5,}$/i.test(externalId.imdb)) delete externalId.imdb;
+      if (!/^\d+$/.test(externalId.tmdb || "")) delete externalId.tmdb;
+      if (!Object.keys(externalId).length) return null;
+      cacheSet("wikidataids", id, externalId, TTL.enriched);
+      return externalId;
+    } catch (error) {
+      log("wikidata-external-id-warn", { kpId: id, message: error.message });
+      return null;
+    }
   }
 
   async function fetchWyzieSubtitleCandidates(context, token) {
