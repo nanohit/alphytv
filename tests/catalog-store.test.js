@@ -15,6 +15,7 @@ test("normalizes direct player targets and metadata", () => {
         year: 2014,
         poster: "https://example.com/poster.jpg",
         rating: { kp: "8.4", imdb: 8.8 },
+        externalId: { imdb: "tt3398228", tmdb: 61222 },
         isSeries: true,
         target: { kind: "zen", zenithId: 2097 },
       }],
@@ -25,6 +26,7 @@ test("normalizes direct player targets and metadata", () => {
   assert.equal(catalog.lists[0].title, "Выбор редакции");
   assert.deepEqual(catalog.lists[0].items[0].target, { kind: "zen", zenithId: "2097" });
   assert.deepEqual(catalog.lists[0].items[0].rating, { kp: 8.4, imdb: 8.8 });
+  assert.deepEqual(catalog.lists[0].items[0].externalId, { imdb: "tt3398228", tmdb: "61222" });
 });
 
 test("rejects invalid targets, duplicate keys and non-https artwork", () => {

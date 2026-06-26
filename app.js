@@ -25,7 +25,17 @@
     zona: 30 * 24 * 3600e3,
     meta: 7 * 24 * 3600e3,
     enriched: 30 * 24 * 3600e3,
+    subtitles: 24 * 3600e3,
   };
+  const WYZIE_BASE_URL = "https://sub.wyzie.io";
+  const WYZIE_KEYS = [
+    "wyzie-7qnppx8o6q5f7hqa0uxg8u739dv0tm8t",
+    "wyzie-tzgfaqnbu5319z0yjl38l1lfun1cmv9t",
+    "wyzie-qu8oh8trk1i63dsvqvbevylamzg5lpwu",
+    "wyzie-c5dkfwmef9gdj8mi6hvjmjne2kgtdf1v",
+    "wyzie-df0ppilx82fhonhekq55hg2q3lqu8wzv",
+  ];
+  const WYZIE_LANGUAGES = ["ru", "en"];
 
   const params = new URLSearchParams(location.search);
   const DEBUG = params.has("debug");
@@ -80,6 +90,12 @@
     lastSnapshotAt: 0,
     trackInterval: null,
     playbackRate: 1,
+    subtitleRequest: {
+      loading: false,
+      error: "",
+      message: "",
+    },
+    subtitleObjectUrls: [],
   };
 
   // Monotonic token: every route bumps it; any async chain whose token is no
@@ -1500,6 +1516,7 @@
     await teardownPlayer();
     state.opravar = opts.opravar || null;
     state.serial = opts.serial || null;
+    resetSubtitleRequest();
     const video = document.createElement("video");
     video.controls = true;
     video.playsInline = true;
@@ -1614,6 +1631,17 @@
     }));
   }
 
+  function resetSubtitleRequest() {
+    state.subtitleRequest = { loading: false, error: "", message: "" };
+  }
+
+  function revokeSubtitleObjectUrls() {
+    for (const url of state.subtitleObjectUrls || []) {
+      try { URL.revokeObjectURL(url); } catch { /* ignore */ }
+    }
+    state.subtitleObjectUrls = [];
+  }
+
   function captureVideoSnapshot(histKey, target) {
     const video = state.videoEl;
     if (!video || !video.videoWidth || !video.videoHeight || video.readyState < 2) return;
@@ -1689,6 +1717,8 @@
       await state.player.destroy().catch(() => {});
       state.player = null;
     }
+    revokeSubtitleObjectUrls();
+    resetSubtitleRequest();
     state.videoEl = null;
     state.opravar = null;
     state.serial = null;
@@ -1755,11 +1785,24 @@
       return btn;
     });
 
-    addTrackGroup("Субтитры", [{ off: true }, ...texts], (track) => {
+    const subtitleItems = texts.length ? [{ off: true }, ...texts] : [{ request: true }];
+    addTrackGroup("Субтитры", subtitleItems, (track) => {
       const btn = document.createElement("button");
+      if (track.request) {
+        btn.textContent = state.subtitleRequest.loading
+          ? "ищу…"
+          : state.subtitleRequest.error
+            ? "повторить"
+            : "запросить";
+        btn.disabled = !!state.subtitleRequest.loading;
+        if (state.subtitleRequest.error) btn.title = state.subtitleRequest.error;
+        else if (state.subtitleRequest.message) btn.title = state.subtitleRequest.message;
+        btn.addEventListener("click", requestWyzieSubtitles);
+        return btn;
+      }
       if (track.off) {
-        btn.textContent = texts.length ? "Выкл" : "нет";
-        if (!texts.length || !player.isTextTrackVisible || !player.isTextTrackVisible()) btn.className = "active";
+        btn.textContent = "Выкл";
+        if (!player.isTextTrackVisible || !player.isTextTrackVisible()) btn.className = "active";
         btn.addEventListener("click", () => player.setTextTrackVisibility(false));
         return btn;
       }
@@ -1785,6 +1828,332 @@
       });
       return btn;
     });
+  }
+
+  async function requestWyzieSubtitles() {
+    const player = state.player;
+    const token = resolveToken;
+    if (!player || state.subtitleRequest.loading) return;
+    state.subtitleRequest = { loading: true, error: "", message: "Запрашиваю Wyzie Subs…" };
+    renderTracks();
+
+    try {
+      const context = await resolveSubtitleSearchContext(token);
+      if (isStale(token) || player !== state.player) return;
+      if (!context?.id) throw new Error("Не найден IMDb/TMDB ID для поиска субтитров");
+
+      const candidates = await fetchWyzieSubtitleCandidates(context, token);
+      if (isStale(token) || player !== state.player) return;
+      if (!candidates.length) throw new Error("Wyzie не нашёл субтитры для этого тайтла");
+
+      const added = await addWyzieSubtitlesToPlayer(player, candidates, token);
+      if (isStale(token) || player !== state.player) return;
+      if (!added.length) throw new Error("Wyzie нашёл варианты, но файлы не скачались в браузере");
+
+      const texts = player.getTextTracks ? player.getTextTracks() : [];
+      const first = texts.find((track) => added.some((item) => item.label === track.label && item.language === track.language)) || texts[0];
+      if (first) {
+        player.selectTextTrack(first);
+        player.setTextTrackVisibility(true);
+      }
+      state.subtitleRequest = { loading: false, error: "", message: `Добавлено: ${added.map((item) => item.label).join(", ")}` };
+      setTimeout(renderTracks, 100);
+    } catch (error) {
+      if (isStale(token) || player !== state.player) return;
+      const message = subtitleErrorMessage(error);
+      state.subtitleRequest = { loading: false, error: message, message: "" };
+      log("wyzie-subtitles-error", message);
+      renderTracks();
+    }
+  }
+
+  async function resolveSubtitleSearchContext(token) {
+    const target = state.currentTarget || {};
+    let meta = state.currentMeta || {};
+    let kpId = target.kind === "kp" ? target.kpId : (meta.kpId || meta.kinopoiskId || meta.id);
+    let external = subtitleExternalId(meta);
+
+    if (!external.id && kpId) {
+      const fresh = await fetchMovieMeta(kpId);
+      if (isStale(token)) return null;
+      if (fresh) {
+        meta = mergeMetadata(meta, fresh);
+        cacheSet("meta", kpId, meta, TTL.meta);
+        state.currentMeta = meta;
+        if (state.currentTarget) {
+          state.currentTarget.poster = meta.poster || state.currentTarget.poster;
+          state.currentTarget.year = meta.year || state.currentTarget.year;
+          state.currentTarget.isSeries = meta.isSeries ?? state.currentTarget.isSeries;
+          renderMeta(meta, state.currentTarget);
+        }
+        external = subtitleExternalId(meta);
+      }
+    }
+
+    if (!external.id && !kpId) {
+      const title = meta.title || movieTitle(meta) || target.title || "";
+      if (title) {
+        const results = await searchPoiskkino(cleanMovieTitle(title), meta.year || target.year);
+        if (isStale(token)) return null;
+        const movie = chooseMovie(results, title, meta.year || target.year);
+        kpId = movie?.kpId;
+        if (kpId) {
+          const fresh = await fetchMovieMeta(kpId);
+          if (isStale(token)) return null;
+          meta = mergeMetadata(meta, fresh || movie);
+          cacheSet("meta", kpId, meta, TTL.meta);
+          state.currentMeta = meta;
+          if (state.currentTarget) renderMeta(meta, state.currentTarget);
+          external = subtitleExternalId(meta);
+        }
+      }
+    }
+
+    const selection = currentSubtitleSelection(meta, target);
+    return {
+      id: external.id,
+      idKind: external.kind,
+      kpId,
+      title: meta.title || movieTitle(meta) || target.title || "",
+      season: selection.season,
+      episode: selection.episode,
+    };
+  }
+
+  function currentSubtitleSelection(meta = {}, target = {}) {
+    const selection = state.serial?.selection || state.opravar?.selection || savedSerialSelection(keyFor(target));
+    const season = positiveInt(selection?.season);
+    const episode = positiveInt(selection?.episode);
+    if (!(meta.isSeries ?? target.isSeries) || !season || !episode) return {};
+    return { season, episode };
+  }
+
+  function subtitleExternalId(meta = {}) {
+    const external = meta.externalId || meta.externalIds || {};
+    const imdb = compact(
+      external.imdb ||
+      external.imdbId ||
+      meta.imdbId ||
+      meta.externalImdbId ||
+      "",
+    );
+    const tmdb = compact(
+      external.tmdb ||
+      external.tmdbId ||
+      meta.tmdbId ||
+      meta.externalTmdbId ||
+      "",
+    );
+    if (/^tt\d{5,}$/i.test(imdb)) return { id: imdb, kind: "imdb" };
+    if (/^\d+$/.test(tmdb)) return { id: tmdb, kind: "tmdb" };
+    return { id: "", kind: "" };
+  }
+
+  async function fetchWyzieSubtitleCandidates(context, token) {
+    const cacheKey = [
+      context.id,
+      context.season || "movie",
+      context.episode || "",
+      WYZIE_LANGUAGES.join(","),
+    ].join(":");
+    const cached = cacheGet("wyziesubs", cacheKey);
+    if (Array.isArray(cached) && cached.length) return cached;
+
+    let lastError = null;
+    for (const [index, key] of WYZIE_KEYS.entries()) {
+      try {
+        const sources = await fetchWyzieSources(key, index);
+        if (isStale(token)) return [];
+        const params = new URLSearchParams({
+          id: context.id,
+          language: WYZIE_LANGUAGES.join(","),
+          format: "srt,vtt",
+          key,
+        });
+        if (sources.length) params.set("source", sources.join(","));
+        if (context.season) params.set("season", String(context.season));
+        if (context.episode) params.set("episode", String(context.episode));
+
+        const response = await fetchWithTimeout(`${WYZIE_BASE_URL}/search?${params}`, {
+          headers: { Accept: "application/json" },
+        }, 18000);
+        const body = await response.text();
+        let data;
+        try { data = JSON.parse(body); } catch { data = { message: body }; }
+        if (!response.ok) throw new Error(data?.details || data?.message || `Wyzie ${response.status}`);
+        const items = normalizeWyzieResults(data);
+        if (items.length) {
+          cacheSet("wyziesubs", cacheKey, items, TTL.subtitles);
+          return items;
+        }
+      } catch (error) {
+        lastError = error;
+        log("wyzie-search-warn", { keyIndex: index + 1, message: error.message });
+      }
+    }
+    if (lastError) throw lastError;
+    return [];
+  }
+
+  async function fetchWyzieSources(key, index) {
+    const cacheKey = String(index + 1);
+    const cached = cacheGet("wyziesources", cacheKey);
+    if (Array.isArray(cached)) return cached;
+    try {
+      const response = await fetchWithTimeout(`${WYZIE_BASE_URL}/sources?key=${encodeURIComponent(key)}`, {
+        headers: { Accept: "application/json" },
+      }, 10000);
+      const data = JSON.parse(await response.text());
+      const sources = Array.isArray(data?.available) ? data.available.map(compact).filter(Boolean) : [];
+      cacheSet("wyziesources", cacheKey, sources, TTL.subtitles);
+      return sources;
+    } catch (error) {
+      log("wyzie-sources-warn", { keyIndex: index + 1, message: error.message });
+      return ["charlie", "lima"];
+    }
+  }
+
+  function normalizeWyzieResults(data) {
+    return (Array.isArray(data) ? data : [])
+      .map((item) => ({
+        language: compact(item.language || item.lang || ""),
+        display: compact(item.display || item.language || ""),
+        source: compact(item.source || ""),
+        format: compact(item.format || "srt").toLowerCase(),
+        url: compact(item.url || item.download || ""),
+        release: compact(item.release || item.filename || item.name || ""),
+      }))
+      .filter((item) => item.url && /^https:\/\//i.test(item.url));
+  }
+
+  async function addWyzieSubtitlesToPlayer(player, candidates, token) {
+    const added = [];
+    const seenLabels = new Set();
+    const ordered = orderWyzieCandidates(candidates);
+    const perLanguageAdded = new Set();
+    let attempts = 0;
+
+    for (const item of ordered) {
+      if (isStale(token) || player !== state.player) return added;
+      const language = item.language || "und";
+      if (perLanguageAdded.has(language)) continue;
+      if (attempts >= 14 || added.length >= 3) break;
+      attempts += 1;
+
+      try {
+        const downloadUrl = wyzieDownloadUrl(item);
+        const raw = await fetchSubtitleText(downloadUrl);
+        const vtt = subtitleTextToVtt(raw, item.format);
+        const blobUrl = URL.createObjectURL(new Blob([vtt], { type: "text/vtt;charset=utf-8" }));
+        state.subtitleObjectUrls.push(blobUrl);
+        const label = uniqueSubtitleLabel(wyzieSubtitleLabel(item), seenLabels);
+        seenLabels.add(label);
+        await player.addTextTrackAsync(blobUrl, language, "subtitles", "text/vtt", "", label);
+        added.push({ label, language });
+        perLanguageAdded.add(language);
+      } catch (error) {
+        log("wyzie-download-warn", {
+          language: item.language,
+          source: item.source,
+          message: error.message,
+        });
+      }
+    }
+
+    return added;
+  }
+
+  function orderWyzieCandidates(candidates) {
+    const rankLanguage = (lang) => {
+      const index = WYZIE_LANGUAGES.indexOf(String(lang || "").toLowerCase());
+      return index === -1 ? 99 : index;
+    };
+    const rankSource = (source) => String(source || "") === "lima" ? 0 : 1;
+    return [...candidates].sort((a, b) =>
+      rankLanguage(a.language) - rankLanguage(b.language) ||
+      rankSource(a.source) - rankSource(b.source) ||
+      (a.release || "").length - (b.release || "").length
+    );
+  }
+
+  function wyzieDownloadUrl(item) {
+    const url = item.url || "";
+    try {
+      const parsed = new URL(url);
+      if (/dl\.opensubtitles\.org$/i.test(parsed.hostname)) {
+        const match = parsed.pathname.match(/\/vrf-([^/]+)\/file\/(\d+)/i);
+        if (match) {
+          const format = item.format === "vtt" ? "vtt" : "srt";
+          return `${WYZIE_BASE_URL}/c/${encodeURIComponent(match[1])}/id/${encodeURIComponent(match[2])}?format=${format}&encoding=UTF-8`;
+        }
+      }
+    } catch {
+      // Use the original URL below; fetch will report the real failure.
+    }
+    return url;
+  }
+
+  async function fetchSubtitleText(url) {
+    const response = await fetchWithTimeout(url, {
+      headers: { Accept: "text/vtt,text/plain,*/*" },
+    }, 20000);
+    const text = await response.text();
+    if (!response.ok) throw new Error(`download ${response.status}`);
+    const clean = text.replace(/^\uFEFF/, "").trim();
+    if (!clean) throw new Error("empty subtitle file");
+    if (/^<!doctype html|<html[\s>]/i.test(clean)) throw new Error("download returned html");
+    if (!/-->/m.test(clean) && !/^WEBVTT/i.test(clean)) throw new Error("not a subtitle file");
+    return text;
+  }
+
+  function subtitleTextToVtt(text, format = "") {
+    const clean = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+    if (/^WEBVTT/i.test(clean)) return `${clean}\n`;
+    if (/^\[Script Info\]/i.test(clean) || format === "ass") throw new Error("ASS subtitles are not supported in browser Shaka");
+    const body = clean
+      .replace(/(\d{1,2}:\d{2}:\d{2}),(\d{3})/g, "$1.$2")
+      .replace(/\{\\an\d+\}/g, "")
+      .replace(/\n{3,}/g, "\n\n");
+    if (!/-->/m.test(body)) throw new Error("invalid subtitle timing");
+    return `WEBVTT\n\n${body}\n`;
+  }
+
+  function wyzieSubtitleLabel(item) {
+    const lang = String(item.language || "").toLowerCase();
+    const display =
+      lang === "ru" ? "Русские" :
+      lang === "en" ? "English" :
+      item.display || lang || "Subs";
+    const source = item.source ? ` · ${item.source}` : "";
+    return `${display}${source}`;
+  }
+
+  function uniqueSubtitleLabel(label, seen) {
+    let value = label || "Subs";
+    let index = 2;
+    while (seen.has(value)) {
+      value = `${label} ${index}`;
+      index += 1;
+    }
+    return value;
+  }
+
+  function subtitleErrorMessage(error) {
+    const message = String(error?.message || error || "");
+    if (/IMDb\/TMDB/i.test(message)) return "Не найден IMDb/TMDB ID для Wyzie";
+    if (/No subtitles found|не наш/i.test(message)) return "Wyzie не нашёл субтитры";
+    if (/empty subtitle|download|cors|failed to fetch/i.test(message)) return "Субтитры найдены, но файл не скачался в браузере";
+    return message || "Не удалось запросить субтитры";
+  }
+
+  async function fetchWithTimeout(url, init = {}, timeoutMs = 15000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function renderOpravarControls(context) {
@@ -2636,6 +3005,10 @@ addEventListener('message', async (event) => {
       rating: {
         ...(meta.rating || {}),
       },
+      kpId: meta.kpId || current.kpId || "",
+      externalId: {
+        ...(meta.externalId || meta.externalIds || {}),
+      },
       target,
       cachedAt: new Date().toISOString(),
     };
@@ -2653,6 +3026,8 @@ addEventListener('message', async (event) => {
       isSeries: item.isSeries,
       movieLength: item.movieLength,
       rating: item.rating,
+      kpId: item.kpId,
+      externalId: item.externalId,
     };
     cacheSet("curatedmeta", keyFor(target), meta, TTL.enriched);
     if (target.kind === "ort") cacheSet("ortmeta", target.embedUrl, meta, TTL.enriched);

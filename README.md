@@ -147,7 +147,13 @@ From a Russian IP, search a title or paste a Newdeaf URL.
 - `api.zenithjs.ws` may return `422` outside the working region/origin context.
   The production test must be done from the Russian browser path where Zenith
   was previously confirmed.
-- Zona currently has no usable built-in subtitles in our captures.
+- Zona/Zenith currently has no usable built-in subtitles in our captures. Shaka
+  exposes a client-only `запросить` subtitles action that searches Wyzie Subs by
+  IMDb/TMDB ID, downloads the subtitle text in the browser, converts SRT to VTT,
+  and injects it into Shaka. With the current free Wyzie keys only `charlie` and
+  `lima` sources are available; if Wyzie returns empty/CORS-blocked download
+  files, the button stays retryable and reports the failure without breaking
+  playback.
 - Zenith does not accept `?season=&episode=` navigation. Episode switching must
   use the per-episode sources embedded in its playlist; selecting the first
   media URL in the document can play the wrong episode.

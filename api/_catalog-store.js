@@ -26,6 +26,20 @@ function positiveNumber(value) {
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
+function positiveIntegerText(value) {
+  const textValue = text(value, 40);
+  return /^\d+$/.test(textValue) ? textValue : "";
+}
+
+function normalizeExternalId(value) {
+  const imdb = text(value?.imdb || value?.imdbId, 40);
+  const tmdb = positiveIntegerText(value?.tmdb || value?.tmdbId);
+  const externalId = {};
+  if (/^tt\d{5,}$/i.test(imdb)) externalId.imdb = imdb;
+  if (tmdb) externalId.tmdb = tmdb;
+  return Object.keys(externalId).length ? externalId : null;
+}
+
 function publicHttpsUrl(value) {
   try {
     const url = new URL(String(value || ""));
@@ -72,6 +86,7 @@ function normalizeItem(value) {
   const key = text(value?.key, 300) || JSON.stringify(target);
   const poster = publicHttpsUrl(value?.poster);
   const backdrop = publicHttpsUrl(value?.backdrop);
+  const externalId = normalizeExternalId(value?.externalId || value?.externalIds);
   const item = {
     id: text(value?.id, 80) || crypto.randomUUID(),
     key,
@@ -86,6 +101,7 @@ function normalizeItem(value) {
       kp: positiveNumber(value?.rating?.kp),
       imdb: positiveNumber(value?.rating?.imdb),
     },
+    ...(externalId ? { externalId } : {}),
     target,
     cachedAt: text(value?.cachedAt, 40) || new Date().toISOString(),
   };

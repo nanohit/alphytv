@@ -602,6 +602,10 @@ function normalizeMovie(item) {
     description: item.description ?? null,
     shortDescription: item.shortDescription ?? null,
     poster: item.poster?.url || item.poster?.previewUrl || null,
+    externalId: {
+      imdb: item.externalId?.imdb || item.imdbId || null,
+      tmdb: item.externalId?.tmdb || item.tmdbId || null,
+    },
     rating: {
       kp: item.rating?.kp ?? null,
       imdb: item.rating?.imdb ?? null,
@@ -628,6 +632,10 @@ function normalizeUnofficialFilm(item) {
     description: item.description ?? null,
     shortDescription: item.shortDescription ?? null,
     poster: item.posterUrl || item.posterUrlPreview || null,
+    externalId: {
+      imdb: item.imdbId || null,
+      tmdb: item.tmdbId || null,
+    },
     rating: { kp: numOrNull(item.ratingKinopoisk), imdb: numOrNull(item.ratingImdb) },
     votes: { kp: numOrNull(item.ratingKinopoiskVoteCount), imdb: numOrNull(item.ratingImdbVoteCount) },
   };
@@ -649,6 +657,10 @@ function normalizeUnofficialSearch(item) {
     description: item.description ?? null,
     shortDescription: null,
     poster: item.posterUrl || item.posterUrlPreview || null,
+    externalId: {
+      imdb: item.imdbId || null,
+      tmdb: item.tmdbId || null,
+    },
     rating: { kp: ratingStr(item.rating), imdb: null },
     votes: { kp: numOrNull(item.ratingVoteCount), imdb: null },
   };
