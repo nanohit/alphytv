@@ -87,6 +87,17 @@
     return null;
   }
 
+  // Kinopoisk id, used to build a RU-reachable poster when the stored one points
+  // at newdeaf's static.cdnlbox.club (blocked in RU). zen:/kp: keys carry it.
+  function kpIdOf(value, target) {
+    const explicit = String(value?.kpId || "").trim();
+    if (/^\d+$/.test(explicit)) return explicit;
+    const fromKey = String(value?.key || "").match(/^(?:zen|kp):(\d+)$/);
+    if (fromKey) return fromKey[1];
+    if (target?.kind === "kp" && /^\d+$/.test(String(target.kpId || ""))) return String(target.kpId);
+    return "";
+  }
+
   function normalizeItem(value) {
     const target = normalizeTarget(value?.target);
     const title = String(value?.title || "").trim();
@@ -97,6 +108,7 @@
     return {
       id: String(value?.id || uid()),
       key: String(value?.key || JSON.stringify(target)),
+      kpId: kpIdOf(value, target),
       title,
       year: String(value?.year || ""),
       poster: String(value?.poster || ""),
@@ -369,6 +381,70 @@
     return item.isSeries ? "СЕРИАЛ" : "—";
   }
 
+  // --- Poster RU-reachability -------------------------------------------
+  // Posters scraped from newdeaf live on static.cdnlbox.club, which RU ISPs
+  // block, so those items show no cover in Russia while Kinopoisk-sourced ones
+  // (avatars.mds.yandex.net) always load. Swap blocked posters for the
+  // deterministic, RU-reachable Kinopoisk poster keyed by the title's Kinopoisk
+  // id — known up front for zen:/kp: items, recovered once (and cached) for the
+  // rest only on devices where the original actually fails to load.
+
+  function hostOf(url) {
+    try { return new URL(url).hostname.toLowerCase(); } catch { return ""; }
+  }
+  function isCdnlboxPoster(url) {
+    return /(^|\.)cdnlbox\.club$/.test(hostOf(url));
+  }
+  function isKinopoiskPoster(url) {
+    const h = hostOf(url);
+    return /(^|\.)kp\.yandex\.net$/.test(h) || /(^|\.)mds\.yandex\.net$/.test(h);
+  }
+  function kinopoiskPoster(kpId) {
+    return `https://st.kp.yandex.net/images/film_iphone/iphone360_${kpId}.jpg`;
+  }
+  function posterKpCacheGet(id) {
+    try { return localStorage.getItem(`alphy.posterkp.${id}`) || ""; } catch { return ""; }
+  }
+  function posterKpCacheSet(id, kpId) {
+    try { localStorage.setItem(`alphy.posterkp.${id}`, String(kpId)); } catch { /* ignore */ }
+  }
+
+  function posterFor(item) {
+    const stored = item.poster || item.backdrop || "";
+    if (!stored || isCdnlboxPoster(stored)) {
+      const kpId = item.kpId || posterKpCacheGet(item.id);
+      if (kpId) return kinopoiskPoster(kpId);
+    }
+    return stored;
+  }
+
+  // The poster failed to load — on RU devices that is the blocked cdnlbox CDN.
+  // Recover a Kinopoisk id (cached per item) and retry with a Kinopoisk poster;
+  // fall back to the empty placeholder only when nothing is recoverable.
+  async function handlePosterError(image, item) {
+    if (image.dataset.posterStage === "done") return;
+    if (image.dataset.posterStage === "kinopoisk") {
+      image.removeAttribute("src");
+      image.classList.add("poster-empty");
+      image.dataset.posterStage = "done";
+      return;
+    }
+    let kpId = item.kpId || posterKpCacheGet(item.id);
+    if (!kpId && item.title) {
+      kpId = (await window.alphyBridge?.resolveKpIdByTitle?.(item.title, item.year)) || "";
+      if (kpId) { posterKpCacheSet(item.id, kpId); item.kpId = kpId; }
+    }
+    if (kpId) {
+      image.dataset.posterStage = "kinopoisk";
+      image.classList.remove("poster-empty");
+      image.src = kinopoiskPoster(kpId);
+      return;
+    }
+    image.removeAttribute("src");
+    image.classList.add("poster-empty");
+    image.dataset.posterStage = "done";
+  }
+
   function makePublicCard(item) {
     const card = document.createElement("article");
     card.className = "card curated-card";
@@ -381,12 +457,11 @@
     const image = document.createElement("img");
     image.className = "poster";
     image.loading = "lazy";
-    image.src = item.poster || item.backdrop || "";
+    const initialPoster = posterFor(item);
+    image.src = initialPoster;
+    image.dataset.posterStage = isKinopoiskPoster(initialPoster) ? "kinopoisk" : "primary";
     image.alt = "";
-    image.addEventListener("error", () => {
-      image.removeAttribute("src");
-      image.classList.add("poster-empty");
-    });
+    image.addEventListener("error", () => handlePosterError(image, item));
     media.appendChild(image);
     const overlay = document.createElement("div");
     overlay.className = "card-hover-meta";

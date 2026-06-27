@@ -3402,11 +3402,25 @@ addEventListener('message', async (event) => {
     route();
   }
 
+  // Recover a Kinopoisk id from a title so the catalog can build a RU-reachable
+  // Kinopoisk poster when an item's stored poster host is blocked in RU. Reuses
+  // searchPoiskkino's localStorage cache, so a given title resolves at most once.
+  async function resolveKpIdByTitle(title, year) {
+    try {
+      const results = await searchPoiskkino(cleanMovieTitle(title), year);
+      const movie = chooseMovie(results, title, year);
+      return movie?.kpId ? String(movie.kpId) : "";
+    } catch {
+      return "";
+    }
+  }
+
   window.alphyBridge = {
     getCurrentCuratedItem: currentCuratedItem,
     openCuratedItem,
     addCardBookmark,
     layoutMobileGrid,
+    resolveKpIdByTitle,
   };
 
   boot();
