@@ -87,17 +87,6 @@
     return null;
   }
 
-  // Kinopoisk id, used to build a RU-reachable poster when the stored one points
-  // at newdeaf's static.cdnlbox.club (blocked in RU). zen:/kp: keys carry it.
-  function kpIdOf(value, target) {
-    const explicit = String(value?.kpId || "").trim();
-    if (/^\d+$/.test(explicit)) return explicit;
-    const fromKey = String(value?.key || "").match(/^(?:zen|kp):(\d+)$/);
-    if (fromKey) return fromKey[1];
-    if (target?.kind === "kp" && /^\d+$/.test(String(target.kpId || ""))) return String(target.kpId);
-    return "";
-  }
-
   function normalizeItem(value) {
     const target = normalizeTarget(value?.target);
     const title = String(value?.title || "").trim();
@@ -108,7 +97,6 @@
     return {
       id: String(value?.id || uid()),
       key: String(value?.key || JSON.stringify(target)),
-      kpId: kpIdOf(value, target),
       title,
       year: String(value?.year || ""),
       poster: String(value?.poster || ""),
@@ -384,60 +372,40 @@
   // --- Poster RU-reachability -------------------------------------------
   // Posters scraped from newdeaf live on static.cdnlbox.club, which RU ISPs
   // block, so those items show no cover in Russia while Kinopoisk-sourced ones
-  // (avatars.mds.yandex.net) always load. Swap blocked posters for the
-  // deterministic, RU-reachable Kinopoisk poster keyed by the title's Kinopoisk
-  // id — known up front for zen:/kp: items, recovered once (and cached) for the
-  // rest only on devices where the original actually fails to load.
+  // (avatars.mds.yandex.net) always load. When such a poster fails to load we
+  // resolve the CORRECT Kinopoisk poster by title+year through the resolver and
+  // cache the resulting URL. The item key's number is a zona id, NOT a Kinopoisk
+  // id, so it must never be used to build a poster.
 
-  function hostOf(url) {
-    try { return new URL(url).hostname.toLowerCase(); } catch { return ""; }
+  function posterUrlCacheGet(id) {
+    try { return localStorage.getItem(`alphy.posterurl.${id}`) || ""; } catch { return ""; }
   }
-  function isCdnlboxPoster(url) {
-    return /(^|\.)cdnlbox\.club$/.test(hostOf(url));
-  }
-  function isKinopoiskPoster(url) {
-    const h = hostOf(url);
-    return /(^|\.)kp\.yandex\.net$/.test(h) || /(^|\.)mds\.yandex\.net$/.test(h);
-  }
-  function kinopoiskPoster(kpId) {
-    return `https://st.kp.yandex.net/images/film_iphone/iphone360_${kpId}.jpg`;
-  }
-  function posterKpCacheGet(id) {
-    try { return localStorage.getItem(`alphy.posterkp.${id}`) || ""; } catch { return ""; }
-  }
-  function posterKpCacheSet(id, kpId) {
-    try { localStorage.setItem(`alphy.posterkp.${id}`, String(kpId)); } catch { /* ignore */ }
-  }
-
-  function posterFor(item) {
-    const stored = item.poster || item.backdrop || "";
-    if (!stored || isCdnlboxPoster(stored)) {
-      const kpId = item.kpId || posterKpCacheGet(item.id);
-      if (kpId) return kinopoiskPoster(kpId);
-    }
-    return stored;
+  function posterUrlCacheSet(id, url) {
+    try { localStorage.setItem(`alphy.posterurl.${id}`, String(url)); } catch { /* ignore */ }
   }
 
   // The poster failed to load — on RU devices that is the blocked cdnlbox CDN.
-  // Recover a Kinopoisk id (cached per item) and retry with a Kinopoisk poster;
-  // fall back to the empty placeholder only when nothing is recoverable.
+  // Resolve the correct poster by title (cached), and only fall back to the empty
+  // placeholder when nothing is recoverable. Guarded so it resolves at most once.
   async function handlePosterError(image, item) {
-    if (image.dataset.posterStage === "done") return;
-    if (image.dataset.posterStage === "kinopoisk") {
+    const stage = image.dataset.posterStage;
+    if (stage !== "primary") {
+      // A resolved/placeholder poster also failed, or a resolve is in flight.
       image.removeAttribute("src");
       image.classList.add("poster-empty");
       image.dataset.posterStage = "done";
       return;
     }
-    let kpId = item.kpId || posterKpCacheGet(item.id);
-    if (!kpId && item.title) {
-      kpId = (await window.alphyBridge?.resolveKpIdByTitle?.(item.title, item.year)) || "";
-      if (kpId) { posterKpCacheSet(item.id, kpId); item.kpId = kpId; }
+    image.dataset.posterStage = "resolving";
+    let poster = posterUrlCacheGet(item.id);
+    if (!poster && item.title) {
+      poster = (await window.alphyBridge?.resolvePosterByTitle?.(item.title, item.year)) || "";
+      if (poster) posterUrlCacheSet(item.id, poster);
     }
-    if (kpId) {
-      image.dataset.posterStage = "kinopoisk";
+    if (poster) {
+      image.dataset.posterStage = "resolved";
       image.classList.remove("poster-empty");
-      image.src = kinopoiskPoster(kpId);
+      image.src = poster;
       return;
     }
     image.removeAttribute("src");
@@ -457,9 +425,11 @@
     const image = document.createElement("img");
     image.className = "poster";
     image.loading = "lazy";
-    const initialPoster = posterFor(item);
-    image.src = initialPoster;
-    image.dataset.posterStage = isKinopoiskPoster(initialPoster) ? "kinopoisk" : "primary";
+    const cachedPoster = posterUrlCacheGet(item.id);
+    image.src = cachedPoster || item.poster || item.backdrop || "";
+    // "resolved" => a known RU-reachable poster; "primary" => may be the blocked
+    // cdnlbox original, so an onerror triggers a one-time title resolve.
+    image.dataset.posterStage = cachedPoster ? "resolved" : "primary";
     image.alt = "";
     image.addEventListener("error", () => handlePosterError(image, item));
     media.appendChild(image);

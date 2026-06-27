@@ -3402,14 +3402,15 @@ addEventListener('message', async (event) => {
     route();
   }
 
-  // Recover a Kinopoisk id from a title so the catalog can build a RU-reachable
-  // Kinopoisk poster when an item's stored poster host is blocked in RU. Reuses
-  // searchPoiskkino's localStorage cache, so a given title resolves at most once.
-  async function resolveKpIdByTitle(title, year) {
+  // Resolve a title to its real Kinopoisk poster URL (avatars.mds.yandex.net),
+  // so the catalog can replace a poster whose host is blocked in RU. Matching is
+  // by title+year (the item key's number is a zona id, not a Kinopoisk id, so it
+  // cannot be used). Reuses searchPoiskkino's localStorage cache.
+  async function resolvePosterByTitle(title, year) {
     try {
       const results = await searchPoiskkino(cleanMovieTitle(title), year);
       const movie = chooseMovie(results, title, year);
-      return movie?.kpId ? String(movie.kpId) : "";
+      return movie?.poster ? String(movie.poster) : "";
     } catch {
       return "";
     }
@@ -3420,7 +3421,7 @@ addEventListener('message', async (event) => {
     openCuratedItem,
     addCardBookmark,
     layoutMobileGrid,
-    resolveKpIdByTitle,
+    resolvePosterByTitle,
   };
 
   boot();
