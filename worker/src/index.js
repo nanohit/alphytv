@@ -37,6 +37,10 @@ export default {
         return await handleOpravarResolve(request, env, url);
       }
 
+      if (url.pathname === "/subs") {
+        return await handleSubtitles(request, env, url);
+      }
+
       return json(request, env, { ok: false, error: "not_found" }, 404);
     } catch (error) {
       return json(request, env, {
@@ -567,6 +571,113 @@ function mediaExpiry(value) {
   } catch {
     return null;
   }
+}
+
+// --- Subtitles via the OpenSubtitles v3 Stremio addon, proxied server-side ---
+//
+// Why this lives on the resolver and not in the browser: the addon manifest
+// (opensubtitles-v3.strem.io) and the actual .srt files (subs5.strem.io) are
+// both Cloudflare-fronted, which the RU last mile throttles, and every other
+// public subtitle host (opensubtitles/subsource/subdl/podnapisi) is the same.
+// Deno's EU egress reaches Cloudflare fine, so the resolver fetches the manifest
+// and the chosen file server-side and returns the raw subtitle text with CORS.
+// The RU browser only ever talks to this (RU-reachable) endpoint. subs5 serves
+// re-encoded UTF-8 SRT with a 1-year CDN cache and an effectively unlimited
+// quota, so repeat fetches are cheap CDN hits, not live OpenSubtitles downloads.
+const OPENSUBS_V3_BASE = "https://opensubtitles-v3.strem.io";
+// OpenSubtitles uses ISO 639-2/B 3-letter codes; map the ones we surface.
+const SUBS_LANG3_TO_2 = { rus: "ru", eng: "en", ukr: "uk" };
+const SUBS_LABELS = { ru: "Русские", en: "English", uk: "Українські" };
+
+async function handleSubtitles(request, env, url) {
+  const imdb = (url.searchParams.get("imdb") || url.searchParams.get("id") || "").trim();
+  if (!/^tt\d{5,}$/i.test(imdb)) {
+    return json(request, env, { ok: false, error: "missing_or_invalid_imdb" }, 400);
+  }
+  const type = url.searchParams.get("type") === "series" ? "series" : "movie";
+  const season = (url.searchParams.get("season") || "").trim();
+  const episode = (url.searchParams.get("episode") || "").trim();
+  const wanted = (url.searchParams.get("lang") || "ru,en")
+    .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const perLang = clampInt(url.searchParams.get("perLang"), 1, 3, 1);
+
+  let resource;
+  if (type === "series") {
+    if (!/^\d+$/.test(season) || !/^\d+$/.test(episode)) {
+      return json(request, env, { ok: false, error: "series_requires_season_episode" }, 400);
+    }
+    resource = `series/${imdb}:${season}:${episode}`;
+  } else {
+    resource = `movie/${imdb}`;
+  }
+
+  const manifest = await fetchJsonWithTimeout(`${OPENSUBS_V3_BASE}/subtitles/${resource}.json`, 12000);
+  const entries = Array.isArray(manifest?.subtitles) ? manifest.subtitles : [];
+
+  // Take up to perLang entries per requested language, preserving the addon's
+  // own relevance order. (The manifest is large — 70-100 entries — so this also
+  // bounds how many files we actually download.)
+  const picks = [];
+  const perLangCount = new Map();
+  for (const entry of entries) {
+    const lang2 = SUBS_LANG3_TO_2[String(entry?.lang || "").toLowerCase()] || String(entry?.lang || "").toLowerCase();
+    if (!wanted.includes(lang2)) continue;
+    if (!/^https:\/\//i.test(entry?.url || "")) continue;
+    const count = perLangCount.get(lang2) || 0;
+    if (count >= perLang) continue;
+    perLangCount.set(lang2, count + 1);
+    picks.push({ lang2, url: entry.url, suffix: count });
+  }
+
+  // Fetch the chosen files server-side (CORS is irrelevant here), in parallel.
+  const results = (await Promise.all(picks.map(async (pick) => {
+    try {
+      const res = await fetchWithTimeout(pick.url, { headers: { "Accept": "text/plain,*/*" } }, 15000);
+      if (!res.ok) return null;
+      const content = await res.text();
+      const clean = content.replace(/^﻿/, "").trim();
+      // Guard against the upstream returning an HTML error/anti-bot page.
+      if (!clean || /^<!doctype html|^<html[\s>]/i.test(clean)) return null;
+      if (!/-->/m.test(clean) && !/^WEBVTT/i.test(clean)) return null;
+      const label = SUBS_LABELS[pick.lang2] || pick.lang2.toUpperCase();
+      return {
+        language: pick.lang2,
+        label: pick.suffix ? `${label} ${pick.suffix + 1}` : label,
+        format: /^WEBVTT/i.test(clean) ? "vtt" : "srt",
+        content,
+      };
+    } catch {
+      return null;
+    }
+  }))).filter(Boolean);
+
+  return new Response(JSON.stringify({ ok: true, imdb, type, total: entries.length, results }), {
+    status: 200,
+    headers: {
+      ...corsHeaders(request, env),
+      "content-type": "application/json; charset=utf-8",
+      // Safe to cache: a given (title, episode) maps to the same subtitle set, and
+      // subs5 itself caches the files for a year. Keeps repeat loads off the resolver.
+      "cache-control": "public, max-age=86400",
+    },
+  });
+}
+
+async function fetchWithTimeout(targetUrl, init = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(targetUrl, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchJsonWithTimeout(targetUrl, timeoutMs) {
+  const res = await fetchWithTimeout(targetUrl, { headers: { "Accept": "application/json" } }, timeoutMs);
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Subtitles manifest ${res.status}: ${text.slice(0, 150)}`);
+  return JSON.parse(text);
 }
 
 async function poiskkinoFetch(env, apiUrl) {

@@ -1808,7 +1808,7 @@
         btn.disabled = !!state.subtitleRequest.loading;
         if (state.subtitleRequest.error) btn.title = state.subtitleRequest.error;
         else if (state.subtitleRequest.message) btn.title = state.subtitleRequest.message;
-        btn.addEventListener("click", requestWyzieSubtitles);
+        btn.addEventListener("click", requestSubtitles);
         return btn;
       }
       if (track.off) {
@@ -1841,11 +1841,11 @@
     });
   }
 
-  async function requestWyzieSubtitles() {
+  async function requestSubtitles() {
     const player = state.player;
     const token = resolveToken;
     if (!player || state.subtitleRequest.loading) return;
-    state.subtitleRequest = { loading: true, error: "", message: "Запрашиваю Wyzie Subs…" };
+    state.subtitleRequest = { loading: true, error: "", message: "Запрашиваю субтитры…" };
     renderTracks();
 
     try {
@@ -1853,14 +1853,32 @@
       if (isStale(token) || player !== state.player) return;
       if (!context?.id) throw new Error("Не найден IMDb/TMDB ID для поиска субтитров");
 
-      const forceRefresh = !!state.subtitleRequest.error;
-      const candidates = await fetchWyzieSubtitleCandidates(context, token, { forceRefresh });
-      if (isStale(token) || player !== state.player) return;
-      if (!candidates.length) throw new Error("Wyzie не нашёл субтитры для этого тайтла");
+      let added = [];
+      // Primary: OpenSubtitles v3, proxied through the resolver. Needs an IMDb id
+      // and is RU-reachable — the Cloudflare-fronted subtitle hosts are not, but
+      // the Deno resolver fetches them server-side and returns CORS-open text.
+      if (context.idKind === "imdb" && state.resolverBaseUrl) {
+        try {
+          added = await addOpenSubtitlesToPlayer(player, context, token);
+        } catch (error) {
+          if (isStale(token) || player !== state.player) return;
+          log("opensubs-warn", error.message);
+        }
+      }
 
-      const added = await addWyzieSubtitlesToPlayer(player, candidates, token, { forceRefresh });
+      // Fallback: Wyzie (also accepts a TMDB id), only if the primary added nothing.
+      if (!added.length) {
+        if (isStale(token) || player !== state.player) return;
+        const forceRefresh = !!state.subtitleRequest.error;
+        const candidates = await fetchWyzieSubtitleCandidates(context, token, { forceRefresh });
+        if (isStale(token) || player !== state.player) return;
+        if (candidates.length) {
+          added = await addWyzieSubtitlesToPlayer(player, candidates, token, { forceRefresh });
+        }
+      }
+
       if (isStale(token) || player !== state.player) return;
-      if (!added.length) throw new Error("Wyzie нашёл варианты, но файлы не скачались в браузере");
+      if (!added.length) throw new Error("Субтитры не нашлись или не скачались в браузере");
 
       const texts = player.getTextTracks ? player.getTextTracks() : [];
       const first = texts.find((track) => added.some((item) => item.label === track.label && item.language === track.language)) || texts[0];
@@ -1874,9 +1892,40 @@
       if (isStale(token) || player !== state.player) return;
       const message = subtitleErrorMessage(error);
       state.subtitleRequest = { loading: false, error: message, message: "" };
-      log("wyzie-subtitles-error", message);
+      log("subtitles-error", message);
       renderTracks();
     }
+  }
+
+  // OpenSubtitles v3 via the resolver /subs proxy: it returns ready subtitle text
+  // (CORS-open), which we convert to VTT and hand to Shaka as a blob track.
+  async function addOpenSubtitlesToPlayer(player, context, token) {
+    const type = context.season && context.episode ? "series" : "movie";
+    const params = new URLSearchParams({ imdb: context.id, type, lang: WYZIE_LANGUAGES.join(",") });
+    if (type === "series") {
+      params.set("season", String(context.season));
+      params.set("episode", String(context.episode));
+    }
+    const data = await resolverJson(`/subs?${params}`);
+    if (isStale(token) || player !== state.player) return [];
+    const results = Array.isArray(data?.results) ? data.results : [];
+    const added = [];
+    const seenLabels = new Set();
+    for (const item of results) {
+      if (isStale(token) || player !== state.player) break;
+      try {
+        const vtt = subtitleTextToVtt(item.content, item.format);
+        const blobUrl = URL.createObjectURL(new Blob([vtt], { type: "text/vtt;charset=utf-8" }));
+        state.subtitleObjectUrls.push(blobUrl);
+        const label = uniqueSubtitleLabel(item.label || item.language || "Subs", seenLabels);
+        seenLabels.add(label);
+        await player.addTextTrackAsync(blobUrl, item.language || "und", "subtitles", "text/vtt", "", label);
+        added.push({ label, language: item.language || "und" });
+      } catch (error) {
+        log("opensubs-track-warn", { language: item.language, message: error.message });
+      }
+    }
+    return added;
   }
 
   async function resolveSubtitleSearchContext(token) {
