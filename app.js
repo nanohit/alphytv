@@ -96,6 +96,15 @@
       message: "",
     },
     subtitleObjectUrls: [],
+    // Subtitle sync: the raw subtitles we fetched (so the offset control can
+    // re-render them shifted), the current global offset, the open state of the
+    // ⚙ control, and the Shaka text-track ids superseded by a shifted copy
+    // (4.11 has no removeTextTrack, so we hide stale tracks from the menu).
+    loadedSubs: [],
+    subtitleOffset: 0,
+    subtitleOffsetOpen: false,
+    subtitleOffsetBusy: false,
+    staleTextTrackIds: [],
   };
 
   // Monotonic token: every route bumps it; any async chain whose token is no
@@ -1640,6 +1649,11 @@
       try { URL.revokeObjectURL(url); } catch { /* ignore */ }
     }
     state.subtitleObjectUrls = [];
+    state.loadedSubs = [];
+    state.subtitleOffset = 0;
+    state.subtitleOffsetOpen = false;
+    state.subtitleOffsetBusy = false;
+    state.staleTextTrackIds = [];
   }
 
   function captureVideoSnapshot(histKey, target) {
@@ -1747,7 +1761,9 @@
     el.trackPanel.replaceChildren();
     el.trackPanel.classList.remove("hidden");
     const variants = player.getVariantTracks ? player.getVariantTracks() : [];
-    const texts = player.getTextTracks ? player.getTextTracks() : [];
+    // Hide text tracks superseded by a shifted copy (Shaka 4.11 can't remove them).
+    const texts = (player.getTextTracks ? player.getTextTracks() : [])
+      .filter((track) => !state.staleTextTrackIds.includes(track.id));
 
     if (state.opravar) {
       renderOpravarControls(state.opravar);
@@ -1785,8 +1801,13 @@
       return btn;
     });
 
+    // Subtitle-sync control: a ⚙ button that reveals two nudge buttons. Only
+    // shown once we have fetched subs whose raw text we can re-shift.
+    const offsetItems = state.loadedSubs.length
+      ? [{ settings: true }, ...(state.subtitleOffsetOpen ? [{ offset: -0.5 }, { offsetLabel: true }, { offset: 0.5 }] : [])]
+      : [];
     const subtitleItems = texts.length
-      ? [{ off: true }, ...texts]
+      ? [{ off: true }, ...texts, ...offsetItems]
       : [
           { request: true },
           ...(state.subtitleRequest.error ? [{ note: state.subtitleRequest.error }] : []),
@@ -1815,6 +1836,30 @@
         btn.textContent = "Выкл";
         if (!player.isTextTrackVisible || !player.isTextTrackVisible()) btn.className = "active";
         btn.addEventListener("click", () => player.setTextTrackVisibility(false));
+        return btn;
+      }
+      if (track.settings) {
+        btn.textContent = "⚙ синхр.";
+        btn.title = "Сдвиг субтитров, если они не совпадают с видео";
+        if (state.subtitleOffsetOpen) btn.className = "active";
+        btn.addEventListener("click", () => {
+          state.subtitleOffsetOpen = !state.subtitleOffsetOpen;
+          renderTracks();
+        });
+        return btn;
+      }
+      if (track.offsetLabel) {
+        const span = document.createElement("span");
+        span.className = "muted subtitle-note";
+        const o = state.subtitleOffset;
+        span.textContent = `${o > 0 ? "+" : ""}${o.toFixed(1)}с`;
+        return span;
+      }
+      if (typeof track.offset === "number") {
+        btn.textContent = track.offset < 0 ? "◀ −0,5с" : "+0,5с ▶";
+        btn.title = track.offset < 0 ? "Субтитры раньше" : "Субтитры позже";
+        btn.disabled = !!state.subtitleOffsetBusy;
+        btn.addEventListener("click", () => applySubtitleOffset(track.offset));
         return btn;
       }
       btn.textContent = track.label || track.language || "subs";
@@ -1897,29 +1942,145 @@
     }
   }
 
+  // --- Subtitle result cache, blob tracks, and offset/sync -----------------
+
+  const subsMemoryCache = new Map();
+  const SUBS_CACHE_NS = "subsv3";
+  const SUBS_CACHE_MAX = 24;
+
+  function subsCacheGet(key) {
+    if (subsMemoryCache.has(key)) return subsMemoryCache.get(key);
+    const stored = cacheGet(SUBS_CACHE_NS, key);
+    if (Array.isArray(stored) && stored.length) {
+      subsMemoryCache.set(key, stored);
+      return stored;
+    }
+    return null;
+  }
+
+  function subsCacheSet(key, results) {
+    subsMemoryCache.set(key, results);
+    try {
+      pruneSubsCache(SUBS_CACHE_MAX - 1);
+      cacheSet(SUBS_CACHE_NS, key, results, TTL.subtitles);
+    } catch { /* localStorage full — the in-memory cache still covers the session */ }
+  }
+
+  // Subtitle content is large (~50-150KB/title), so cap how many titles persist in
+  // localStorage and evict the oldest, so the cache can never grow unbounded.
+  function pruneSubsCache(max) {
+    const prefix = `${CACHE_PREFIX}${SUBS_CACHE_NS}:`;
+    const entries = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(prefix)) continue;
+      let exp = 0;
+      try { exp = JSON.parse(localStorage.getItem(k) || "{}").exp || 0; } catch { /* treat as oldest */ }
+      entries.push({ k, exp });
+    }
+    if (entries.length <= max) return;
+    entries.sort((a, b) => a.exp - b.exp);
+    for (const entry of entries.slice(0, entries.length - max)) {
+      try { localStorage.removeItem(entry.k); } catch { /* ignore */ }
+    }
+  }
+
+  // Add a fetched subtitle to Shaka as a blob VTT track, recording its raw text +
+  // Shaka track id so the offset control can re-render it shifted later.
+  async function addLoadedSubtitle(player, { content, format, language, label }) {
+    const vtt = shiftVtt(subtitleTextToVtt(content, format), state.subtitleOffset);
+    const blobUrl = URL.createObjectURL(new Blob([vtt], { type: "text/vtt;charset=utf-8" }));
+    state.subtitleObjectUrls.push(blobUrl);
+    const track = await player.addTextTrackAsync(blobUrl, language, "subtitles", "text/vtt", "", label);
+    state.loadedSubs.push({ language, label, content, format, trackId: track?.id ?? null });
+    return track;
+  }
+
+  // Re-render every fetched subtitle with the new global offset. Shaka 4.11 has no
+  // removeTextTrack, so the previous generation is hidden from the menu instead.
+  async function applySubtitleOffset(delta) {
+    const player = state.player;
+    if (!player || !state.loadedSubs.length || state.subtitleOffsetBusy) return;
+    state.subtitleOffsetBusy = true;
+    try {
+      state.subtitleOffset = clampOffset(state.subtitleOffset + delta);
+      const activeLang = (player.getTextTracks?.() || []).find((t) => t.active)?.language
+        || state.loadedSubs[0]?.language;
+
+      for (const sub of state.loadedSubs) {
+        if (sub.trackId != null) state.staleTextTrackIds.push(sub.trackId);
+      }
+
+      const regenerated = [];
+      for (const sub of state.loadedSubs) {
+        const vtt = shiftVtt(subtitleTextToVtt(sub.content, sub.format), state.subtitleOffset);
+        const blobUrl = URL.createObjectURL(new Blob([vtt], { type: "text/vtt;charset=utf-8" }));
+        state.subtitleObjectUrls.push(blobUrl);
+        const track = await player.addTextTrackAsync(blobUrl, sub.language, "subtitles", "text/vtt", "", sub.label);
+        regenerated.push({ ...sub, trackId: track?.id ?? null });
+      }
+      state.loadedSubs = regenerated;
+
+      const pick = regenerated.find((s) => s.language === activeLang) || regenerated[0];
+      const newTrack = (player.getTextTracks?.() || []).find((t) => t.id === pick?.trackId);
+      if (newTrack) {
+        player.selectTextTrack(newTrack);
+        player.setTextTrackVisibility(true);
+      }
+    } catch (error) {
+      log("subtitle-offset-warn", error.message);
+    } finally {
+      state.subtitleOffsetBusy = false;
+      renderTracks();
+    }
+  }
+
+  function clampOffset(seconds) {
+    return Math.max(-60, Math.min(60, Math.round(seconds * 10) / 10));
+  }
+
+  // Shift every WEBVTT timestamp (cue start and end) by offsetSeconds, in integer
+  // milliseconds so rounding can never produce an invalid ".1000" fraction.
+  function shiftVtt(vtt, offsetSeconds) {
+    if (!offsetSeconds) return vtt;
+    const deltaMs = Math.round(offsetSeconds * 1000);
+    return String(vtt).replace(/(\d{2,}):([0-5]\d):([0-5]\d)\.(\d{3})/g, (_, h, m, s, ms) => {
+      let total = ((+h) * 3600 + (+m) * 60 + (+s)) * 1000 + (+ms) + deltaMs;
+      if (total < 0) total = 0;
+      const pad = (n, w = 2) => String(n).padStart(w, "0");
+      return `${pad(Math.floor(total / 3600000))}:${pad(Math.floor((total % 3600000) / 60000))}:${pad(Math.floor((total % 60000) / 1000))}.${pad(total % 1000, 3)}`;
+    });
+  }
+
   // OpenSubtitles v3 via the resolver /subs proxy: it returns ready subtitle text
   // (CORS-open), which we convert to VTT and hand to Shaka as a blob track.
   async function addOpenSubtitlesToPlayer(player, context, token) {
     const type = context.season && context.episode ? "series" : "movie";
-    const params = new URLSearchParams({ imdb: context.id, type, lang: WYZIE_LANGUAGES.join(",") });
-    if (type === "series") {
-      params.set("season", String(context.season));
-      params.set("episode", String(context.episode));
+    const cacheKey = `${context.id}:${type}:${type === "series" ? `${context.season}:${context.episode}` : ""}:${WYZIE_LANGUAGES.join(",")}`;
+
+    // Cache the resolver result (memory for the session + a bounded localStorage
+    // copy), so re-opening an already-seen episode never hits the resolver again.
+    let results = subsCacheGet(cacheKey);
+    if (!results) {
+      const params = new URLSearchParams({ imdb: context.id, type, lang: WYZIE_LANGUAGES.join(",") });
+      if (type === "series") {
+        params.set("season", String(context.season));
+        params.set("episode", String(context.episode));
+      }
+      const data = await resolverJson(`/subs?${params}`);
+      if (isStale(token) || player !== state.player) return [];
+      results = Array.isArray(data?.results) ? data.results : [];
+      if (results.length) subsCacheSet(cacheKey, results);
     }
-    const data = await resolverJson(`/subs?${params}`);
-    if (isStale(token) || player !== state.player) return [];
-    const results = Array.isArray(data?.results) ? data.results : [];
+
     const added = [];
     const seenLabels = new Set();
     for (const item of results) {
       if (isStale(token) || player !== state.player) break;
       try {
-        const vtt = subtitleTextToVtt(item.content, item.format);
-        const blobUrl = URL.createObjectURL(new Blob([vtt], { type: "text/vtt;charset=utf-8" }));
-        state.subtitleObjectUrls.push(blobUrl);
         const label = uniqueSubtitleLabel(item.label || item.language || "Subs", seenLabels);
         seenLabels.add(label);
-        await player.addTextTrackAsync(blobUrl, item.language || "und", "subtitles", "text/vtt", "", label);
+        await addLoadedSubtitle(player, { content: item.content, format: item.format, language: item.language || "und", label });
         added.push({ label, language: item.language || "und" });
       } catch (error) {
         log("opensubs-track-warn", { language: item.language, message: error.message });
@@ -2154,12 +2315,9 @@ LIMIT 1`;
       try {
         const downloadUrl = wyzieDownloadUrl(item, { cacheBust: options.forceRefresh });
         const raw = await fetchSubtitleText(downloadUrl);
-        const vtt = subtitleTextToVtt(raw, item.format);
-        const blobUrl = URL.createObjectURL(new Blob([vtt], { type: "text/vtt;charset=utf-8" }));
-        state.subtitleObjectUrls.push(blobUrl);
         const label = uniqueSubtitleLabel(wyzieSubtitleLabel(item), seenLabels);
         seenLabels.add(label);
-        await player.addTextTrackAsync(blobUrl, language, "subtitles", "text/vtt", "", label);
+        await addLoadedSubtitle(player, { content: raw, format: item.format, language, label });
         added.push({ label, language });
         perLanguageAdded.add(language);
       } catch (error) {
