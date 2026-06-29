@@ -383,6 +383,9 @@
   function posterUrlCacheSet(id, url) {
     try { localStorage.setItem(`alphy.posterurl.${id}`, String(url)); } catch { /* ignore */ }
   }
+  function posterUrlCacheClear(id) {
+    try { localStorage.removeItem(`alphy.posterurl.${id}`); } catch { /* ignore */ }
+  }
 
   // The poster failed to load — on RU devices that is the blocked cdnlbox CDN.
   // Resolve the correct poster by title (cached), and only fall back to the empty
@@ -498,6 +501,41 @@
     render();
   }
 
+  // Force update: re-resolve cover + rating for an existing item by title via the
+  // resolver, WITHOUT touching its target (player/links). Useful when an item was
+  // added from newdeaf (cdnlbox cover, blocked in RU) or when search fell back to
+  // the unofficial API (no IMDb). Only an exact-title match is applied.
+  async function forceUpdateItem(listIndex, itemIndex, button) {
+    if (!state.admin) return;
+    const item = state.catalog.lists[listIndex]?.items?.[itemIndex];
+    if (!item?.title) return;
+    if (button) { button.disabled = true; button.textContent = "…"; }
+    setStatus(`обновляю «${item.title}»…`, "saving");
+    try {
+      const meta = await window.alphyBridge?.resolveCardMeta?.(item.title, item.year);
+      const rating = {};
+      if (Number.isFinite(Number(meta?.rating?.kp))) rating.kp = Number(meta.rating.kp);
+      if (Number.isFinite(Number(meta?.rating?.imdb))) rating.imdb = Number(meta.rating.imdb);
+      if (!meta?.ok || (!meta.poster && !Object.keys(rating).length)) {
+        setStatus(`не найдено на Кинопоиске: «${item.title}»`, "error");
+        if (button) { button.disabled = false; button.textContent = "⟳"; }
+        return;
+      }
+      if (meta.poster) {
+        item.poster = meta.poster;
+        item.backdrop = "";
+        posterUrlCacheClear(item.id); // drop any stale RU onerror override
+      }
+      if (Object.keys(rating).length) item.rating = rating;
+      markDirty(); // queues the autosave PUT; target/key/links untouched
+      render();    // rebuilds the card (this button element is replaced)
+      setStatus(`обновлено: «${meta.name || item.title}» · IMDb ${rating.imdb ?? "—"} · КП ${rating.kp ?? "—"}`, "ok");
+    } catch {
+      setStatus(`ошибка обновления: «${item.title}»`, "error");
+      if (button) { button.disabled = false; button.textContent = "⟳"; }
+    }
+  }
+
   function addAdminItemControls(card, listIndex, itemIndex) {
     if (!state.admin) return;
     const controls = document.createElement("div");
@@ -534,6 +572,15 @@
       event.stopPropagation();
       moveItemToList(listIndex, itemIndex, Number(select.value));
     });
+    const refresh = document.createElement("button");
+    refresh.type = "button";
+    refresh.className = "refresh";
+    refresh.textContent = "⟳";
+    refresh.title = "Обновить обложку и рейтинг с Кинопоиска/IMDb (плеер не трогает)";
+    refresh.addEventListener("click", (event) => {
+      event.stopPropagation();
+      forceUpdateItem(listIndex, itemIndex, refresh);
+    });
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "remove";
@@ -545,7 +592,7 @@
       markDirty();
       render();
     });
-    controls.append(left, right, select, remove);
+    controls.append(left, right, select, refresh, remove);
     card.querySelector(".card-media")?.appendChild(controls);
   }
 

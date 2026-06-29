@@ -434,7 +434,7 @@ header {
 }
 .admin-item-controls {
   position: absolute; z-index: 5; top: 6px; left: 6px; right: 6px;
-  display: grid; grid-template-columns: 25px 25px minmax(0, 1fr) 25px; gap: 4px;
+  display: grid; grid-template-columns: 25px 25px minmax(0, 1fr) 25px 25px; gap: 4px;
 }
 .admin-item-controls button,
 .admin-item-controls select {

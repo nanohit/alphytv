@@ -3416,12 +3416,64 @@ addEventListener('message', async (event) => {
     }
   }
 
+  // Best EXACT-title match among search hits (year is a soft tie-breaker, since
+  // stored years are unreliable). Returning only exact matches keeps a Force
+  // update from ever baking in a wrong cover/rating.
+  function pickExactMovie(results, title, year) {
+    if (!Array.isArray(results) || !results.length) return null;
+    const want = normalizeTitle(title);
+    const exact = results.filter((m) =>
+      [movieTitle(m), m.alternativeName, m.enName]
+        .filter(Boolean).map(normalizeTitle).includes(want));
+    if (!exact.length) return null;
+    return (year && exact.find((m) => String(m.year) === String(year))) || exact[0];
+  }
+
+  // A RU-reachable Kinopoisk poster: prefer an already-Yandex URL, else the
+  // deterministic st.kp poster (301s to avatars.mds.yandex.net) built from the
+  // real kpId. Never returns the unofficial API's kinopoiskapiunofficial.tech host.
+  function kinopoiskPosterUrl(...candidates) {
+    for (const c of candidates) {
+      const u = c?.poster || "";
+      try { if (/(^|\.)yandex\.net$/.test(new URL(u).hostname)) return u; } catch { /* not a URL */ }
+    }
+    const kpId = candidates.find((c) => /^\d+$/.test(String(c?.kpId)))?.kpId;
+    return kpId ? `https://st.kp.yandex.net/images/film_iphone/iphone360_${kpId}.jpg` : "";
+  }
+
+  // Re-resolve cover + rating for an existing curated item by title, WITHOUT
+  // touching its target (player/links). The /movie detail endpoint recovers the
+  // IMDb rating + imdbId even when /search has fallen back to the unofficial API
+  // (whose search hits carry no IMDb). Returns ok:false when no exact match.
+  async function resolveCardMeta(title, year) {
+    try {
+      const results = await searchPoiskkino(cleanMovieTitle(title), "");
+      const hit = pickExactMovie(results, title, year);
+      if (!hit?.kpId) return { ok: false };
+      const detail = await fetchMovieMeta(hit.kpId);
+      const m = detail || hit;
+      const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+      return {
+        ok: true,
+        kpId: hit.kpId,
+        poster: kinopoiskPosterUrl(m, hit),
+        rating: { kp: num(m.rating?.kp) ?? num(hit.rating?.kp), imdb: num(m.rating?.imdb) ?? num(hit.rating?.imdb) },
+        imdbId: m.externalId?.imdb || hit.externalId?.imdb || "",
+        name: movieTitle(m) || title,
+        year: m.year || hit.year || year || "",
+      };
+    } catch {
+      return { ok: false };
+    }
+  }
+
   window.alphyBridge = {
     getCurrentCuratedItem: currentCuratedItem,
     openCuratedItem,
     addCardBookmark,
     layoutMobileGrid,
     resolvePosterByTitle,
+    resolveCardMeta,
   };
 
   boot();
