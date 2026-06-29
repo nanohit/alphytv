@@ -7,3 +7,4 @@ worker/.wrangler/
 worker/package-lock.json
 .vercel
 .env*
+scripts/fixed-catalog.json
