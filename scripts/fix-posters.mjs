@@ -9,6 +9,7 @@
 // Usage:
 //   node scripts/fix-posters.mjs                       # dry run: report + fixed-catalog.json
 //   node scripts/fix-posters.mjs --apply               # write live blob (after a backup)
+//   node scripts/fix-posters.mjs --fix-years [--apply] # correct wrong stored years by exact title
 //   node scripts/fix-posters.mjs --restore <backup>    # roll back to a saved backup
 //
 // Writes use BLOB_READ_WRITE_TOKEN (loaded from .env.local), same as the server.
@@ -53,21 +54,32 @@ async function yandexPoster(kpId) {
   return "";
 }
 
-async function resolvePoster(title) {
+// Best resolver match for a title. requirePoster=true (poster migration) only
+// considers results that carry a poster; year migration accepts any match.
+async function bestMatch(title, { requirePoster = true } = {}) {
   const res = await fetch(`${RESOLVER_BASE}/search?q=${encodeURIComponent(title)}&limit=8`,
     { headers: { Accept: "application/json" } });
   if (!res.ok) throw new Error(`resolver ${res.status}`);
-  const results = ((await res.json())?.results || []).filter((r) => r.poster);
+  let results = (await res.json())?.results || [];
+  if (requirePoster) results = results.filter((r) => r.poster);
   const want = norm(title);
   let best = null;
+  const exactYears = new Set();
   results.forEach((r, idx) => {
     const titles = [r.name, r.alternativeName, r.enName].map(norm).filter(Boolean);
     const exact = titles.includes(want);
     const hit = exact || titles.some((t) => t && (t.includes(want) || want.includes(t)));
     if (!hit) return;
+    if (exact && /^(19|20)\d{2}$/.test(String(r.year || ""))) exactYears.add(String(r.year));
     const score = (exact ? 100 : 40) - idx;
     if (!best || score > best.score) best = { score, exact, kpId: r.kpId, poster: r.poster, name: r.name, year: r.year };
   });
+  if (best) best.exactYears = [...exactYears];
+  return best;
+}
+
+async function resolvePoster(title) {
+  const best = await bestMatch(title, { requirePoster: true });
   if (!best) return { poster: "", confidence: "none" };
   // Always store a direct Yandex poster, never the resolver's source-dependent URL.
   const poster = (await yandexPoster(best.kpId)) || (isYandex(best.poster) ? best.poster : "");
@@ -96,6 +108,55 @@ async function normalize({ apply }) {
   if (!apply) { console.log("Dry run. Re-run with --apply."); return; }
   mkdirSync(BACKUP_DIR, { recursive: true });
   const backupFile = new URL(`curated-pre-normalize-${new Date().toISOString().slice(0, 10)}-r${baseRevision}.json`, BACKUP_DIR);
+  writeFileSync(backupFile, `${original}\n`);
+  console.log(`Backup: ${backupFile.pathname}`);
+  const result = await writeCatalog({ lists }, baseRevision);
+  console.log(`Applied. New revision: ${result.catalog.revision}`);
+}
+
+// Fix stored years. The newdeaf add-flow derives year via extractYear() which
+// scrapes the FIRST 19xx/20xx number out of title+description+url, so it grabs a
+// setting/era year from prose (e.g. "Паук-нуар" -> 1930, "Фоллаут" -> 2077,
+// "Оно: Дерри" -> 1960). The real release year comes from the same exact-title
+// resolver match the posters use. Only exact matches are applied, so a wrong
+// year is never baked in.
+async function fixYears({ apply }) {
+  const live = await fetchLive();
+  const baseRevision = Number(live?.revision);
+  const original = JSON.stringify(live, null, 2);
+  const lists = Array.isArray(live?.lists) ? live.lists : [];
+  let total = 0, fixed = 0;
+  const report = [];
+  const validYear = (y) => /^(19|20)\d{2}$/.test(String(y || "")) && Number(y) <= new Date().getFullYear() + 2;
+
+  for (const list of lists) {
+    for (const item of Array.isArray(list?.items) ? list.items : []) {
+      total += 1;
+      const cur = String(item.year || "");
+      let best = null;
+      try { best = await bestMatch(item.title, { requirePoster: false }); }
+      catch { /* keep existing year on resolver error */ }
+      await sleep(120);
+      const newYear = best && best.exact ? String(best.year || "") : "";
+      if (!validYear(newYear) || newYear === cur) continue;
+      // Guard 1: the stored year already matches one of the exact-title KP entries
+      // => that's the admin's intended title (e.g. Ted series 2024 vs film 2012,
+      // 3 Body Problem 2024 vs 2023). Keep it, don't snap to a sibling release.
+      if (best.exactYears?.includes(cur)) continue;
+      // Guard 2: stored year is itself a plausible release year only ~1 off — likely
+      // a festival-vs-theatrical quirk (e.g. EEAAO 2022 vs KP's 2021). Leave it.
+      if (validYear(cur) && Math.abs(Number(newYear) - Number(cur)) <= 1) continue;
+      report.push({ title: item.title, from: item.year, to: newYear, matched: best.name });
+      item.year = newYear; fixed += 1;
+    }
+  }
+
+  console.log(`\nItems: ${total} | years fixed: ${fixed} (rev ${baseRevision})`);
+  for (const r of report) console.log(`  "${r.title}": ${r.from || "—"} -> ${r.to}  (${r.matched})`);
+
+  if (!apply) { console.log("\nDry run only. Re-run with --fix-years --apply."); return; }
+  mkdirSync(BACKUP_DIR, { recursive: true });
+  const backupFile = new URL(`curated-pre-years-${new Date().toISOString().slice(0, 10)}-r${baseRevision}.json`, BACKUP_DIR);
   writeFileSync(backupFile, `${original}\n`);
   console.log(`Backup: ${backupFile.pathname}`);
   const result = await writeCatalog({ lists }, baseRevision);
@@ -162,5 +223,6 @@ const args = process.argv.slice(2);
 const ri = args.indexOf("--restore");
 const fail = (e) => { console.error(e); process.exit(1); };
 if (ri !== -1) restore(args[ri + 1]).catch(fail);
+else if (args.includes("--fix-years")) fixYears({ apply: args.includes("--apply") }).catch(fail);
 else if (args.includes("--normalize")) normalize({ apply: args.includes("--apply") }).catch(fail);
 else migrate({ apply: args.includes("--apply") }).catch(fail);
