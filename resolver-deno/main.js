@@ -19,6 +19,12 @@
 import worker, { pickAllowOrigin } from "../worker/src/index.js";
 
 const env = {
+  // Primary metadata source (kinopoisk.dev / poiskkino). A POOL of keys may be set
+  // comma-separated in POISKKINO_TOKENS (~200/day each, rotated by exhaustion); the
+  // singular POISKKINO_TOKEN is still honoured. This is the only IMDb-capable source
+  // (the unofficial fallback's search carries no IMDb), so keeping it funded keeps
+  // IMDb ratings on the search page.
+  POISKKINO_TOKENS: Deno.env.get("POISKKINO_TOKENS"),
   POISKKINO_TOKEN: Deno.env.get("POISKKINO_TOKEN"),
   POISKKINO_BASE_URL: Deno.env.get("POISKKINO_BASE_URL") || "https://api.poiskkino.dev",
   // Fallback metadata when the primary daily quota (200/day) is exhausted. A POOL

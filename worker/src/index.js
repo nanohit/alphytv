@@ -162,18 +162,53 @@ async function movieWithFallback(env, id) {
   }
 }
 
+// The primary (kinopoisk.dev / poiskkino) source also supports a POOL of keys,
+// comma-separated in POISKKINO_TOKENS (the singular POISKKINO_TOKEN is still
+// honoured). Each free key is ~200 req/day; the cursor drains the current key and
+// only advances past it once its quota is spent (403/402/429), so N keys ≈ N*200/day
+// on the IMDb-capable primary before falling through to the unofficial pool.
+let poiskkinoCursor = 0;
+
+function poiskkinoKeys(env) {
+  const list = String(env.POISKKINO_TOKENS || "").split(",").map((s) => s.trim());
+  if (env.POISKKINO_TOKEN) list.push(String(env.POISKKINO_TOKEN).trim());
+  return [...new Set(list.filter(Boolean))];
+}
+
+async function poiskkinoRotate(keys, run) {
+  const start = poiskkinoCursor; // capture once; the loop must not skip keys as the cursor moves
+  let lastError;
+  for (let i = 0; i < keys.length; i += 1) {
+    const idx = (start + i) % keys.length;
+    try {
+      const value = await run(keys[idx]);
+      poiskkinoCursor = idx; // stick with this working key next time
+      return value;
+    } catch (error) {
+      lastError = error;
+      // kinopoisk.dev answers 403 ("Превышен дневной лимит") when a key is spent.
+      if (/\b(40[23]|429)\b/.test(String(error?.message || ""))) poiskkinoCursor = (idx + 1) % keys.length;
+    }
+  }
+  throw lastError || new Error("POISKKINO_TOKEN secret is not configured");
+}
+
 async function poiskkinoSearch(env, query, limit) {
+  const keys = poiskkinoKeys(env);
+  if (!keys.length) throw new Error("POISKKINO_TOKEN secret is not configured");
   const apiUrl = new URL("/v1.4/movie/search", poiskkinoBase(env));
   apiUrl.searchParams.set("query", query);
   apiUrl.searchParams.set("limit", String(limit));
-  const raw = await poiskkinoFetch(env, apiUrl);
+  const raw = await poiskkinoRotate(keys, (key) => poiskkinoFetch(key, apiUrl));
   const docs = Array.isArray(raw.docs) ? raw.docs : [];
   return docs.map(normalizeMovie);
 }
 
 async function poiskkinoMovie(env, id) {
+  const keys = poiskkinoKeys(env);
+  if (!keys.length) throw new Error("POISKKINO_TOKEN secret is not configured");
   const apiUrl = new URL(`/v1.4/movie/${id}`, poiskkinoBase(env));
-  return normalizeMovie(await poiskkinoFetch(env, apiUrl));
+  return normalizeMovie(await poiskkinoRotate(keys, (key) => poiskkinoFetch(key, apiUrl)));
 }
 
 async function unofficialSearch(env, key, query, limit) {
@@ -680,15 +715,11 @@ async function fetchJsonWithTimeout(targetUrl, timeoutMs) {
   return JSON.parse(text);
 }
 
-async function poiskkinoFetch(env, apiUrl) {
-  if (!env.POISKKINO_TOKEN) {
-    throw new Error("POISKKINO_TOKEN secret is not configured");
-  }
-
+async function poiskkinoFetch(key, apiUrl) {
   const response = await fetch(apiUrl, {
     headers: {
       "Accept": "application/json",
-      "X-API-KEY": env.POISKKINO_TOKEN,
+      "X-API-KEY": key,
     },
   });
 
