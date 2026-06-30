@@ -391,16 +391,14 @@
     return null;
   }
 
-  async function resolveZona(kpId, selection = null) {
+  async function resolveZona(kpId) {
     const cached = cacheGet("zona", kpId);
     if (cached && cached.embedUrl) return cached;
-    const params = new URLSearchParams({ kpId: String(kpId) });
-    const serialSelection = normalizeSerialHint(selection);
-    if (serialSelection) {
-      params.set("season", String(serialSelection.season));
-      params.set("episode", String(serialSelection.episode));
-    }
-    const path = `/resolve-zona?${params}`;
+    // Always resolve at the title level (no season/episode). mzona returns the
+    // whole-series Zenith embed for a series; the episode is then chosen from
+    // that embed's playlist client-side. Passing season/episode here makes
+    // getVideoSources come back empty and breaks series that otherwise resolve.
+    const path = `/resolve-zona?kpId=${encodeURIComponent(kpId)}`;
     const candidates = isLocal
       ? [path]
       : [new URL(`/api${path}`, location.origin).href, path];
@@ -1002,10 +1000,9 @@
     let meta = opts.meta || cacheGet("meta", kpId);
     if (!meta) { meta = await fetchMovieMeta(kpId); if (isStale(token)) return; }
     if (meta) cacheSet("meta", kpId, meta, TTL.meta);
-    const savedSelection = normalizeSerialHint(savedSerialSelection(`kp:${kpId}`));
-    const requestedSelection = normalizeSerialHint(opts.serialSelection) || savedSelection;
+    const requestedSelection = normalizeSerialHint(opts.serialSelection)
+      || normalizeSerialHint(savedSerialSelection(`kp:${kpId}`));
     const isSeries = !!(opts.forceSeries || meta?.isSeries || requestedSelection);
-    const serialSelection = requestedSelection || (isSeries ? { season: 1, episode: 1 } : null);
     const target = {
       kind: "kp",
       kpId,
@@ -1019,13 +1016,13 @@
     renderMeta(meta, target);
     recordOpen(target);
 
-    const resolved = await resolveZona(kpId, serialSelection);
+    const resolved = await resolveZona(kpId);
     if (isStale(token)) return;
     await playZenithEmbed(resolved.embedUrl, target, token, {
       histKey: `kp:${kpId}`,
       resume: resumePosition(`kp:${kpId}`),
       audioLang: savedAudioLang(`kp:${kpId}`),
-      serialSelection,
+      serialSelection: requestedSelection,
       forceSeries: target.isSeries,
     });
   }

@@ -88,15 +88,6 @@ function zonaCacheRequest(kpId) {
   return new Request(`https://alphy-zona-cache.invalid/${encodeURIComponent(kpId)}`);
 }
 
-function zonaSerialSelection(url) {
-  const season = (url.searchParams.get("season") || "").trim();
-  const episode = (url.searchParams.get("episode") || "").trim();
-  if (!season && !episode) return null;
-  if (!/^\d+$/.test(season) || !/^\d+$/.test(episode)) return { error: "invalid_season_episode" };
-  const value = { season: Number(season), episode: Number(episode) };
-  return value.season > 0 && value.episode > 0 ? value : { error: "invalid_season_episode" };
-}
-
 async function readZonaCache(kpId) {
   const memoryHit = zonaMemoryCache.get(kpId);
   if (memoryHit?.embedUrl) return { ...memoryHit, cache: "memory" };
@@ -180,8 +171,6 @@ async function resolveAndCacheZona(request, kpId) {
 async function handleResolveZonaCached(request, url) {
   const kpId = (url.searchParams.get("kpId") || url.searchParams.get("id") || "").trim();
   if (!/^\d+$/.test(kpId)) return worker.fetch(request, env);
-  const selection = zonaSerialSelection(url);
-  if (selection?.error) return worker.fetch(request, env);
 
   const hit = await readZonaCache(kpId);
   if (hit?.embedUrl) {
@@ -190,11 +179,7 @@ async function handleResolveZonaCached(request, url) {
 
   // Collapse simultaneous requests for the same title. Without this, one page
   // refresh can consume several scarce mzona calls before the first one caches.
-  const inflightKey = [
-    kpId,
-    selection ? `${selection.season}:${selection.episode}` : "movie",
-    request.headers.get("origin") || "",
-  ].join("|");
+  const inflightKey = `${kpId}|${request.headers.get("origin") || ""}`;
   if (!zonaInflight.has(inflightKey)) {
     const pending = resolveAndCacheZona(request, kpId).finally(() => zonaInflight.delete(inflightKey));
     zonaInflight.set(inflightKey, pending);

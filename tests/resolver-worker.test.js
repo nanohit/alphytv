@@ -5,26 +5,29 @@ import worker from "../worker/src/index.js";
 
 const env = { ALLOWED_ORIGIN: "http://127.0.0.1:5177" };
 
-test("rejects invalid Zona serial selection before upstream resolve", async () => {
+// These must reject before any upstream (mzona) call, so they stay fast and
+// hermetic — no network, no 9s resolve wait.
+
+test("rejects a non-numeric Zona kpId", async () => {
   const response = await worker.fetch(
-    new Request("http://local/resolve-zona?kpId=408414&season=x&episode=1"),
+    new Request("http://local/resolve-zona?kpId=abc"),
     env,
   );
   const body = await response.json();
 
   assert.equal(response.status, 400);
   assert.equal(body.ok, false);
-  assert.equal(body.error, "invalid_season_episode");
+  assert.equal(body.error, "missing_or_invalid_kpId");
 });
 
-test("rejects incomplete Zona serial selection before upstream resolve", async () => {
+test("rejects a missing Zona kpId", async () => {
   const response = await worker.fetch(
-    new Request("http://local/resolve-zona?kpId=408414&season=1"),
+    new Request("http://local/resolve-zona"),
     env,
   );
   const body = await response.json();
 
   assert.equal(response.status, 400);
   assert.equal(body.ok, false);
-  assert.equal(body.error, "invalid_season_episode");
+  assert.equal(body.error, "missing_or_invalid_kpId");
 });

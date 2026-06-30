@@ -245,12 +245,7 @@ async function handleZonaResolve(request, env, url) {
   if (!/^\d+$/.test(kpId)) {
     return json(request, env, { ok: false, error: "missing_or_invalid_kpId" }, 400);
   }
-  const selection = zonaSerialSelection(url);
-  if (selection?.error) {
-    return json(request, env, { ok: false, error: selection.error }, 400);
-  }
-
-  const resolved = await enqueueZonaResolve(() => resolveZonaInPureJs(kpId, selection));
+  const resolved = await enqueueZonaResolve(() => resolveZonaInPureJs(kpId));
   if (!resolved.embedUrl) {
     // mzona occasionally returns an empty body when its shared egress is
     // rate-limited. That is a transient upstream failure, not a successful
@@ -927,23 +922,14 @@ function capturedFetch(realFetch, store, input, init = {}) {
   return realFetch(input, { ...init, headers });
 }
 
-function zonaSerialSelection(url) {
-  const season = (url.searchParams.get("season") || "").trim();
-  const episode = (url.searchParams.get("episode") || "").trim();
-  if (!season && !episode) return null;
-  if (!/^\d+$/.test(season) || !/^\d+$/.test(episode)) {
-    return { error: "invalid_season_episode" };
-  }
-  const value = { season: Number(season), episode: Number(episode) };
-  if (value.season < 1 || value.episode < 1) return { error: "invalid_season_episode" };
-  return value;
-}
-
-function runZonaProvider(lib, kpId, selection, requests, callbacks) {
+function runZonaProvider(lib, kpId, requests, callbacks) {
   const provider = lib.createStreamsProvider({
     getStreamDurationInMicroseconds: () => "0",
   });
-  provider.getStreams(Number(kpId), selection?.season ?? null, selection?.episode ?? null, {
+  // Title-level resolve only (null season/episode). For a series mzona returns
+  // the whole-series Zenith embed; passing a concrete season/episode makes
+  // getVideoSources come back empty and breaks series that otherwise resolve.
+  provider.getStreams(Number(kpId), null, null, {
     onStreamsReceived(payload) {
       callbacks.push(parseMaybeJson(payload));
     },
@@ -952,7 +938,7 @@ function runZonaProvider(lib, kpId, selection, requests, callbacks) {
   return waitFor(() => extractZenithIds(requests).length > 0, 9000);
 }
 
-async function resolveZonaInPureJs(kpId, selection = null) {
+async function resolveZonaInPureJs(kpId) {
   const lib = getZonaLib();
   if (!lib?.createStreamsProvider) {
     throw new Error("Zona stream library did not expose createStreamsProvider");
@@ -973,12 +959,12 @@ async function resolveZonaInPureJs(kpId, selection = null) {
 
   try {
     if (als) {
-      await als.run({ requests, callbacks }, () => runZonaProvider(lib, kpId, selection, requests, callbacks));
+      await als.run({ requests, callbacks }, () => runZonaProvider(lib, kpId, requests, callbacks));
     } else {
       const previousFetch = globalThis.fetch;
       globalThis.fetch = (input, init = {}) => capturedFetch(previousFetch, { requests }, input, init);
       try {
-        await runZonaProvider(lib, kpId, selection, requests, callbacks);
+        await runZonaProvider(lib, kpId, requests, callbacks);
       } finally {
         globalThis.fetch = previousFetch;
       }
