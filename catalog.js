@@ -652,12 +652,88 @@
     return header;
   }
 
+  // ---------------------------------------------------------------------
+  // Category shelf layout: 8 tiles across, 2 rows = one page of 16. Cards are
+  // placed explicitly so the reading order is row-major (1-8, then 9-16) while
+  // the grid still flows horizontally into the next page. Anything past 16
+  // scrolls off to the right and gets prev/next arrows.
+  // ---------------------------------------------------------------------
+  const CURATED_COLS = 8;
+  const CURATED_PAGE = CURATED_COLS * 2; // 16 tiles per visible page
+  const CURATED_COL_GAP = 14; // keep in sync with .curated-row column-gap
+  let curatedObservers = [];
+
+  function layoutCuratedCards(row) {
+    const cards = [...row.children].filter((child) => child.classList.contains("card"));
+    cards.forEach((card, index) => {
+      const pageIndex = index % CURATED_PAGE;
+      const page = Math.floor(index / CURATED_PAGE);
+      card.style.setProperty("--curated-r", pageIndex < CURATED_COLS ? "1" : "2");
+      card.style.setProperty("--curated-c", String(page * CURATED_COLS + (pageIndex % CURATED_COLS) + 1));
+      card.classList.toggle("page-lead", pageIndex === 0);
+    });
+    // Size columns so exactly 8 fill the viewport => clean one-page paging.
+    const width = row.clientWidth;
+    if (width > 0) {
+      const col = Math.floor((width - (CURATED_COLS - 1) * CURATED_COL_GAP) / CURATED_COLS);
+      row.style.setProperty("--curated-col", `${Math.max(96, col)}px`);
+    }
+    return cards.length;
+  }
+
+  function curatedNavButton(side, glyph) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `curated-nav curated-nav-${side}`;
+    button.setAttribute("aria-label", side === "prev" ? "Предыдущие" : "Следующие");
+    const span = document.createElement("span");
+    span.className = "glyph";
+    span.textContent = glyph;
+    button.appendChild(span);
+    return button;
+  }
+
+  function setupCuratedRow(wrap, row) {
+    const count = [...row.children].filter((child) => child.classList.contains("card")).length;
+    let sync = null;
+    if (count > CURATED_PAGE) {
+      const prev = curatedNavButton("prev", "‹");
+      const next = curatedNavButton("next", "›");
+      const pageStride = () => row.clientWidth + CURATED_COL_GAP;
+      prev.addEventListener("click", () => row.scrollBy({ left: -pageStride(), behavior: "smooth" }));
+      next.addEventListener("click", () => row.scrollBy({ left: pageStride(), behavior: "smooth" }));
+      wrap.append(prev, next);
+      sync = () => {
+        const max = row.scrollWidth - row.clientWidth - 2;
+        prev.disabled = row.scrollLeft <= 2;
+        next.disabled = row.scrollLeft >= max;
+      };
+      row.addEventListener("scroll", sync, { passive: true });
+    }
+    const relayout = () => {
+      layoutCuratedCards(row);
+      window.alphyBridge?.layoutMobileGrid?.(row);
+      sync?.();
+    };
+    relayout();
+    // The home view can be hidden when render() runs (clientWidth 0); a
+    // ResizeObserver re-runs the layout once the shelf actually gets a width,
+    // and on every window resize, without a separate resize listener.
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(relayout);
+      observer.observe(row);
+      curatedObservers.push(observer);
+    }
+  }
+
   function render() {
     if (!el.section || !el.lists) return;
     const visible = state.admin || state.catalog.lists.some((list) => list.items.length);
     el.section.classList.toggle("hidden", !visible);
     if (visible) document.getElementById("homeEmpty")?.classList.add("hidden");
     el.actions?.classList.toggle("hidden", !state.admin);
+    curatedObservers.forEach((observer) => observer.disconnect());
+    curatedObservers = [];
     el.lists.replaceChildren();
 
     for (const [listIndex, list] of state.catalog.lists.entries()) {
@@ -671,6 +747,8 @@
         empty.textContent = "Пустой список — добавь тайтл из загруженного плеера.";
         block.appendChild(empty);
       } else {
+        const wrap = document.createElement("div");
+        wrap.className = "curated-row-wrap";
         const row = document.createElement("div");
         row.className = "curated-row";
         list.items.forEach((item, itemIndex) => {
@@ -678,8 +756,9 @@
           addAdminItemControls(card, listIndex, itemIndex);
           row.appendChild(card);
         });
-        window.alphyBridge?.layoutMobileGrid?.(row);
-        block.appendChild(row);
+        wrap.appendChild(row);
+        block.appendChild(wrap);
+        setupCuratedRow(wrap, row);
       }
       el.lists.appendChild(block);
     }

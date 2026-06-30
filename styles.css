@@ -274,9 +274,10 @@ header {
   overflow-y: hidden;
   padding: 7px 3px 12px;
   scroll-snap-type: x proximity;
-  scrollbar-width: thin;
-  scrollbar-color: #292929 transparent;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
+.continue-section .card-grid::-webkit-scrollbar { width: 0; height: 0; display: none; }
 .continue-card {
   flex: 0 0 clamp(126px, 11.9vw, 146px);
   scroll-snap-align: start;
@@ -415,19 +416,54 @@ header {
 .curated-title-input:focus { outline: 0; border-color: var(--accent); }
 .curated-list-controls { display: flex; gap: 5px; flex: none; }
 .curated-list-controls button { width: 30px; padding: 0; font-size: 15px; }
+/* Category shelf: 8 tiles per row, 2 rows = one page of 16; extra titles page
+   off to the right via the arrows. The row places each card explicitly (see
+   layoutCuratedCards in catalog.js) so reading order stays 1-8 then 9-16. */
+.curated-row-wrap { position: relative; }
 .curated-row {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: clamp(117px, 11.9vw, 138px);
-  gap: 14px;
+  grid-template-rows: repeat(2, auto);
+  grid-auto-columns: var(--curated-col, clamp(117px, 11.9vw, 138px));
+  align-content: start;
+  gap: 18px 14px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 7px 3px 12px;
+  padding: 7px 1px 10px;
   scroll-snap-type: x proximity;
-  scrollbar-width: thin;
-  scrollbar-color: #292929 transparent;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
-.curated-row .card { scroll-snap-align: start; width: 100%; }
+.curated-row::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.curated-row > .card {
+  width: 100%;
+  grid-row: var(--curated-r, auto);
+  grid-column: var(--curated-c, auto);
+}
+.curated-row > .card.page-lead { scroll-snap-align: start; }
+
+/* Paging arrows — only added when a list overflows one page (>16). */
+.curated-nav {
+  position: absolute; top: 7px; bottom: 10px; width: 54px;
+  display: grid; align-items: center; padding: 0 4px;
+  border: 0; cursor: pointer; z-index: 6;
+  opacity: 0; transition: opacity .2s;
+}
+.curated-nav-prev { left: 0; justify-items: start;
+  background: linear-gradient(90deg, var(--bg) 16%, rgba(0,0,0,0) 100%); }
+.curated-nav-next { right: 0; justify-items: end;
+  background: linear-gradient(270deg, var(--bg) 16%, rgba(0,0,0,0) 100%); }
+.curated-nav .glyph {
+  width: 34px; height: 34px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: rgba(18,18,18,.94); border: 1px solid var(--stroke-strong);
+  color: #eaeaea; font-size: 19px; line-height: 1; padding-bottom: 2px;
+  transition: color .16s, border-color .16s, transform .16s;
+}
+.curated-row-wrap:hover .curated-nav { opacity: 1; }
+.curated-nav:hover .glyph { color: var(--accent); border-color: var(--accent); transform: scale(1.06); }
+.curated-nav:disabled { opacity: 0; pointer-events: none; }
 .curated-empty {
   padding: 16px; border: 1px dashed var(--stroke-strong); border-radius: 10px;
   color: var(--muted); font-size: 12px;
@@ -609,7 +645,11 @@ header {
     overflow-x: auto;
     overflow-y: hidden;
     padding: 7px 2px 10px;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
   }
+  .card-grid::-webkit-scrollbar,
+  .curated-row::-webkit-scrollbar { width: 0; height: 0; display: none; }
   .card-grid.mobile-two-row,
   .curated-row.mobile-two-row {
     grid-template-rows: repeat(2, max-content);
@@ -709,6 +749,7 @@ header {
 }
 
 @media (hover: none) {
+  .curated-nav { display: none; }
   .card-hover-meta { display: none; }
   .card-bookmark { opacity: .82; transform: none; }
   .card-bookmark.on { opacity: 1; }
