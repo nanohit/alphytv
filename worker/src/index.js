@@ -976,8 +976,6 @@ async function resolveZonaInPureJs(kpId) {
   const zenithIds = extractZenithIds(requests);
   return {
     kpId,
-    season: selection?.season ?? null,
-    episode: selection?.episode ?? null,
     zenithId: zenithIds[0] || null,
     zenithIds,
     embedUrl: zenithIds[0] ? `https://api.zenithjs.ws/embed/movie/${zenithIds[0]}` : null,
