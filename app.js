@@ -391,17 +391,23 @@
     return null;
   }
 
-  async function resolveZona(kpId) {
+  async function resolveZona(kpId, selection = null) {
     const cached = cacheGet("zona", kpId);
     if (cached && cached.embedUrl) return cached;
-    const path = `/resolve-zona?kpId=${encodeURIComponent(kpId)}`;
+    const params = new URLSearchParams({ kpId: String(kpId) });
+    const serialSelection = normalizeSerialHint(selection);
+    if (serialSelection) {
+      params.set("season", String(serialSelection.season));
+      params.set("episode", String(serialSelection.episode));
+    }
+    const path = `/resolve-zona?${params}`;
     const candidates = isLocal
       ? [path]
       : [new URL(`/api${path}`, location.origin).href, path];
     let lastError;
     for (const candidate of candidates) {
       try {
-        const data = await resolverJson(candidate, { retries: 0, timeoutMs: 18000 });
+        const data = await resolverJson(candidate, { retries: 0, timeoutMs: 10000 });
         if (!data.embedUrl) throw new Error("Zenith временно недоступен");
         const value = { zenithId: data.zenithId, embedUrl: data.embedUrl };
         cacheSet("zona", kpId, value, TTL.zona);
@@ -996,27 +1002,30 @@
     let meta = opts.meta || cacheGet("meta", kpId);
     if (!meta) { meta = await fetchMovieMeta(kpId); if (isStale(token)) return; }
     if (meta) cacheSet("meta", kpId, meta, TTL.meta);
-    const serialSelection = normalizeSerialHint(opts.serialSelection);
+    const savedSelection = normalizeSerialHint(savedSerialSelection(`kp:${kpId}`));
+    const requestedSelection = normalizeSerialHint(opts.serialSelection) || savedSelection;
+    const isSeries = !!(opts.forceSeries || meta?.isSeries || requestedSelection);
+    const serialSelection = requestedSelection || (isSeries ? { season: 1, episode: 1 } : null);
     const target = {
       kind: "kp",
       kpId,
       title: movieTitle(meta),
       poster: meta?.poster,
       year: meta?.year,
-      isSeries: !!(opts.forceSeries || meta?.isSeries || serialSelection),
+      isSeries,
     };
     state.currentTarget = target;
     setWatchHead(target.title || `kpId ${kpId}`, target);
     renderMeta(meta, target);
     recordOpen(target);
 
-    const resolved = await resolveZona(kpId);
+    const resolved = await resolveZona(kpId, serialSelection);
     if (isStale(token)) return;
     await playZenithEmbed(resolved.embedUrl, target, token, {
       histKey: `kp:${kpId}`,
       resume: resumePosition(`kp:${kpId}`),
       audioLang: savedAudioLang(`kp:${kpId}`),
-      serialSelection: serialSelection || savedSerialSelection(keyFor(target)),
+      serialSelection,
       forceSeries: target.isSeries,
     });
   }
