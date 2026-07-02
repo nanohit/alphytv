@@ -112,6 +112,9 @@
   let resolveToken = 0;
   const nextToken = () => (resolveToken += 1);
   const isStale = (token) => token !== resolveToken;
+  const newdeafWarmOrigins = new Set();
+  const newdeafPagePrefetches = new Set();
+  const newdeafPageInflight = new Map();
 
   // =====================================================================
   // localStorage: TTL cache + bookmarks + history
@@ -172,11 +175,11 @@
     return t;
   }
   function hashFor(t) {
-    if (t.kind === "kp") return `/watch/kp/${encodeURIComponent(t.kpId)}`;
-    if (t.kind === "zen") return `/watch/zen/${encodeURIComponent(t.zenithId)}`;
-    if (t.kind === "ort") return `/watch/ort/${encodeURIComponent(t.embedUrl)}`;
-    if (t.kind === "opr") return `/watch/opr/${encodeURIComponent(t.playerUrl)}`;
-    if (t.kind === "nd") return `/watch/nd/${encodeURIComponent(t.pageUrl)}`;
+    if (t.kind === "kp") return `/k/${encodeURIComponent(t.kpId)}`;
+    if (t.kind === "zen") return `/${encodeURIComponent(t.zenithId)}`;
+    if (t.kind === "ort") return shortOrtifiedPath(t.embedUrl) || legacyHashPath(`/watch/ort/${encodeURIComponent(t.embedUrl)}`);
+    if (t.kind === "opr") return legacyHashPath(`/watch/opr/${encodeURIComponent(t.playerUrl)}`);
+    if (t.kind === "nd") return shortNewdeafPath(t.pageUrl) || legacyHashPath(`/watch/nd/${encodeURIComponent(t.pageUrl)}`);
     return "/";
   }
 
@@ -491,6 +494,14 @@
   async function resolveNewdeafPage(pageUrl) {
     const cached = cacheGet("ndpage", pageUrl);
     if (cached) return cached;
+    const inflight = newdeafPageInflight.get(pageUrl);
+    if (inflight) return inflight;
+    const pending = fetchNewdeafPage(pageUrl).finally(() => newdeafPageInflight.delete(pageUrl));
+    newdeafPageInflight.set(pageUrl, pending);
+    return pending;
+  }
+
+  async function fetchNewdeafPage(pageUrl) {
     const candidates = pageUrlCandidates(pageUrl);
     let parsed = null;
     for (const candidate of candidates) {
@@ -510,27 +521,76 @@
   }
 
   // =====================================================================
-  // Router (hash-based; the URL is the cache key + shareable + back-button)
+  // Router (path-based; hash links remain readable legacy aliases)
   // =====================================================================
-  function parseHash() {
-    const h = location.hash.replace(/^#/, "");
-    if (!h || h === "/") return { view: "home" };
-    const segs = h.split("/").filter(Boolean);
+  function parseLocationRoute() {
+    const legacy = parseLegacyHash(location.hash);
+    if (legacy) return legacy;
+    return parsePathRoute(location.pathname, location.search);
+  }
+
+  function parseLegacyHash(hash) {
+    const h = String(hash || "").replace(/^#/, "");
+    if (!h) return null;
+    return parsePathRoute(h, "");
+  }
+
+  function parsePathRoute(pathname, search = "") {
+    const segs = String(pathname || "/").split("/").filter(Boolean).map(safeDecode);
+    if (!segs.length) return { view: "home" };
     if (segs[0] === "bookmarks") return { view: "bookmarks" };
-    if (segs[0] === "search") return { view: "search", q: decodeURIComponent(segs.slice(1).join("/") || "") };
-    if (segs[0] === "watch") return { view: "watch", kind: segs[1], raw: decodeURIComponent(segs.slice(2).join("/") || "") };
+    if (segs[0] === "search") return { view: "search", q: segs.slice(1).join("/") };
+    if (segs[0] === "watch") return { view: "watch", kind: segs[1], raw: segs.slice(2).join("/") || "" };
+    if (/^\d+$/.test(segs[0])) return { view: "watch", kind: "zen", raw: segs[0] };
+    if (segs[0] === "k" && /^\d+$/.test(segs[1] || "")) return { view: "watch", kind: "kp", raw: segs[1] };
+    if (segs[0] === "o" && /^\d+$/.test(segs[1] || "")) {
+      return { view: "watch", kind: "ort", raw: ortifiedUrlFromShort(segs[1], segs[2]) };
+    }
+    if (segs[0] === "n") {
+      const pageUrl = newdeafUrlFromShortPath(segs.slice(1));
+      if (pageUrl) return { view: "watch", kind: "nd", raw: pageUrl };
+    }
     return { view: "home" };
   }
-  function go(hash) {
-    if (`#${hash}` === location.hash) { route(); return; }
-    location.hash = hash; // fires hashchange -> route()
+
+  function routePath(input) {
+    const value = String(input || "/");
+    if (value.startsWith("/watch/")) {
+      const route = parsePathRoute(value, "");
+      const target = targetFromWatchRoute(route);
+      if (target) return hashFor(target);
+    }
+    if (value.startsWith("/search/")) {
+      const route = parsePathRoute(value, "");
+      if (route.view === "search") return `/search/${encodeURIComponent(route.q)}`;
+    }
+    return value.startsWith("/") ? value : "/";
   }
-  function replaceHash(hash) {
-    history.replaceState(null, "", `#${hash}`); // no hashchange, no history entry
+
+  function targetFromWatchRoute(route) {
+    if (route.view !== "watch") return null;
+    if (route.kind === "kp") return { kind: "kp", kpId: route.raw };
+    if (route.kind === "zen") return { kind: "zen", zenithId: route.raw };
+    if (route.kind === "ort") return { kind: "ort", embedUrl: route.raw };
+    if (route.kind === "opr") return { kind: "opr", playerUrl: route.raw };
+    if (route.kind === "nd") return { kind: "nd", pageUrl: route.raw };
+    return null;
+  }
+
+  function go(path) {
+    const next = routePath(path);
+    const current = new URL(location.href);
+    const target = new URL(next, location.origin);
+    if (`${current.pathname}${current.search}${current.hash}` === `${target.pathname}${target.search}${target.hash}`) { route(); return; }
+    history.pushState(null, "", next);
+    route();
+  }
+  function replaceHash(path) {
+    history.replaceState(null, "", routePath(path)); // no popstate, no history entry
   }
 
   async function route() {
-    const r = parseHash();
+    const r = parseLocationRoute();
     const token = nextToken();
     await teardownPlayer();
     hideError();
@@ -564,6 +624,7 @@
 
   function showHome() {
     setView("home");
+    warmNewdeafConnections();
     document.title = "alphy";
     el.searchInput.value = "";
     const hist = loadList(STORE_HISTORY);
@@ -759,28 +820,65 @@
 
   async function showSearch(query, token) {
     setView("search");
+    warmNewdeafConnections();
     document.title = `${query} — alphy`;
     el.searchInput.value = query;
     el.resultsTitle.textContent = "Поиск…";
     el.resultsGrid.replaceChildren();
 
-    // PoiskKino first (fast, cached), render immediately; newdeaf merges after.
-    let pk = [];
-    try { pk = await searchPoiskkino(query); } catch (error) { log("poisk-error", error.message); }
-    if (isStale(token)) return;
-    renderResults([], pk, query);
+    const poiskTask = searchPoiskkino(query)
+      .then((results) => ({ results }))
+      .catch((error) => {
+        log("poisk-error", error.message);
+        return { results: [] };
+      });
 
-    // newdeaf indexes Russian titles only. If the query has no Cyrillic, search
-    // newdeaf with the Russian name from the top PoiskKino hit so English queries
-    // ("Scavengers Reign") still surface the newdeaf pages ("Царство падальщиков").
-    const ndQuery = pickNewdeafQuery(query, pk);
+    let pk = [];
     let nd = [];
     let newdeafUnavailable = false;
-    try {
-      nd = await searchNewdeaf(ndQuery);
-    } catch (error) {
-      newdeafUnavailable = true;
-      log("newdeaf-error", error.message);
+    const canStartNewdeafNow = /[а-яё]/i.test(query);
+    const newdeafTask = canStartNewdeafNow
+      ? searchNewdeaf(query)
+        .then((results) => ({ results, unavailable: false }))
+        .catch((error) => {
+          log("newdeaf-error", error.message);
+          return { results: [], unavailable: true };
+        })
+      : null;
+
+    if (newdeafTask) {
+      const first = await Promise.race([
+        poiskTask.then((value) => ({ source: "poisk", ...value })),
+        newdeafTask.then((value) => ({ source: "newdeaf", ...value })),
+      ]);
+      if (isStale(token)) return;
+      if (first.source === "poisk") pk = first.results;
+      else {
+        nd = first.results;
+        newdeafUnavailable = first.unavailable;
+      }
+      renderResults(nd, pk, query, { newdeafUnavailable });
+
+      const [poisk, newdeaf] = await Promise.all([poiskTask, newdeafTask]);
+      pk = poisk.results;
+      nd = newdeaf.results;
+      newdeafUnavailable = newdeaf.unavailable;
+    } else {
+      const poisk = await poiskTask;
+      if (isStale(token)) return;
+      pk = poisk.results;
+      renderResults([], pk, query);
+
+      // newdeaf indexes Russian titles only. If the query has no Cyrillic, search
+      // newdeaf with the Russian name from the top PoiskKino hit so English queries
+      // ("Scavengers Reign") still surface the newdeaf pages ("Царство падальщиков").
+      const ndQuery = pickNewdeafQuery(query, pk);
+      try {
+        nd = await searchNewdeaf(ndQuery);
+      } catch (error) {
+        newdeafUnavailable = true;
+        log("newdeaf-error", error.message);
+      }
     }
     if (isStale(token)) return;
     renderResults(nd, pk, query, { newdeafUnavailable });
@@ -794,8 +892,12 @@
   }
 
   function renderResults(ndCandidates, pkResults, query, options = {}) {
-    el.resultsGrid.replaceChildren();
+    // Build the whole grid in a detached fragment and swap it in once. Search may
+    // render once for the race winner and again for the final merge, so appending
+    // card-by-card to the live grid each time would thrash layout for no reason.
+    const frag = document.createDocumentFragment();
     el.resultsTitle.textContent = "Результаты";
+    if (ndCandidates.length) prefetchTopNewdeafPage(ndCandidates);
     // newdeaf first and prioritized: when a title is in both sources, the ad-free
     // Ortified path (newdeaf, with the embedded season/episode player) is the
     // preferred choice, so it leads the grid — same ordering as the old MVP.
@@ -822,7 +924,7 @@
         bookmark: { target, details },
         onClick: () => go(`/watch/nd/${encodeURIComponent(item.url)}`),
       });
-      el.resultsGrid.appendChild(card);
+      frag.appendChild(card);
     }
     for (const movie of pkResults) {
       if (movie.kpId == null) continue;
@@ -846,20 +948,21 @@
         bookmark: { target, details },
         onClick: () => go(`/watch/kp/${encodeURIComponent(movie.kpId)}`),
       });
-      el.resultsGrid.appendChild(card);
+      frag.appendChild(card);
     }
     if (options.newdeafUnavailable) {
       const note = document.createElement("p");
       note.className = "muted search-note";
       note.textContent = "Newdeaf не ответил этому браузеру — показаны остальные результаты.";
-      el.resultsGrid.appendChild(note);
+      frag.appendChild(note);
     }
     if (!pkResults.length && !ndCandidates.length) {
       const p = document.createElement("p");
       p.className = "muted";
       p.textContent = `Ничего не найдено по «${query}».`;
-      el.resultsGrid.appendChild(p);
+      frag.appendChild(p);
     }
+    el.resultsGrid.replaceChildren(frag);
     layoutMobileGrid(el.resultsGrid);
   }
 
@@ -887,6 +990,7 @@
       const img = document.createElement("img");
       img.className = "poster";
       img.loading = "lazy";
+      img.decoding = "async";
       img.src = imageUrl;
       img.alt = "";
       img.addEventListener("error", () => { img.replaceWith(blankPoster()); });
@@ -1018,6 +1122,17 @@
 
     const resolved = await resolveZona(kpId);
     if (isStale(token)) return;
+    if (resolved.zenithId) {
+      cacheSet("curatedmeta", `zen:${resolved.zenithId}`, {
+        ...(meta || {}),
+        title: target.title,
+        poster: target.poster,
+        year: target.year,
+        isSeries: target.isSeries,
+        kpId,
+      }, TTL.enriched);
+      replaceHash(`/watch/zen/${encodeURIComponent(resolved.zenithId)}`);
+    }
     await playZenithEmbed(resolved.embedUrl, target, token, {
       histKey: `kp:${kpId}`,
       resume: resumePosition(`kp:${kpId}`),
@@ -2706,6 +2821,37 @@ addEventListener('message', async (event) => {
     });
   }
 
+  function warmNewdeafConnections() {
+    for (const origin of unique([dailyMirrorCandidates()[0], "https://newdeaf.co"])) {
+      if (!origin || newdeafWarmOrigins.has(origin)) continue;
+      newdeafWarmOrigins.add(origin);
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = origin;
+      link.crossOrigin = "anonymous";
+      document.head.appendChild(link);
+    }
+  }
+
+  function scheduleIdle(callback, timeout = 2500) {
+    if (typeof requestIdleCallback === "function") {
+      return requestIdleCallback(callback, { timeout });
+    }
+    return setTimeout(callback, Math.min(timeout, 1000));
+  }
+
+  function prefetchTopNewdeafPage(candidates) {
+    const pageUrl = candidates?.[0]?.url;
+    if (!pageUrl || newdeafPagePrefetches.has(pageUrl) || cacheGet("ndpage", pageUrl)) return;
+    newdeafPagePrefetches.add(pageUrl);
+    scheduleIdle(() => {
+      resolveNewdeafPage(pageUrl).catch((error) => {
+        newdeafPagePrefetches.delete(pageUrl);
+        log("newdeaf-prefetch-warn", error.message);
+      });
+    });
+  }
+
   function pageUrlCandidates(pageUrl) {
     const original = new URL(pageUrl);
     if (!/^\d{1,2}[a-z]{3}\.newdeaf\.co$/i.test(original.host)) return [original.href];
@@ -3208,6 +3354,51 @@ addEventListener('message', async (event) => {
     try { return new URL(String(value || "").replace(/&amp;/g, "&"), base).href; }
     catch { return null; }
   }
+  function safeDecode(value) {
+    try { return decodeURIComponent(String(value || "")); }
+    catch { return String(value || ""); }
+  }
+  function legacyHashPath(path) {
+    return `/#${path.startsWith("/") ? path : `/${path}`}`;
+  }
+  function shortOrtifiedPath(embedUrl) {
+    try {
+      const url = new URL(String(embedUrl || ""));
+      const id = url.pathname.match(/^\/embed\/movie\/(\d+)/i)?.[1];
+      if (!/^api\.ortified\.ws$/i.test(url.host) || !id) return "";
+      const season = positiveInt(url.searchParams.get("season"));
+      const episode = positiveInt(url.searchParams.get("episode"));
+      return season && episode ? `/o/${id}/s${season}e${episode}` : `/o/${id}`;
+    } catch {
+      return "";
+    }
+  }
+  function ortifiedUrlFromShort(id, episodeKey) {
+    const url = new URL(`https://api.ortified.ws/embed/movie/${encodeURIComponent(id)}`);
+    const match = String(episodeKey || "").match(/^s(\d+)e(\d+)$/i);
+    if (match) {
+      url.searchParams.set("season", match[1]);
+      url.searchParams.set("episode", match[2]);
+    }
+    return url.href;
+  }
+  function shortNewdeafPath(pageUrl) {
+    try {
+      const url = new URL(String(pageUrl || ""));
+      if (!/(^|\.)newdeaf\.co$/i.test(url.host)) return "";
+      const path = url.pathname.split("/").filter(Boolean).map(safeDecode).join("/").replace(/\.html$/i, "");
+      if (!/^(film|serial|multfilm|anime|multserial|multserialy)\//i.test(path)) return "";
+      return `/n/${path.split("/").map(encodeURIComponent).join("/")}`;
+    } catch {
+      return "";
+    }
+  }
+  function newdeafUrlFromShortPath(parts) {
+    const path = (parts || []).join("/").replace(/^\/+/, "").replace(/\.html$/i, "");
+    if (!/^(film|serial|multfilm|anime|multserial|multserialy)\//i.test(path)) return "";
+    const origin = dailyMirrorCandidates()[0] || "https://newdeaf.co";
+    return `${origin}/${path.split("/").map(encodeURIComponent).join("/")}.html`;
+  }
   function cleanBaseUrl(value) {
     return String(value || "").trim().replace(/\/+$/, "");
   }
@@ -3379,22 +3570,27 @@ addEventListener('message', async (event) => {
       go("/");
     });
     el.searchBtn.addEventListener("click", onSearchSubmit);
+    el.searchInput.addEventListener("focus", warmNewdeafConnections);
     el.searchInput.addEventListener("keydown", (e) => { if (e.key === "Enter") onSearchSubmit(); });
     el.bookmarksToggle.addEventListener("click", () => go("/bookmarks"));
     el.saveResolverBtn.addEventListener("click", saveResolver);
     el.healthBtn.addEventListener("click", () => testResolver());
     window.addEventListener("hashchange", route);
+    window.addEventListener("popstate", route);
     window.addEventListener("storage", (event) => {
       if (event.key !== STORE_BOOKMARKS) return;
       updateBookmarksNav();
       syncBookmarkControls();
-      if (parseHash().view === "bookmarks") showBookmarks();
+      if (parseLocationRoute().view === "bookmarks") showBookmarks();
     });
     window.addEventListener("message", onOrtProgress);
     bindKeyboard();
 
-    // Migrate legacy query-param deep links (?q / ?url / ?kpId / ?zenith) to hash.
-    if (!location.hash) {
+    // Migrate legacy hash/query-param deep links to path routes.
+    if (location.hash) {
+      const legacyPath = location.hash.replace(/^#/, "") || "/";
+      if (parseLegacyHash(location.hash)) replaceHash(legacyPath);
+    } else {
       if (params.get("kpId")) replaceHash(`/watch/kp/${encodeURIComponent(params.get("kpId"))}`);
       else if (params.get("zenith")) replaceHash(`/watch/zen/${encodeURIComponent(params.get("zenith"))}`);
       else if (params.get("url")) {

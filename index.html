@@ -5,16 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <!-- Keep Referer off third-party CDN requests (some segment hosts 404 otherwise). -->
   <meta name="referrer" content="no-referrer">
+  <!-- Warm DNS/TLS to the stable playback embed hosts so click -> play is snappier. -->
+  <link rel="preconnect" href="https://api.ortified.ws" crossorigin>
+  <link rel="preconnect" href="https://api.zenithjs.ws" crossorigin>
   <title>alphy</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260630-shelf2">
+  <link rel="stylesheet" href="/styles.css?v=20260702-links">
   <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.11.17/dist/shaka-player.compiled.js"></script>
 </head>
 <body>
   <div class="container">
     <header>
       <div class="brand">
-        <a class="logo-btn" id="logoBtn" href="/#/" aria-label="На главную">
+        <a class="logo-btn" id="logoBtn" href="/" aria-label="На главную">
           <img class="logo-image" src="/Logo.png" alt="alphy">
         </a>
       </div>
@@ -138,7 +141,7 @@
   </dialog>
 
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
-  <script src="/app.js?v=20260630-shelf2"></script>
-  <script src="/catalog.js?v=20260630-shelf2"></script>
+  <script src="/app.js?v=20260702-links"></script>
+  <script src="/catalog.js?v=20260702-links"></script>
 </body>
 </html>

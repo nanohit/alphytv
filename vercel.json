@@ -4,6 +4,30 @@
     {
       "source": "/curated-live.json",
       "destination": "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/curated.json"
+    },
+    {
+      "source": "/:id(\\d+)",
+      "destination": "/"
+    },
+    {
+      "source": "/k/:id(\\d+)",
+      "destination": "/"
+    },
+    {
+      "source": "/o/:path*",
+      "destination": "/"
+    },
+    {
+      "source": "/n/:path*",
+      "destination": "/"
+    },
+    {
+      "source": "/search/:path*",
+      "destination": "/"
+    },
+    {
+      "source": "/bookmarks",
+      "destination": "/"
     }
   ],
   "headers": [
