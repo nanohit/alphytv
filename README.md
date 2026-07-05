@@ -37,9 +37,12 @@ fresh conservatively:
 
 - every 2 hours it runs a canary against already-published masters, without SOAP
   credentials;
-- if the canary is stale and the catalog is at least `SOAP_MIN_REFRESH_HOURS`
-  old (default 12h), it logs in from GitHub Actions using repository secrets and
-  refreshes the catalog;
+- authenticated scheduled refresh is disabled unless the repository variable
+  `SOAP_AUTO_REFRESH` is set to `true`; manual `force_refresh=true` runs still
+  work. This keeps the paid account from being touched by a broken/stale canary;
+- when enabled, if the canary is stale and the catalog is at least
+  `SOAP_MIN_REFRESH_HOURS` old (default 12h), it logs in from GitHub Actions
+  using repository secrets and refreshes the catalog;
 - refresh order is `>1080p` movies first (the 4K shelf, including 1440p/1600p
   style masters), then the rest of the movie catalog;
 - the workflow commits only `soap-movies.json`; it does not upload cookies,
@@ -50,6 +53,12 @@ Required repository secrets for authenticated refresh:
 ```text
 SOAP_LOGIN
 SOAP_PASSWORD
+```
+
+Optional repository variable:
+
+```text
+SOAP_AUTO_REFRESH=true
 ```
 
 Useful manual runs:
