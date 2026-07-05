@@ -32,6 +32,11 @@ SOAP movie playback is still client-side: visitors fetch `soap-movies.json`, the
 their browser plays the HLS master directly from SOAP's CDN with hls.js. No video
 bytes or SOAP credentials pass through Alphy.
 
+Because SOAP CDN behavior can differ by IP and HTTP context, refreshed runs also
+execute `npm run probe:soap`. The probe checks master playlist, variant playlist,
+and first media segment with bare, `alphy.tv`, and `soap4youand.me` headers, but
+prints only statuses and metadata, never signed URLs.
+
 The HLS masters expire, so `.github/workflows/soap-catalog.yml` keeps the catalog
 fresh conservatively:
 
@@ -67,6 +72,7 @@ Useful manual runs:
 npm run check:soap              # small priority-first canary
 npm run check:soap:priority     # all >1080p masters
 npm run check:soap:all          # every stored master
+npm run probe:soap              # master -> variant -> segment delivery probe
 ```
 
 For a GitHub Actions smoke test, run the `SOAP catalog canary and refresh`

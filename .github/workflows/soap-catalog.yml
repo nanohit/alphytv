@@ -57,6 +57,7 @@ jobs:
         run: |
           node --check scripts/check-soap-catalog.mjs
           python3 -m py_compile scripts/check-soap-catalog.py
+          python3 -m py_compile scripts/probe-soap-delivery.py
           python3 -m py_compile scripts/soap-refresh-catalog.py
 
       - name: Canary current catalog
@@ -123,6 +124,14 @@ jobs:
             unset SOAP_LIMIT
           fi
           python3 scripts/soap-refresh-catalog.py --scope "$SOAP_REFRESH_SCOPE"
+
+      - name: Probe refreshed SOAP delivery
+        if: steps.decision.outputs.refresh == 'true'
+        continue-on-error: true
+        env:
+          SOAP_PROBE_SCOPE: priority
+          SOAP_PROBE_LIMIT: ${{ steps.decision.outputs.limit || '3' }}
+        run: npm run probe:soap
 
       - name: Validate refreshed priority catalog
         if: steps.decision.outputs.refresh == 'true'
