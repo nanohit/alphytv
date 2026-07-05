@@ -32,6 +32,11 @@ async function checkMovie(movie) {
     const response = await fetch(movie.m, {
       cache: "no-store",
       credentials: "omit",
+      headers: {
+        "accept": "application/vnd.apple.mpegurl, application/x-mpegURL, text/plain, */*",
+        "accept-encoding": "identity",
+        "user-agent": "Mozilla/5.0 (compatible; AlphyCatalogCheck/1.0)",
+      },
       mode: "cors",
       referrerPolicy: "no-referrer",
       signal: controller.signal,
