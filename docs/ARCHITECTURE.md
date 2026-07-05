@@ -198,8 +198,10 @@ direct durable playback target available:
 - Gencit/Opravar player URL plus Newdeaf page URL;
 - `kpId` or Newdeaf URL only as a fallback.
 
-Signed media manifests are never stored because they expire. No video bytes go
-through Vercel, Blob, or Deno.
+Provider media URLs are generally avoided in curated targets because they
+expire. SOAP movies are the explicit exception: `soap-movies.json` ships
+rotating HLS masters and must be refreshed when they go stale. No video bytes
+go through Vercel, Blob, or Deno.
 
 ## Backend Scope
 
@@ -213,6 +215,15 @@ The Worker is intentionally narrow:
 
 It does not proxy video segments, manifests, MP4, M4S, TS, or images.
 
+SOAP movie playback is a static-frontend path: `soap-movies.json` stores movie
+ids plus HLS master URLs, and the browser plays those masters directly with
+hls.js. The masters are signed/rotating provider URLs, so the catalog must be
+refreshed before deployment when `npm run check:soap` reports expired manifests.
+The GitHub Actions workflow `.github/workflows/soap-catalog.yml` first checks a
+credential-free canary, then runs an authenticated refresh only after expiry and
+cooldown. Refresh order is all `>1080p` movies first, then the rest of the movie
+catalog.
+
 The curated admin system is deliberately outside Deno. Homepage reads are Blob
 CDN reads; catalog Functions run only while an admin signs in or saves.
 
@@ -224,5 +235,3 @@ integration:
 - input: title, Newdeaf URL, Ortified URL, Zenith URL, or `kpId`;
 - output: provider decision, playback iframe/video element, diagnostics report;
 - config: resolver Worker URL.
-
-SOAP/HDRezka code is intentionally not included in this repo.

@@ -6,8 +6,10 @@ Lightweight static MVP for the current playback flow:
 2. Use Newdeaf -> Ortified Cleanroom when the page exposes `api.ortified.ws`.
 3. Use Newdeaf -> Gencit/Opravar -> Werberk HLS when that is the only player.
 4. Otherwise fall back to Zona -> Zenith.
-5. Play Opravar and Zenith streams in a local Shaka player.
-6. Serve admin-curated homepage lists as one public JSON snapshot from Vercel
+5. Use the static SOAP movie catalog (`/m/:id`) for direct HLS movie playback
+   when a fresh `soap-movies.json` is shipped.
+6. Play Opravar and Zenith streams in Shaka; play SOAP movies in hls.js.
+7. Serve admin-curated homepage lists as one public JSON snapshot from Vercel
    Blob CDN.
 
 The Vercel app remains static. The included Cloudflare Worker only resolves
@@ -19,9 +21,49 @@ metadata and IDs; it does not proxy video bytes.
 - `api/admin/*` - admin-only authentication and catalog writes.
 - `curated-config.json` - public Blob URL; visitors read the snapshot directly
   from Blob CDN and do not invoke a Function or Deno.
+- `soap-movies.json` - static SOAP movie catalog. Its HLS master URLs expire;
+  run `npm run check:soap` before relying on the shipped catalog.
 - `worker/` - resolver source for PoiskKino, `kpId -> Zenith`, and Opravar
   control-plane resolution.
-- No legacy SOAP frontend code is included here.
+
+## SOAP Movie Catalog
+
+SOAP movie playback is still client-side: visitors fetch `soap-movies.json`, then
+their browser plays the HLS master directly from SOAP's CDN with hls.js. No video
+bytes or SOAP credentials pass through Alphy.
+
+The HLS masters expire, so `.github/workflows/soap-catalog.yml` keeps the catalog
+fresh conservatively:
+
+- every 2 hours it runs a canary against already-published masters, without SOAP
+  credentials;
+- if the canary is stale and the catalog is at least `SOAP_MIN_REFRESH_HOURS`
+  old (default 12h), it logs in from GitHub Actions using repository secrets and
+  refreshes the catalog;
+- refresh order is `>1080p` movies first (the 4K shelf, including 1440p/1600p
+  style masters), then the rest of the movie catalog;
+- the workflow commits only `soap-movies.json`; it does not upload cookies,
+  HTML dumps, passwords, account tokens, or raw scraper artifacts.
+
+Required repository secrets for authenticated refresh:
+
+```text
+SOAP_LOGIN
+SOAP_PASSWORD
+```
+
+Useful manual runs:
+
+```bash
+npm run check:soap              # small priority-first canary
+npm run check:soap:priority     # all >1080p masters
+npm run check:soap:all          # every stored master
+```
+
+For a GitHub Actions smoke test, run the `SOAP catalog canary and refresh`
+workflow manually with `force_refresh=true`, `scope=priority`, and a small
+`limit` such as `5`. For production refresh, leave `limit` empty and use
+`scope=full`.
 
 ## Frontend
 

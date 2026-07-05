@@ -84,6 +84,9 @@
       return { kind, playerUrl: String(value.playerUrl), pageUrl: String(value.pageUrl || "") };
     }
     if (kind === "nd" && value?.pageUrl) return { kind, pageUrl: String(value.pageUrl) };
+    if (kind === "soap" && /^\d+$/.test(String(value?.soapId || ""))) {
+      return { kind, soapId: String(value.soapId) };
+    }
     return null;
   }
 
@@ -889,6 +892,7 @@
     render,
     isAdmin: () => state.admin,
     getCatalog: () => JSON.parse(JSON.stringify(state.catalog)),
+    addToList: (item) => openPicker(item),
   };
 
   init();

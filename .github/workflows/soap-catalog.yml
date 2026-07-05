@@ -1,0 +1,168 @@
+name: SOAP catalog canary and refresh
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: "Refresh even if the current canary is healthy"
+        required: false
+        type: boolean
+        default: false
+      scope:
+        description: "Refresh scope"
+        required: false
+        type: choice
+        default: full
+        options:
+          - full
+          - priority
+      limit:
+        description: "Optional movie limit for a test run (empty = no limit)"
+        required: false
+        type: string
+        default: ""
+  schedule:
+    # Frequent canary, rare authenticated refresh. The canary does not use SOAP
+    # credentials; it only checks already-published HLS masters.
+    - cron: "17 */2 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: soap-catalog-refresh
+  cancel-in-progress: false
+
+jobs:
+  canary-refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SOAP_MIN_REFRESH_HOURS: "12"
+      SOAP_DELAY: "0.9"
+      SOAP_SAVE_EVERY: "50"
+      SOAP_CHECK_TIMEOUT_MS: "9000"
+      SOAP_CHECK_CONCURRENCY: "4"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Static script checks
+        run: |
+          node --check scripts/check-soap-catalog.mjs
+          python3 -m py_compile scripts/soap-refresh-catalog.py
+
+      - name: Canary current catalog
+        id: canary
+        continue-on-error: true
+        env:
+          SOAP_CHECK_SCOPE: sample
+          SOAP_CHECK_LIMIT: "24"
+          SOAP_CHECK_MIN_OK_RATIO: "1"
+        run: npm run check:soap
+
+      - name: Decide whether refresh is allowed
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          FORCE="${{ github.event.inputs.force_refresh || 'false' }}"
+          SCOPE="${{ github.event.inputs.scope || 'full' }}"
+          LIMIT="${{ github.event.inputs.limit || '' }}"
+
+          GENERATED="$(node -e "const fs=require('fs');let j={};try{j=JSON.parse(fs.readFileSync('soap-movies.json','utf8'))}catch{};process.stdout.write(String(j.generated||0))")"
+          NOW="$(date +%s)"
+          AGE_SECONDS=$(( NOW - GENERATED ))
+          MIN_SECONDS=$(( ${SOAP_MIN_REFRESH_HOURS:-12} * 3600 ))
+          CANARY="${{ steps.canary.outcome }}"
+
+          REFRESH="false"
+          REASON="canary healthy"
+          if [ "$FORCE" = "true" ]; then
+            REFRESH="true"
+            REASON="manual force"
+          elif [ "$CANARY" != "success" ]; then
+            if [ "$GENERATED" = "0" ] || [ "$AGE_SECONDS" -ge "$MIN_SECONDS" ]; then
+              REFRESH="true"
+              REASON="canary stale and cooldown elapsed"
+            else
+              REASON="canary stale but cooldown active (${AGE_SECONDS}s < ${MIN_SECONDS}s)"
+            fi
+          fi
+
+          echo "refresh=$REFRESH" >> "$GITHUB_OUTPUT"
+          echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
+          echo "limit=$LIMIT" >> "$GITHUB_OUTPUT"
+          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+          echo "generated=$GENERATED age_seconds=$AGE_SECONDS canary=$CANARY refresh=$REFRESH scope=$SCOPE reason=$REASON"
+
+      - name: Refresh SOAP catalog
+        if: steps.decision.outputs.refresh == 'true'
+        env:
+          SOAP_LOGIN: ${{ secrets.SOAP_LOGIN }}
+          SOAP_PASSWORD: ${{ secrets.SOAP_PASSWORD }}
+          SOAP_REFRESH_SCOPE: ${{ steps.decision.outputs.scope }}
+          SOAP_LIMIT: ${{ steps.decision.outputs.limit }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SOAP_LOGIN:-}" ] || [ -z "${SOAP_PASSWORD:-}" ]; then
+            echo "::error::Set SOAP_LOGIN and SOAP_PASSWORD repository secrets before running a refresh."
+            exit 1
+          fi
+          if [ -z "${SOAP_LIMIT:-}" ]; then
+            unset SOAP_LIMIT
+          fi
+          python3 scripts/soap-refresh-catalog.py --scope "$SOAP_REFRESH_SCOPE"
+
+      - name: Validate refreshed priority catalog
+        if: steps.decision.outputs.refresh == 'true'
+        env:
+          SOAP_CHECK_SCOPE: priority
+          SOAP_CHECK_LIMIT: "0"
+          SOAP_CHECK_MIN_OK_RATIO: "0.98"
+        run: npm run check:soap
+
+      - name: Validate refreshed sample
+        if: steps.decision.outputs.refresh == 'true'
+        env:
+          SOAP_CHECK_SCOPE: sample
+          SOAP_CHECK_LIMIT: "80"
+          SOAP_CHECK_MIN_OK_RATIO: "0.98"
+        run: npm run check:soap
+
+      - name: Setup Deno
+        if: steps.decision.outputs.refresh == 'true'
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: App checks
+        if: steps.decision.outputs.refresh == 'true'
+        run: |
+          npm run check
+          npm test
+
+      - name: Commit refreshed catalog
+        if: steps.decision.outputs.refresh == 'true'
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- soap-movies.json; then
+            echo "soap-movies.json unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add soap-movies.json
+          git commit -m "Refresh SOAP movie catalog"
+          git push
+
+      - name: No refresh summary
+        if: steps.decision.outputs.refresh != 'true'
+        run: |
+          echo "No authenticated refresh was run: ${{ steps.decision.outputs.reason }}"

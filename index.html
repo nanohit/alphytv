@@ -8,10 +8,14 @@
   <!-- Warm DNS/TLS to the stable playback embed hosts so click -> play is snappier. -->
   <link rel="preconnect" href="https://api.ortified.ws" crossorigin>
   <link rel="preconnect" href="https://api.zenithjs.ws" crossorigin>
+  <link rel="preconnect" href="https://cdn-r11.soap4youand.me" crossorigin>
+  <link rel="preconnect" href="https://soap4youand.me" crossorigin>
   <title>alphy</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260702-links">
+  <link rel="stylesheet" href="/styles.css?v=20260704-soap-hls">
   <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.11.17/dist/shaka-player.compiled.js"></script>
+  <!-- hls.js plays soap's demuxed TS HLS (Shaka's transmuxer mishandles it). -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
 </head>
 <body>
   <div class="container">
@@ -59,6 +63,7 @@
           <span id="catalogState" class="catalog-state"></span>
           <div id="adminCatalogActions" class="admin-catalog-actions hidden">
             <button id="createListBtn" type="button">+ список</button>
+            <button id="soapBrowseBtn" type="button">🎬 soap</button>
             <button id="saveCatalogBtn" type="button">Сохранить</button>
           </div>
         </div>
@@ -87,6 +92,18 @@
     <section id="searchView" class="view hidden">
       <h2 id="resultsTitle" class="results-title">Результаты</h2>
       <div id="resultsGrid" class="card-grid"></div>
+    </section>
+
+    <!-- SOAP ADMIN BROWSER -->
+    <section id="soapView" class="view hidden">
+      <div class="soap-head">
+        <h2 class="results-title">Фильмы soap <span id="soapCount" class="continue-count">0</span></h2>
+        <div class="soap-controls">
+          <input type="text" id="soapFilter" spellcheck="false" autocomplete="off" placeholder="Фильтр по названию">
+          <button id="soapToggle" type="button">Показать все</button>
+        </div>
+      </div>
+      <div id="soapGrid" class="card-grid"></div>
     </section>
 
     <!-- WATCH -->
@@ -141,7 +158,7 @@
   </dialog>
 
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
-  <script src="/app.js?v=20260702-links"></script>
-  <script src="/catalog.js?v=20260702-links"></script>
+  <script src="/app.js?v=20260704-soap-hls"></script>
+  <script src="/catalog.js?v=20260704-soap-hls"></script>
 </body>
 </html>

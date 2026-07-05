@@ -18,6 +18,7 @@
   // Older builds cached a transient empty Newdeaf result for six hours. Keep
   // this namespace versioned so those false misses cannot survive an upgrade.
   const ND_SEARCH_CACHE_NS = "ndsearch.v2";
+  const SOAP_CDN_ORIGIN = "https://cdn-r11.soap4youand.me";
   const TTL = {
     search: 6 * 3600e3,
     ndsearch: 6 * 3600e3,
@@ -64,6 +65,12 @@
     searchView: document.getElementById("searchView"),
     resultsTitle: document.getElementById("resultsTitle"),
     resultsGrid: document.getElementById("resultsGrid"),
+    soapView: document.getElementById("soapView"),
+    soapFilter: document.getElementById("soapFilter"),
+    soapToggle: document.getElementById("soapToggle"),
+    soapCount: document.getElementById("soapCount"),
+    soapGrid: document.getElementById("soapGrid"),
+    soapBrowseBtn: document.getElementById("soapBrowseBtn"),
     watchView: document.getElementById("watchView"),
     watchTitle: document.getElementById("watchTitle"),
     playerHost: document.getElementById("playerHost"),
@@ -78,6 +85,7 @@
     resolverBaseUrl: "",
     playerPlaceholder: "",
     player: null,
+    hls: null,
     videoEl: null,
     currentTarget: null,
     audioNames: [],
@@ -115,6 +123,8 @@
   const newdeafWarmOrigins = new Set();
   const newdeafPagePrefetches = new Set();
   const newdeafPageInflight = new Map();
+  const soapWarmOrigins = new Set();
+  const soapManifestPrefetches = new Set();
 
   // =====================================================================
   // localStorage: TTL cache + bookmarks + history
@@ -156,6 +166,94 @@
     }
   }
 
+  // =====================================================================
+  // soap4you static movie catalog. All 1212 titles + their HLS master URLs
+  // are shipped as one static JSON — playback hits soap's CDN directly
+  // (account-free), so browsing/search/lists need no backend at all.
+  // =====================================================================
+  const soapMovies = new Map();   // id -> { id, t, q, w, m, a, s }
+  let soapMoviesList = [];
+  let soapCatalogLoaded = null;
+  function soapPoster(id) {
+    return `https://soap4youand.me/assets/covers/movies/${encodeURIComponent(id)}.jpg`;
+  }
+  function loadSoapCatalog() {
+    if (soapCatalogLoaded) return soapCatalogLoaded;
+    soapCatalogLoaded = fetch("/soap-movies.json")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        soapMoviesList = (data && data.movies) || [];
+        soapMovies.clear();
+        for (const m of soapMoviesList) soapMovies.set(String(m.id), m);
+        warmSoapConnections(soapMoviesList[0]?.m);
+        return soapMoviesList;
+      })
+      .catch(() => {
+        soapCatalogLoaded = null; // allow a later retry
+        return [];
+      });
+    return soapCatalogLoaded;
+  }
+  function soapSearch(query, { fourKOnly = false, limit = 0 } = {}) {
+    const q = String(query || "").trim().toLowerCase();
+    let list = fourKOnly ? soapMoviesList.filter((m) => m.q === "4K") : soapMoviesList;
+    if (q) list = list.filter((m) => String(m.t || "").toLowerCase().includes(q));
+    list = [...list].sort((a, b) => String(a.t).localeCompare(String(b.t)));
+    return limit ? list.slice(0, limit) : list;
+  }
+  function soapQualityLabel(m) {
+    return m.q === "4K" ? "4K UHD" : m.q === "720" ? "720p" : `${m.q}p`;
+  }
+  // Curated-list item shape (matches catalog.js normalizeItem) for a soap movie.
+  function soapListItem(m) {
+    return {
+      id: crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+      key: `soap:${m.id}`,
+      title: m.t,
+      year: "",
+      poster: soapPoster(m.id),
+      isSeries: false,
+      target: { kind: "soap", soapId: String(m.id) },
+      cachedAt: new Date().toISOString(),
+    };
+  }
+
+  // Admin-only browser over the whole soap catalog: filter by name, toggle
+  // 4K-only, click to play, "+" to add to a curated list. Pure client-side.
+  async function showSoapBrowser() {
+    setView("soap");
+    warmSoapConnections();
+    document.title = "soap — alphy";
+    if (el.soapFilter) el.soapFilter.value = "";
+    if (state.soapFourKOnly == null) state.soapFourKOnly = true;
+    await loadSoapCatalog();
+    renderSoapBrowser();
+    el.soapFilter?.focus();
+  }
+  function renderSoapBrowser() {
+    if (!el.soapGrid) return;
+    const fourK = state.soapFourKOnly !== false;
+    const list = soapSearch(el.soapFilter?.value || "", { fourKOnly: fourK });
+    if (list.length) prefetchTopSoapManifest(list);
+    if (el.soapToggle) el.soapToggle.textContent = fourK ? "Показать все" : "Только 4K";
+    if (el.soapCount) el.soapCount.textContent = String(list.length);
+    const frag = document.createDocumentFragment();
+    for (const m of list) {
+      const target = { kind: "soap", soapId: String(m.id) };
+      const card = makeCard({
+        title: m.t,
+        sub: soapQualityLabel(m),
+        poster: soapPoster(m.id),
+        bookmark: { target, details: { title: m.t, poster: soapPoster(m.id), year: "" } },
+        onClick: () => go(`/m/${m.id}`),
+        onAdd: () => window.alphyCatalog?.addToList?.(soapListItem(m)),
+      });
+      frag.appendChild(card);
+    }
+    el.soapGrid.replaceChildren(frag);
+    layoutMobileGrid(el.soapGrid);
+  }
+
   function keyFor(t) {
     if (!t) return "x";
     if (t.key) return t.key;
@@ -164,6 +262,7 @@
     if (t.kind === "ort") return `ort:${t.embedUrl}`;
     if (t.kind === "opr") return `opr:${t.playerUrl}`;
     if (t.kind === "nd") return `nd:${t.pageUrl}`;
+    if (t.kind === "soap") return `soap:${t.soapId}`;
     return "x";
   }
   function cleanTarget(t) {
@@ -172,6 +271,7 @@
     if (t.kind === "ort") return { kind: "ort", embedUrl: t.embedUrl };
     if (t.kind === "opr") return { kind: "opr", playerUrl: t.playerUrl, pageUrl: t.pageUrl || "" };
     if (t.kind === "nd") return { kind: "nd", pageUrl: t.pageUrl };
+    if (t.kind === "soap") return { kind: "soap", soapId: String(t.soapId) };
     return t;
   }
   function hashFor(t) {
@@ -180,6 +280,7 @@
     if (t.kind === "ort") return shortOrtifiedPath(t.embedUrl) || legacyHashPath(`/watch/ort/${encodeURIComponent(t.embedUrl)}`);
     if (t.kind === "opr") return legacyHashPath(`/watch/opr/${encodeURIComponent(t.playerUrl)}`);
     if (t.kind === "nd") return shortNewdeafPath(t.pageUrl) || legacyHashPath(`/watch/nd/${encodeURIComponent(t.pageUrl)}`);
+    if (t.kind === "soap") return `/m/${encodeURIComponent(t.soapId)}`;
     return "/";
   }
 
@@ -543,6 +644,7 @@
     if (segs[0] === "watch") return { view: "watch", kind: segs[1], raw: segs.slice(2).join("/") || "" };
     if (/^\d+$/.test(segs[0])) return { view: "watch", kind: "zen", raw: segs[0] };
     if (segs[0] === "k" && /^\d+$/.test(segs[1] || "")) return { view: "watch", kind: "kp", raw: segs[1] };
+    if (segs[0] === "m" && /^\d+$/.test(segs[1] || "")) return { view: "watch", kind: "soap", raw: segs[1] };
     if (segs[0] === "o" && /^\d+$/.test(segs[1] || "")) {
       return { view: "watch", kind: "ort", raw: ortifiedUrlFromShort(segs[1], segs[2]) };
     }
@@ -574,6 +676,7 @@
     if (route.kind === "ort") return { kind: "ort", embedUrl: route.raw };
     if (route.kind === "opr") return { kind: "opr", playerUrl: route.raw };
     if (route.kind === "nd") return { kind: "nd", pageUrl: route.raw };
+    if (route.kind === "soap") return { kind: "soap", soapId: route.raw };
     return null;
   }
 
@@ -617,6 +720,7 @@
     el.homeView.classList.toggle("hidden", name !== "home");
     el.bookmarksView.classList.toggle("hidden", name !== "bookmarks");
     el.searchView.classList.toggle("hidden", name !== "search");
+    el.soapView?.classList.toggle("hidden", name !== "soap");
     el.watchView.classList.toggle("hidden", name !== "watch");
     el.bookmarksToggle.classList.toggle("active", name === "bookmarks");
     window.dispatchEvent(new CustomEvent("alphy:view", { detail: { view: name } }));
@@ -821,11 +925,13 @@
   async function showSearch(query, token) {
     setView("search");
     warmNewdeafConnections();
+    warmSoapConnections();
     document.title = `${query} — alphy`;
     el.searchInput.value = query;
     el.resultsTitle.textContent = "Поиск…";
     el.resultsGrid.replaceChildren();
 
+    const soapTask = loadSoapCatalog();
     const poiskTask = searchPoiskkino(query)
       .then((results) => ({ results }))
       .catch((error) => {
@@ -881,8 +987,12 @@
       }
     }
     if (isStale(token)) return;
+    await soapTask;
+    if (isStale(token)) return;
     renderResults(nd, pk, query, { newdeafUnavailable });
-    if (!pk.length && !nd.length) el.resultsTitle.textContent = "Ничего не найдено";
+    if (!pk.length && !nd.length && !soapSearch(query, { limit: 1 }).length) {
+      el.resultsTitle.textContent = "Ничего не найдено";
+    }
   }
 
   function pickNewdeafQuery(query, pkResults) {
@@ -950,13 +1060,31 @@
       });
       frag.appendChild(card);
     }
+    // soap4you as a fallback source (client-side static catalog, account-free
+    // playback). Titles are mostly English, so this mainly surfaces on Latin
+    // queries; ranked last since Ortified/Zona are preferred when present.
+    const soapHits = soapSearch(query, { limit: 12 });
+    if (soapHits.length) prefetchTopSoapManifest(soapHits);
+    for (const m of soapHits) {
+      const target = { kind: "soap", soapId: String(m.id) };
+      const details = { title: m.t, poster: soapPoster(m.id), year: "" };
+      const card = makeCard({
+        title: m.t,
+        sub: [soapQualityLabel(m), "soap"].filter(Boolean).join(" · "),
+        poster: soapPoster(m.id),
+        bookmark: { target, details },
+        onClick: () => go(`/m/${m.id}`),
+        onAdd: () => window.alphyCatalog?.addToList?.(soapListItem(m)),
+      });
+      frag.appendChild(card);
+    }
     if (options.newdeafUnavailable) {
       const note = document.createElement("p");
       note.className = "muted search-note";
       note.textContent = "Newdeaf не ответил этому браузеру — показаны остальные результаты.";
       frag.appendChild(note);
     }
-    if (!pkResults.length && !ndCandidates.length) {
+    if (!pkResults.length && !ndCandidates.length && !soapHits.length) {
       const p = document.createElement("p");
       p.className = "muted";
       p.textContent = `Ничего не найдено по «${query}».`;
@@ -978,6 +1106,7 @@
     onBookmarkChange,
     onClick,
     onRemove,
+    onAdd,
   }) {
     const card = document.createElement("article");
     card.className = "card";
@@ -1024,6 +1153,16 @@
     media.appendChild(hover);
     if (bookmark?.target) {
       addCardBookmark(media, bookmark.target, bookmark.details, onBookmarkChange);
+    }
+    if (onAdd) {
+      // Admin-only "add to curated list" affordance (hidden unless body.admin-mode).
+      const add = document.createElement("button");
+      add.className = "card-add-list";
+      add.type = "button";
+      add.setAttribute("aria-label", "Добавить в подборку");
+      add.textContent = "+";
+      add.addEventListener("click", (event) => { event.stopPropagation(); onAdd(); });
+      media.appendChild(add);
     }
     if (onRemove) {
       const x = document.createElement("button");
@@ -1097,7 +1236,352 @@
     if (r.kind === "ort") return playOrt(r.raw, token, null);
     if (r.kind === "opr") return playOpr(r.raw, token, null);
     if (r.kind === "nd") return playNd(r.raw, token);
+    if (r.kind === "soap") return playSoap(r.raw, token);
     throw new Error("Неизвестный тип контента");
+  }
+
+  // soap4you movie playback is a plain HLS master with adaptive video, audio
+  // tracks, and in-manifest subtitles. The stored URL is account-free once fresh:
+  // no resolver, no backend, no soap session during playback.
+  async function playSoap(soapId, token) {
+    await loadSoapCatalog();
+    if (isStale(token)) return;
+    const movie = soapMovies.get(String(soapId));
+    if (movie?.m) warmSoapConnections(movie.m);
+    const cachedMeta = cacheGet("curatedmeta", `soap:${soapId}`) || storedMeta(`soap:${soapId}`);
+    const title = movie?.t || cachedMeta?.title || `Movie ${soapId}`;
+    const target = {
+      kind: "soap",
+      soapId: String(soapId),
+      title,
+      poster: cachedMeta?.poster || soapPoster(soapId),
+      year: cachedMeta?.year || "",
+      isSeries: false,
+    };
+    state.currentTarget = target;
+    setWatchHead(title, target);
+    renderMeta(
+      {
+        title,
+        poster: target.poster,
+        year: target.year,
+        description: cachedMeta?.description || "",
+        rating: cachedMeta?.rating || {},
+        movieLength: cachedMeta?.movieLength || null,
+      },
+      target,
+    );
+    recordOpen(target);
+    if (!movie || !movie.m) throw new Error("Фильм отсутствует в каталоге soap");
+    // soap serves demuxed TS HLS which Shaka's transmuxer mishandles (Firefox
+    // audio-decode errors, Chrome/Safari black HEVC video). hls.js is the proven
+    // player for exactly this — same one soap's own player.js uses.
+    await playSoapHls(movie.m, token, {
+      resume: resumePosition(keyFor(target)),
+      audioLang: savedAudioLang(keyFor(target)),
+    });
+    if (isStale(token)) return;
+    startTracking(keyFor(target), target);
+  }
+
+  // Prefer H.264 (avc1) ladder; HEVC-in-TS via MSE renders black in Chrome, and
+  // every sampled soap 4K title has a full avc1 ladder, so avc1 covers all resolutions.
+  function soapAvcLevels(hls) {
+    return (hls.levels || [])
+      .map((l, i) => ({ ...l, _i: i }))
+      .filter((l) => !/hvc1|hev1|hevc/i.test(l.videoCodec || ""))
+      .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bitrate || 0) - (a.bitrate || 0));
+  }
+  function removeSoapHevcLevels(hls) {
+    const levels = hls.levels || [];
+    for (let i = levels.length - 1; i >= 0; i -= 1) {
+      if (/hvc1|hev1|hevc/i.test(levels[i]?.videoCodec || "")) {
+        try { hls.removeLevel(i); } catch (error) { log("soap-hevc-filter-warn", error.message); }
+      }
+    }
+  }
+  function soapAudioName(t, i) {
+    return t?.name || t?.label || t?.lang || t?.language || `Дорожка ${i + 1}`;
+  }
+  function soapActiveAudioLang() {
+    const hls = state.hls;
+    const track = hls?.audioTracks?.[hls.audioTrack];
+    return track?.lang || track?.name || track?.label || "";
+  }
+  function soapAutoQualityLabel(hls) {
+    const index = hls?.loadLevel >= 0 ? hls.loadLevel : hls?.nextLevel >= 0 ? hls.nextLevel : hls?.currentLevel;
+    const level = index >= 0 ? hls.levels?.[index] : null;
+    return level?.height ? `Авто (${level.height}p)` : "Авто";
+  }
+  function soapHlsConfig() {
+    return {
+      enableWorker: true,
+      lowLatencyMode: false,
+      startLevel: -1,
+      testBandwidth: true,
+      capLevelToPlayerSize: true,
+      capLevelOnFPSDrop: true,
+      maxDevicePixelRatio: 2,
+      maxBufferLength: 45,
+      maxMaxBufferLength: 90,
+      backBufferLength: 60,
+      abrEwmaFastVoD: 3,
+      abrEwmaSlowVoD: 9,
+      abrEwmaDefaultEstimate: 5_000_000,
+      abrEwmaDefaultEstimateMax: 12_000_000,
+      abrBandWidthFactor: 0.88,
+      abrBandWidthUpFactor: 0.68,
+      maxStarvationDelay: 4,
+      maxLoadingDelay: 4,
+      manifestLoadingTimeOut: 12_000,
+      levelLoadingTimeOut: 12_000,
+      fragLoadingTimeOut: 25_000,
+      manifestLoadingMaxRetry: 2,
+      levelLoadingMaxRetry: 3,
+      fragLoadingMaxRetry: 4,
+      manifestLoadingRetryDelay: 700,
+      levelLoadingRetryDelay: 700,
+      fragLoadingRetryDelay: 700,
+      manifestLoadingMaxRetryTimeout: 5_000,
+      levelLoadingMaxRetryTimeout: 8_000,
+      fragLoadingMaxRetryTimeout: 8_000,
+      appendErrorMaxRetry: 4,
+      preserveManualLevelOnError: false,
+    };
+  }
+  function isExpiredSoapHlsError(data) {
+    const code = Number(data?.response?.code || data?.response?.status || data?.networkDetails?.status || 0);
+    const details = String(data?.details || "");
+    return code === 404 && /manifest|level|playlist/i.test(details);
+  }
+  function isSoapManifestHlsError(data) {
+    return /manifest/i.test(String(data?.details || ""));
+  }
+  function soapHlsErrorMessage(data) {
+    if (isExpiredSoapHlsError(data)) {
+      return "SOAP master URL протух. Нужно обновить soap-movies.json свежим дампом.";
+    }
+    const code = data?.response?.code || data?.response?.status || data?.networkDetails?.status || "";
+    if (isSoapManifestHlsError(data)) {
+      return `SOAP master URL не загрузился${code ? ` (${code})` : ""}. Проверь свежесть soap-movies.json.`;
+    }
+    return `HLS: ${data?.details || data?.type || "fatal"}${code ? ` (${code})` : ""}`;
+  }
+
+  async function playSoapHls(url, token, opts = {}) {
+    if (isStale(token)) return;
+    await teardownPlayer();
+    resetSubtitleRequest();
+    const video = document.createElement("video");
+    video.controls = true;
+    video.playsInline = true;
+    video.autoplay = true;
+    video.crossOrigin = "anonymous";
+    video.playbackRate = state.playbackRate;
+    if (isStale(token)) return;
+    el.playerHost.replaceChildren(video);
+    state.videoEl = video;
+
+    const onReady = () => {
+      if (isStale(token)) return;
+      if (opts.resume > 5) { try { video.currentTime = opts.resume; } catch { /* ignore */ } }
+      video.playbackRate = state.playbackRate;
+      renderSoapTracks();
+      markPlayerReady();
+      const snap = () => {
+        const target = state.currentTarget;
+        if (target) setTimeout(() => captureVideoSnapshot(keyFor(target), target), 350);
+      };
+      video.addEventListener("loadeddata", snap, { once: true });
+      video.addEventListener("playing", snap);
+      video.addEventListener("pause", snap);
+      video.addEventListener("seeked", snap);
+      setTimeout(snap, 2200);
+      video.play().catch(() => { /* gesture may be required */ });
+    };
+
+    // hls.js (Chrome/Firefox/desktop Safari via MSE) — full custom track UI.
+    if (window.Hls && window.Hls.isSupported()) {
+      const hls = new Hls(soapHlsConfig());
+      let networkRecoveries = 0;
+      let mediaRecoveries = 0;
+      state.hls = hls;
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (isStale(token)) return;
+        removeSoapHevcLevels(hls);
+        hls.currentLevel = -1;
+        hls.loadLevel = -1;
+        hls.nextLevel = -1;
+        if (opts.audioLang && (hls.audioTracks || []).length) {
+          const want = String(opts.audioLang).toLowerCase();
+          const idx = hls.audioTracks.findIndex((t) => String(t.lang || t.name || "").toLowerCase().startsWith(want));
+          if (idx >= 0) {
+            if ("nextAudioTrack" in hls) hls.nextAudioTrack = idx;
+            hls.audioTrack = idx;
+          }
+        }
+        hls.subtitleDisplay = false;
+        hls.subtitleTrack = -1;
+        onReady();
+      });
+      hls.on(Hls.Events.LEVELS_UPDATED, renderSoapTracks);
+      hls.on(Hls.Events.LEVEL_SWITCHED, renderSoapTracks);
+      hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, renderSoapTracks);
+      hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, renderSoapTracks);
+      hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, renderSoapTracks);
+      hls.on(Hls.Events.SUBTITLE_TRACK_SWITCHED, renderSoapTracks);
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (!data?.fatal) return;
+        log("soap-hls-error", data.type, data.details);
+        if (isExpiredSoapHlsError(data) || isSoapManifestHlsError(data)) {
+          if (!isStale(token)) showError(new Error(soapHlsErrorMessage(data)));
+          return;
+        }
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries < 3) {
+          networkRecoveries += 1;
+          setTimeout(() => { if (!isStale(token)) hls.startLoad(-1); }, networkRecoveries * 650);
+          return;
+        }
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveries < 2) {
+          mediaRecoveries += 1;
+          hls.recoverMediaError();
+          return;
+        }
+        if (!isStale(token)) showError(new Error(soapHlsErrorMessage(data)));
+      });
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      return;
+    }
+
+    // Native HLS (iOS Safari, no MSE) — plays demuxed TS directly; the media
+    // element exposes audio/text tracks, quality is auto-managed by the OS.
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = url;
+      video.addEventListener("loadedmetadata", onReady, { once: true });
+      return;
+    }
+    throw new Error("Браузер не поддерживает HLS");
+  }
+
+  function renderSoapTracks() {
+    const video = state.videoEl;
+    if (!video) return;
+    const hls = state.hls;
+    el.serialPanel.replaceChildren();
+    el.serialPanel.classList.add("hidden");
+    el.trackPanel.replaceChildren();
+    el.trackPanel.classList.remove("hidden");
+
+    if (hls) {
+      const audio = hls.audioTracks || [];
+      if (audio.length > 1) {
+        addTrackGroup("Озвучка", audio, (t, i) => {
+          const btn = document.createElement("button");
+          btn.textContent = soapAudioName(t, i);
+          if (i === hls.audioTrack) btn.className = "active";
+          btn.addEventListener("click", () => {
+            if ("nextAudioTrack" in hls) hls.nextAudioTrack = i;
+            hls.audioTrack = i;
+            const lang = t.lang || t.name || "";
+            if (lang) persistAudio(lang);
+            setTimeout(renderSoapTracks, 150);
+          });
+          return btn;
+        });
+      }
+      const seen = new Set();
+      const levels = soapAvcLevels(hls).filter((l) => (seen.has(l.height) ? false : seen.add(l.height)));
+      addTrackGroup("Качество", [{ auto: true }, ...levels], (l) => {
+        const btn = document.createElement("button");
+        if (l.auto) {
+          btn.textContent = soapAutoQualityLabel(hls);
+          if (hls.autoLevelEnabled) btn.className = "active";
+          btn.addEventListener("click", () => {
+            hls.capLevelToPlayerSize = true;
+            hls.currentLevel = -1;
+            hls.loadLevel = -1;
+            hls.nextLevel = -1;
+            setTimeout(renderSoapTracks, 150);
+          });
+          return btn;
+        }
+        btn.textContent = `${l.height ? `${l.height}p` : "auto"} ${(l.bitrate / 1e6).toFixed(1)} Mbps`;
+        if (!hls.autoLevelEnabled && l._i === hls.currentLevel) btn.className = "active";
+        btn.addEventListener("click", () => {
+          hls.capLevelToPlayerSize = false;
+          hls.currentLevel = l._i;
+          setTimeout(renderSoapTracks, 150);
+        });
+        return btn;
+      });
+      const subs = hls.subtitleTracks || [];
+      addTrackGroup("Субтитры", [{ off: true }, ...subs.map((t, i) => ({ t, i }))], (it) => {
+        const btn = document.createElement("button");
+        if (it.off) {
+          btn.textContent = "Выкл";
+          if (!hls.subtitleDisplay || hls.subtitleTrack < 0) btn.className = "active";
+          btn.addEventListener("click", () => {
+            hls.subtitleDisplay = false; hls.subtitleTrack = -1; setTimeout(renderSoapTracks, 100);
+          });
+          return btn;
+        }
+        btn.textContent = it.t.name || it.t.lang || `sub ${it.i + 1}`;
+        if (hls.subtitleDisplay && it.i === hls.subtitleTrack) btn.className = "active";
+        btn.addEventListener("click", () => {
+          hls.subtitleTrack = it.i; hls.subtitleDisplay = true; setTimeout(renderSoapTracks, 100);
+        });
+        return btn;
+      });
+    } else {
+      const atracks = video.audioTracks ? Array.from(video.audioTracks) : [];
+      if (atracks.length > 1) {
+        addTrackGroup("Озвучка", atracks, (t, i) => {
+          const btn = document.createElement("button");
+          btn.textContent = soapAudioName(t, i);
+          if (t.enabled) btn.className = "active";
+          btn.addEventListener("click", () => {
+            atracks.forEach((x) => { x.enabled = false; });
+            t.enabled = true;
+            setTimeout(renderSoapTracks, 100);
+          });
+          return btn;
+        });
+      }
+      const ttracks = video.textTracks ? Array.from(video.textTracks) : [];
+      if (ttracks.length) {
+        addTrackGroup("Субтитры", [{ off: true }, ...ttracks.map((t, i) => ({ t, i }))], (it) => {
+          const btn = document.createElement("button");
+          if (it.off) {
+            btn.textContent = "Выкл";
+            if (![...ttracks].some((x) => x.mode === "showing")) btn.className = "active";
+            btn.addEventListener("click", () => { ttracks.forEach((x) => { x.mode = "disabled"; }); setTimeout(renderSoapTracks, 100); });
+            return btn;
+          }
+          btn.textContent = it.t.label || it.t.language || `sub ${it.i + 1}`;
+          if (it.t.mode === "showing") btn.className = "active";
+          btn.addEventListener("click", () => {
+            ttracks.forEach((x) => { x.mode = "disabled"; });
+            it.t.mode = "showing";
+            setTimeout(renderSoapTracks, 100);
+          });
+          return btn;
+        });
+      }
+    }
+
+    addTrackGroup("Скорость", [0.5, 1, 1.25, 1.5, 1.75, 2].map((s) => ({ speed: s })), (item) => {
+      const btn = document.createElement("button");
+      btn.textContent = `${item.speed}×`;
+      if (item.speed === state.playbackRate) btn.className = "active";
+      btn.addEventListener("click", () => {
+        state.playbackRate = item.speed;
+        try { localStorage.setItem("alphy.playbackRate", String(item.speed)); } catch { /* ignore */ }
+        if (state.videoEl) state.videoEl.playbackRate = item.speed;
+        setTimeout(renderSoapTracks, 50);
+      });
+      return btn;
+    });
   }
 
   async function playKp(kpId, token, opts = {}) {
@@ -1728,7 +2212,7 @@
       const dur = v.duration;
       const cur = v.currentTime;
       if (!dur || !isFinite(dur) || dur <= 0) return;
-      const audioLang = state.player?.getVariantTracks?.().find((t) => t.active)?.language;
+      const audioLang = state.player?.getVariantTracks?.().find((t) => t.active)?.language || soapActiveAudioLang();
       const entry = {
         key: histKey,
         kind: target.kind,
@@ -1851,6 +2335,10 @@
     if (state.player) {
       await state.player.destroy().catch(() => {});
       state.player = null;
+    }
+    if (state.hls) {
+      try { state.hls.destroy(); } catch { /* ignore */ }
+      state.hls = null;
     }
     revokeSubtitleObjectUrls();
     resetSubtitleRequest();
@@ -2833,6 +3321,22 @@ addEventListener('message', async (event) => {
     }
   }
 
+  function warmSoapConnections(masterUrl = "") {
+    const origins = ["https://soap4youand.me", SOAP_CDN_ORIGIN];
+    try {
+      if (masterUrl) origins.push(new URL(masterUrl).origin);
+    } catch { /* ignore malformed catalog entries */ }
+    for (const origin of unique(origins)) {
+      if (!origin || soapWarmOrigins.has(origin)) continue;
+      soapWarmOrigins.add(origin);
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = origin;
+      link.crossOrigin = "anonymous";
+      document.head.appendChild(link);
+    }
+  }
+
   function scheduleIdle(callback, timeout = 2500) {
     if (typeof requestIdleCallback === "function") {
       return requestIdleCallback(callback, { timeout });
@@ -2850,6 +3354,30 @@ addEventListener('message', async (event) => {
         log("newdeaf-prefetch-warn", error.message);
       });
     });
+  }
+
+  function prefetchTopSoapManifest(movies) {
+    const movie = (movies || []).find((m) => m?.m);
+    const url = movie?.m;
+    if (!url || soapManifestPrefetches.has(url)) return;
+    soapManifestPrefetches.add(url);
+    warmSoapConnections(url);
+    scheduleIdle(() => {
+      fetch(url, {
+        cache: "force-cache",
+        credentials: "omit",
+        mode: "cors",
+        referrerPolicy: "no-referrer",
+      })
+        .then(async (response) => {
+          const text = await response.text();
+          if (!response.ok || !/#EXTM3U/i.test(text)) throw new Error(`manifest ${response.status}`);
+        })
+        .catch((error) => {
+          soapManifestPrefetches.delete(url);
+          log("soap-prefetch-warn", error.message);
+        });
+    }, 1800);
   }
 
   function pageUrlCandidates(pageUrl) {
@@ -3573,8 +4101,16 @@ addEventListener('message', async (event) => {
     el.searchInput.addEventListener("focus", warmNewdeafConnections);
     el.searchInput.addEventListener("keydown", (e) => { if (e.key === "Enter") onSearchSubmit(); });
     el.bookmarksToggle.addEventListener("click", () => go("/bookmarks"));
+    el.soapBrowseBtn?.addEventListener("click", showSoapBrowser);
+    el.soapFilter?.addEventListener("input", renderSoapBrowser);
+    el.soapToggle?.addEventListener("click", () => {
+      state.soapFourKOnly = !(state.soapFourKOnly !== false);
+      renderSoapBrowser();
+    });
     el.saveResolverBtn.addEventListener("click", saveResolver);
     el.healthBtn.addEventListener("click", () => testResolver());
+    // Warm the static soap catalog so user search + the admin browser are instant.
+    loadSoapCatalog();
     window.addEventListener("hashchange", route);
     window.addEventListener("popstate", route);
     window.addEventListener("storage", (event) => {

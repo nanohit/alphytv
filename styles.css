@@ -265,6 +265,31 @@ header {
 .card:hover .card-remove { opacity: 1; }
 .card-remove:hover { background: #1b1b1b; border-color: #5b5b5b; color: #dedede; }
 .continue-card .card-remove { left: 5px; right: auto; }
+
+/* Admin-only "add to curated list" button on a card (soap browser + search). */
+.card-add-list {
+  position: absolute; top: 5px; left: 5px; width: 21px; height: 21px; border-radius: 50%;
+  background: rgba(18,18,18,.86); border: 1px solid #454545; color: #d8d84a; cursor: pointer;
+  display: none; align-items: center; justify-content: center; line-height: 1; z-index: 5; padding: 0;
+  font: 400 16px/1 Arial, sans-serif;
+  transition: background .15s, color .15s, border-color .15s;
+}
+body.admin-mode .card-add-list { display: flex; }
+.card-add-list:hover { background: #1b1b1b; border-color: var(--accent); color: #fff; }
+
+/* soap admin browser header + controls */
+.soap-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.soap-controls { display: flex; gap: 8px; align-items: center; }
+.soap-controls input {
+  background: #141414; border: 1px solid #333; border-radius: 8px; color: #e6e6e6;
+  padding: 7px 11px; font-size: 13px; min-width: 220px; outline: none;
+}
+.soap-controls input:focus { border-color: #5b5b5b; }
+.soap-controls button {
+  background: #141414; border: 1px solid #333; border-radius: 8px; color: #cfcfcf;
+  padding: 7px 12px; font-size: 13px; cursor: pointer; white-space: nowrap;
+}
+.soap-controls button:hover { border-color: #5b5b5b; color: #fff; }
 .continue-section .card-grid {
   --continue-media-height: clamp(189px, 17.8vw, 219px);
   display: flex;
