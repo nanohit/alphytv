@@ -126,6 +126,7 @@ jobs:
           SOAP_CHECK_SCOPE: priority
           SOAP_CHECK_LIMIT: ${{ steps.decision.outputs.limit || '0' }}
           SOAP_CHECK_MIN_OK_RATIO: "0.98"
+          SOAP_CHECK_DIAG: "1"
         run: npm run check:soap
 
       - name: Validate refreshed sample

@@ -9,6 +9,7 @@ const scope = process.env.SOAP_CHECK_SCOPE || "sample";
 const defaultLimit = scope === "sample" ? 20 : 0;
 const limit = Number(process.env.SOAP_CHECK_LIMIT || defaultLimit);
 const minOkRatio = Number(process.env.SOAP_CHECK_MIN_OK_RATIO || 1);
+const diagnostics = process.env.SOAP_CHECK_DIAG === "1";
 
 function isPriorityMovie(movie) {
   return movie?.q === "4K" || Number(movie?.w || 0) > 1920 || Number(movie?.h || 0) > 1080;
@@ -25,7 +26,7 @@ function orderedMovies() {
 const ordered = orderedMovies();
 const sample = limit > 0 ? ordered.slice(0, limit) : ordered;
 
-async function checkMovie(movie) {
+async function checkMovie(movie, extraHeaders = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -36,6 +37,7 @@ async function checkMovie(movie) {
         "accept": "application/vnd.apple.mpegurl, application/x-mpegURL, text/plain, */*",
         "accept-encoding": "identity",
         "user-agent": "Mozilla/5.0 (compatible; AlphyCatalogCheck/1.0)",
+        ...extraHeaders,
       },
       mode: "cors",
       referrerPolicy: "no-referrer",
@@ -131,6 +133,23 @@ const ratio = ok / results.length;
 console.log(`SOAP catalog check: ${ok}/${results.length} manifests OK (scope=${scope}, priority=${movies.filter(isPriorityMovie).length}, generated=${catalog.generated || "?"})`);
 for (const item of failed.slice(0, 12)) {
   console.log(`FAIL ${item.status || "ERR"} id=${item.id} q=${item.quality} "${item.title}" ${item.message}`);
+}
+if (diagnostics && failed.length) {
+  for (const failedItem of failed.slice(0, 3)) {
+    const movie = sample.find((item) => item.id === failedItem.id);
+    if (!movie) continue;
+    const variants = [
+      ["origin", { "origin": "https://alphy.tv" }],
+      ["alphyRef", { "referer": "https://alphy.tv/" }],
+      ["soapRef", { "referer": "https://soap4youand.me/movies/" }],
+    ];
+    const checked = [];
+    for (const [name, headers] of variants) {
+      const result = await checkMovie(movie, headers);
+      checked.push(`${name}=${result.ok ? "ok" : result.status || "ERR"}`);
+    }
+    console.log(`DIAG id=${failedItem.id} ${checked.join(" ")}`);
+  }
 }
 if (ratio < minOkRatio) {
   console.log("Refresh soap-movies.json before deploying SOAP movies.");
