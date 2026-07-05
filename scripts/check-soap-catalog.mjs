@@ -41,14 +41,24 @@ async function checkMovie(movie) {
       referrerPolicy: "no-referrer",
       signal: controller.signal,
     });
-    const text = await response.text();
+    const { text, error } = await readProbe(response);
+    const contentType = response.headers.get("content-type") || "";
+    const contentLength = response.headers.get("content-length") || "";
+    const ok = response.ok && /#EXTM3U/i.test(text) && /#EXT-X-STREAM-INF/i.test(text);
     return {
       id: movie.id,
       title: movie.t,
       quality: movie.q,
-      ok: response.ok && /#EXTM3U/i.test(text) && /#EXT-X-STREAM-INF/i.test(text),
+      ok,
       status: response.status,
-      message: response.ok ? "" : text.slice(0, 80).replace(/\s+/g, " "),
+      message: ok
+        ? ""
+        : [
+          error ? `body ${error}` : "",
+          contentType ? `type=${contentType}` : "",
+          contentLength ? `len=${contentLength}` : "",
+          text ? text.slice(0, 80).replace(/\s+/g, " ") : "",
+        ].filter(Boolean).join(" "),
     };
   } catch (error) {
     return {
@@ -61,6 +71,36 @@ async function checkMovie(movie) {
     };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function readProbe(response) {
+  if (!response.body?.getReader) {
+    try {
+      return { text: await response.text(), error: "" };
+    } catch (error) {
+      return { text: "", error: `${error.name}: ${error.message}` };
+    }
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    while (text.length < 65536) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+      if (/#EXTM3U/i.test(text) && /#EXT-X-STREAM-INF/i.test(text)) break;
+    }
+    text += decoder.decode();
+    return { text, error: "" };
+  } catch (error) {
+    return { text, error: `${error.name}: ${error.message}` };
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {}
   }
 }
 
