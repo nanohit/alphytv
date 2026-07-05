@@ -39,6 +39,7 @@ timeout = env_int("SOAP_CHECK_TIMEOUT_MS", 8000) / 1000
 concurrency = max(1, env_int("SOAP_CHECK_CONCURRENCY", 4))
 min_ok_ratio = env_float("SOAP_CHECK_MIN_OK_RATIO", 1)
 referer = os.getenv("SOAP_CHECK_REFERER") or ""
+recent_first = os.getenv("SOAP_CHECK_RECENT") == "1"
 
 
 def is_priority(movie: dict[str, Any]) -> bool:
@@ -48,6 +49,9 @@ def is_priority(movie: dict[str, Any]) -> bool:
 def ordered_movies(movies: list[dict[str, Any]]) -> list[dict[str, Any]]:
     priority = [movie for movie in movies if is_priority(movie)]
     rest = [movie for movie in movies if not is_priority(movie)]
+    if recent_first:
+        priority.sort(key=lambda movie: int(movie.get("refreshed") or 0), reverse=True)
+        rest.sort(key=lambda movie: int(movie.get("refreshed") or 0), reverse=True)
     if scope == "priority":
         return priority
     if scope == "all":

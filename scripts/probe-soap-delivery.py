@@ -62,6 +62,9 @@ def load_movies(scope: str, limit: int) -> list[dict[str, Any]]:
     movies = [movie for movie in catalog.get("movies", []) if movie.get("m")]
     priority = [movie for movie in movies if is_priority(movie)]
     rest = [movie for movie in movies if not is_priority(movie)]
+    if os.getenv("SOAP_PROBE_RECENT") == "1":
+        priority.sort(key=lambda movie: int(movie.get("refreshed") or 0), reverse=True)
+        rest.sort(key=lambda movie: int(movie.get("refreshed") or 0), reverse=True)
     ordered = priority if scope == "priority" else priority + rest
     return ordered[:limit] if limit > 0 else ordered
 
