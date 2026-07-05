@@ -40,14 +40,14 @@ prints only statuses and metadata, never signed URLs.
 The HLS masters expire, so `.github/workflows/soap-catalog.yml` keeps the catalog
 fresh conservatively:
 
-- every 2 hours it runs a canary against already-published masters, without SOAP
-  credentials;
-- authenticated scheduled refresh is disabled unless the repository variable
-  `SOAP_AUTO_REFRESH` is set to `true`; manual `force_refresh=true` runs still
-  work. This keeps the paid account from being touched by a broken/stale canary;
-- when enabled, if the canary is stale and the catalog is at least
+- every 2 hours it runs a no-credentials canary against all priority / `>1080p`
+  masters;
+- scheduled authenticated refresh is enabled by default, but only for the
+  priority / `>1080p` catalog. Set repository variable
+  `SOAP_AUTO_REFRESH=false` to disable it;
+- if the priority canary is stale and the catalog is at least
   `SOAP_MIN_REFRESH_HOURS` old (default 12h), it logs in from GitHub Actions
-  using repository secrets and refreshes the catalog;
+  using repository secrets and refreshes the priority catalog;
 - refresh order is `>1080p` movies first (the 4K shelf, including 1440p/1600p
   style masters), then the rest of the movie catalog;
 - the workflow commits only `soap-movies.json`; it does not upload cookies,
@@ -60,10 +60,11 @@ SOAP_LOGIN
 SOAP_PASSWORD
 ```
 
-Optional repository variable:
+Optional repository variables:
 
 ```text
-SOAP_AUTO_REFRESH=true
+SOAP_AUTO_REFRESH=false
+SOAP_SCHEDULE_SCOPE=priority
 ```
 
 Useful manual runs:
@@ -77,8 +78,8 @@ npm run probe:soap              # master -> variant -> segment delivery probe
 
 For a GitHub Actions smoke test, run the `SOAP catalog canary and refresh`
 workflow manually with `force_refresh=true`, `scope=priority`, and a small
-`limit` such as `5`. For production refresh, leave `limit` empty and use
-`scope=full`.
+`limit` such as `5`. For a full 4K refresh, use `force_refresh=true`,
+`scope=priority`, and leave `limit` empty.
 
 ## Frontend
 
