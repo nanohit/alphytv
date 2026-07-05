@@ -6,7 +6,8 @@
   "description": "Static AlphyTV MVP with Newdeaf/Ortified and Zona/Zenith playback flow.",
   "scripts": {
     "check": "node --check app.js && node --check catalog.js && node --check api/_admin-auth.js && node --check api/_catalog-store.js && node --check api/admin/check.js && node --check api/admin/catalog.js && deno check resolver-deno/main.js",
-    "check:soap": "node scripts/check-soap-catalog.mjs",
+    "check:soap": "python3 scripts/check-soap-catalog.py",
+    "check:soap:node": "node scripts/check-soap-catalog.mjs",
     "check:soap:priority": "SOAP_CHECK_SCOPE=priority node scripts/check-soap-catalog.mjs",
     "check:soap:all": "SOAP_CHECK_SCOPE=all node scripts/check-soap-catalog.mjs",
     "refresh:soap": "python3 scripts/soap-refresh-catalog.py --scope full",
