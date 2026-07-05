@@ -124,7 +124,7 @@ jobs:
         if: steps.decision.outputs.refresh == 'true'
         env:
           SOAP_CHECK_SCOPE: priority
-          SOAP_CHECK_LIMIT: "0"
+          SOAP_CHECK_LIMIT: ${{ steps.decision.outputs.limit || '0' }}
           SOAP_CHECK_MIN_OK_RATIO: "0.98"
         run: npm run check:soap
 
@@ -132,7 +132,7 @@ jobs:
         if: steps.decision.outputs.refresh == 'true'
         env:
           SOAP_CHECK_SCOPE: sample
-          SOAP_CHECK_LIMIT: "80"
+          SOAP_CHECK_LIMIT: ${{ steps.decision.outputs.limit || '80' }}
           SOAP_CHECK_MIN_OK_RATIO: "0.98"
         run: npm run check:soap
 

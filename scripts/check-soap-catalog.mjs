@@ -3,10 +3,11 @@ import fs from "node:fs";
 const catalogPath = new URL("../soap-movies.json", import.meta.url);
 const catalog = JSON.parse(fs.readFileSync(catalogPath, "utf8"));
 const movies = Array.isArray(catalog.movies) ? catalog.movies.filter((m) => m?.m) : [];
-const limit = Number(process.env.SOAP_CHECK_LIMIT || 20);
 const timeoutMs = Number(process.env.SOAP_CHECK_TIMEOUT_MS || 8000);
 const concurrency = Math.max(1, Number(process.env.SOAP_CHECK_CONCURRENCY || 4));
 const scope = process.env.SOAP_CHECK_SCOPE || "sample";
+const defaultLimit = scope === "sample" ? 20 : 0;
+const limit = Number(process.env.SOAP_CHECK_LIMIT || defaultLimit);
 const minOkRatio = Number(process.env.SOAP_CHECK_MIN_OK_RATIO || 1);
 
 function isPriorityMovie(movie) {
@@ -22,9 +23,7 @@ function orderedMovies() {
 }
 
 const ordered = orderedMovies();
-const sample = scope === "all" || scope === "priority" || limit <= 0
-  ? ordered
-  : ordered.slice(0, limit);
+const sample = limit > 0 ? ordered.slice(0, limit) : ordered;
 
 async function checkMovie(movie) {
   const controller = new AbortController();
