@@ -43,7 +43,8 @@ class ProbeResult:
     error: str
 
 
-CONTEXTS: list[tuple[str, dict[str, str]]] = [
+CONTEXTS: list[tuple[str, dict[str, str | None]]] = [
+    ("extractor", {"Referer": SOAP_MOVIES, "Accept": None}),
     ("bare", {}),
     ("browser", {"Origin": "https://alphy.tv", "Referer": ALPHY}),
     ("alphy-ref", {"Referer": ALPHY}),
@@ -65,13 +66,17 @@ def load_movies(scope: str, limit: int) -> list[dict[str, Any]]:
     return ordered[:limit] if limit > 0 else ordered
 
 
-def fetch_probe(url: str, label: str, headers: dict[str, str], *, is_segment: bool = False, timeout: float = 12.0) -> ProbeResult:
+def fetch_probe(url: str, label: str, headers: dict[str, str | None], *, is_segment: bool = False, timeout: float = 12.0) -> ProbeResult:
     request_headers = {
         "User-Agent": UA,
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept": "application/vnd.apple.mpegurl, application/x-mpegURL, text/plain, */*",
-        **headers,
+        "Accept": "*/*",
     }
+    for key, value in headers.items():
+        if value is None:
+            request_headers.pop(key, None)
+        else:
+            request_headers[key] = value
     if is_segment:
         request_headers["Accept"] = "*/*"
         request_headers["Range"] = "bytes=0-1023"

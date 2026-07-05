@@ -68,7 +68,7 @@ def check_movie(movie: dict[str, Any]) -> dict[str, Any]:
     headers = {
         "User-Agent": UA,
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept": "application/vnd.apple.mpegurl, application/x-mpegURL, text/plain, */*",
+        "Accept": "*/*",
     }
     if referer:
         headers["Referer"] = referer
