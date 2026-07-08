@@ -251,6 +251,23 @@ header {
   position: absolute; top: 8px; left: 8px; padding: 3px 7px; border-radius: 8px;
   z-index: 2; font-size: 11px; font-weight: 600; background: rgba(0,0,0,.72); color: var(--accent);
 }
+.curated-label {
+  position: absolute; top: 7px; left: 7px; z-index: 4;
+  max-width: calc(100% - 14px); min-height: 22px; padding: 4px 7px;
+  border: 1px solid rgba(220, 220, 70, .86); border-radius: 7px;
+  background: rgba(0,0,0,.76); color: var(--accent);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 800; line-height: 1.05; letter-spacing: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  box-shadow: 0 8px 22px rgba(0,0,0,.28);
+  transition: background .15s, color .15s, border-color .15s, box-shadow .15s;
+}
+.curated-label[data-tone="season"] { font-size: 9.5px; padding-inline: 6px; }
+.curated-card:hover .curated-label,
+.curated-card:focus-within .curated-label {
+  background: var(--accent); color: #050505; border-color: var(--accent);
+  box-shadow: 0 8px 24px rgba(215, 215, 42, .22);
+}
 .card-remove {
   position: absolute; top: 5px; right: 5px; width: 20px; height: 20px; border-radius: 50%;
   background: rgba(18,18,18,.86); border: 1px solid #454545; color: #bdbdbd; cursor: pointer;
@@ -493,18 +510,29 @@ body.admin-mode .card-add-list { display: flex; }
   padding: 16px; border: 1px dashed var(--stroke-strong); border-radius: 10px;
   color: var(--muted); font-size: 12px;
 }
+.admin-label-controls {
+  position: absolute; z-index: 6; left: 6px; right: 6px; bottom: 36px;
+  display: grid; grid-template-columns: 25px minmax(0, 1fr) 25px; gap: 4px;
+}
 .admin-item-controls {
-  position: absolute; z-index: 5; top: 6px; left: 6px; right: 6px;
+  position: absolute; z-index: 5; bottom: 6px; left: 6px; right: 6px;
   display: grid; grid-template-columns: 25px 25px minmax(0, 1fr) 25px 25px; gap: 4px;
 }
+.admin-label-controls button,
+.admin-label-controls input,
 .admin-item-controls button,
 .admin-item-controls select {
   min-width: 0; height: 25px; border: 1px solid #4a4a4a; border-radius: 6px;
   background: rgba(0,0,0,.88); color: #fff; font-size: 11px;
 }
+.admin-label-controls button,
 .admin-item-controls button { cursor: pointer; }
+.admin-label-controls button:hover,
 .admin-item-controls button:hover { color: var(--accent); border-color: var(--accent); }
 .admin-item-controls button:disabled { opacity: .3; }
+.admin-label-controls input { padding: 0 6px; outline: none; }
+.admin-label-controls input:focus { border-color: var(--accent); }
+.admin-label-controls .season-preset { grid-column: 1 / -1; }
 .admin-item-controls select { padding: 0 3px; }
 .admin-mode .curated-card .poster { filter: brightness(.7); }
 

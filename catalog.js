@@ -8,6 +8,7 @@
   const AUTH_KEY = "alphy.admin.auth.v1";
   const DRAFT_KEY = "alphy.curated.draft.v1";
   const SAVE_DELAY_MS = 1200;
+  const ITEM_LABEL_MAX = 32;
 
   const state = {
     catalog: { schema: 1, revision: 0, updatedAt: null, lists: [] },
@@ -102,6 +103,7 @@
     const target = normalizeTarget(value?.target);
     const title = String(value?.title || "").trim();
     if (!target || !title) return null;
+    const label = normalizeItemLabel(value?.label);
     const rating = {};
     if (Number.isFinite(Number(value?.rating?.kp))) rating.kp = Number(value.rating.kp);
     if (Number.isFinite(Number(value?.rating?.imdb))) rating.imdb = Number(value.rating.imdb);
@@ -113,12 +115,24 @@
       poster: String(value?.poster || ""),
       backdrop: String(value?.backdrop || ""),
       description: String(value?.description || ""),
+      label,
       isSeries: !!value?.isSeries,
       movieLength: Number.isFinite(Number(value?.movieLength)) ? Number(value.movieLength) : null,
       rating,
       target,
       cachedAt: String(value?.cachedAt || new Date().toISOString()),
     };
+  }
+
+  function normalizeItemLabel(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().slice(0, ITEM_LABEL_MAX);
+  }
+
+  function labelTone(value) {
+    const normalized = normalizeItemLabel(value).toLocaleLowerCase("ru-RU");
+    if (normalized === "4к" || normalized === "4k") return "quality";
+    if (normalized === "новый сезон") return "season";
+    return "custom";
   }
 
   function normalizeCatalog(value) {
@@ -447,6 +461,14 @@
     image.alt = "";
     image.addEventListener("error", () => handlePosterError(image, item));
     media.appendChild(image);
+    const itemLabel = normalizeItemLabel(item.label);
+    if (itemLabel) {
+      const label = document.createElement("div");
+      label.className = "curated-label";
+      label.dataset.tone = labelTone(itemLabel);
+      label.textContent = itemLabel;
+      media.appendChild(label);
+    }
     const overlay = document.createElement("div");
     overlay.className = "card-hover-meta";
     overlay.setAttribute("aria-hidden", "true");
@@ -479,7 +501,7 @@
 
     const open = () => window.alphyBridge?.openCuratedItem?.(item);
     card.addEventListener("click", (event) => {
-      if (event.target.closest(".admin-item-controls")) return;
+      if (event.target.closest(".admin-item-controls, .admin-label-controls")) return;
       open();
     });
     card.addEventListener("keydown", (event) => {
@@ -508,6 +530,20 @@
     const [item] = source.items.splice(itemIndex, 1);
     if (!item) return;
     if (!destination.items.some((entry) => entry.key === item.key)) destination.items.push(item);
+    markDirty();
+    render();
+  }
+
+  function setItemLabel(listIndex, itemIndex, value) {
+    const item = state.catalog.lists[listIndex]?.items?.[itemIndex];
+    if (!item) return;
+    const label = normalizeItemLabel(value);
+    if (normalizeItemLabel(item.label) === label) return;
+    if (label) {
+      item.label = label;
+    } else {
+      delete item.label;
+    }
     markDirty();
     render();
   }
@@ -549,8 +585,61 @@
 
   function addAdminItemControls(card, listIndex, itemIndex) {
     if (!state.admin) return;
+    const item = state.catalog.lists[listIndex]?.items?.[itemIndex];
+    const media = card.querySelector(".card-media");
+    if (!item || !media) return;
+    const labelControls = document.createElement("div");
+    labelControls.className = "admin-label-controls";
+    const label4k = document.createElement("button");
+    label4k.type = "button";
+    label4k.textContent = "4к";
+    label4k.title = "Поставить лейбл 4к";
+    label4k.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setItemLabel(listIndex, itemIndex, "4к");
+    });
+    const labelSeason = document.createElement("button");
+    labelSeason.type = "button";
+    labelSeason.className = "season-preset";
+    labelSeason.textContent = "Новый сезон";
+    labelSeason.title = "Поставить лейбл «Новый сезон»";
+    labelSeason.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setItemLabel(listIndex, itemIndex, "Новый сезон");
+    });
+    const labelInput = document.createElement("input");
+    labelInput.type = "text";
+    labelInput.value = normalizeItemLabel(item.label);
+    labelInput.placeholder = "лейбл";
+    labelInput.maxLength = ITEM_LABEL_MAX;
+    labelInput.setAttribute("aria-label", "Лейбл карточки");
+    labelInput.addEventListener("click", (event) => event.stopPropagation());
+    labelInput.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") {
+        event.preventDefault();
+        labelInput.blur();
+      }
+    });
+    labelInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      setItemLabel(listIndex, itemIndex, labelInput.value);
+    });
+    const clearLabel = document.createElement("button");
+    clearLabel.type = "button";
+    clearLabel.textContent = "×";
+    clearLabel.title = "Убрать лейбл";
+    clearLabel.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setItemLabel(listIndex, itemIndex, "");
+    });
+    labelControls.addEventListener("keydown", (event) => event.stopPropagation());
+    labelControls.append(label4k, labelInput, clearLabel, labelSeason);
+    media.appendChild(labelControls);
+
     const controls = document.createElement("div");
     controls.className = "admin-item-controls";
+    controls.addEventListener("keydown", (event) => event.stopPropagation());
     const left = document.createElement("button");
     left.type = "button";
     left.textContent = "‹";
@@ -604,7 +693,7 @@
       render();
     });
     controls.append(left, right, select, refresh, remove);
-    card.querySelector(".card-media")?.appendChild(controls);
+    media.appendChild(controls);
   }
 
   function moveList(index, direction) {

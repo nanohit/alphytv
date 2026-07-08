@@ -14,6 +14,7 @@ test("normalizes direct player targets and metadata", () => {
         title: " Конь БоДжек ",
         year: 2014,
         poster: "https://example.com/poster.jpg",
+        label: "  Новый   сезон  ",
         rating: { kp: "8.4", imdb: 8.8 },
         externalId: { imdb: "tt3398228", tmdb: 61222 },
         isSeries: true,
@@ -25,6 +26,7 @@ test("normalizes direct player targets and metadata", () => {
   assert.equal(catalog.revision, 7);
   assert.equal(catalog.lists[0].title, "Выбор редакции");
   assert.deepEqual(catalog.lists[0].items[0].target, { kind: "zen", zenithId: "2097" });
+  assert.equal(catalog.lists[0].items[0].label, "Новый сезон");
   assert.deepEqual(catalog.lists[0].items[0].rating, { kp: 8.4, imdb: 8.8 });
   assert.deepEqual(catalog.lists[0].items[0].externalId, { imdb: "tt3398228", tmdb: "61222" });
 });

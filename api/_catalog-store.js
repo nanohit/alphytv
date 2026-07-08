@@ -7,6 +7,7 @@ const BLOB_API_VERSION = "12";
 const MAX_LISTS = 24;
 const MAX_ITEMS_PER_LIST = 60;
 const MAX_BODY_BYTES = 512 * 1024;
+const ITEM_LABEL_MAX = 32;
 
 export function emptyCatalog() {
   return {
@@ -97,6 +98,7 @@ function normalizeItem(value) {
   const key = text(value?.key, 300) || JSON.stringify(target);
   const poster = publicHttpsUrl(value?.poster);
   const backdrop = publicHttpsUrl(value?.backdrop);
+  const label = text(value?.label, ITEM_LABEL_MAX).replace(/\s+/g, " ");
   const externalId = normalizeExternalId(value?.externalId || value?.externalIds);
   const item = {
     id: text(value?.id, 80) || crypto.randomUUID(),
@@ -106,6 +108,7 @@ function normalizeItem(value) {
     poster,
     backdrop,
     description: text(value?.description, 3000),
+    label,
     isSeries: !!value?.isSeries,
     movieLength: positiveNumber(value?.movieLength),
     rating: {
@@ -119,6 +122,7 @@ function normalizeItem(value) {
   if (!item.poster) delete item.poster;
   if (!item.backdrop) delete item.backdrop;
   if (!item.description) delete item.description;
+  if (!item.label) delete item.label;
   if (!item.year) delete item.year;
   if (item.movieLength == null) delete item.movieLength;
   if (item.rating.kp == null) delete item.rating.kp;
