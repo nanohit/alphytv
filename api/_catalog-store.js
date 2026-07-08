@@ -14,8 +14,15 @@ export function emptyCatalog() {
     schema: 1,
     revision: 0,
     updatedAt: null,
+    forYou: "on",
     lists: [],
   };
+}
+
+// «Для вас» kill-switch distributed to all clients via the public envelope:
+// "on" (default) | "frozen" (clients render caches, no API calls) | "off".
+export function normalizeForYouMode(value) {
+  return value === "frozen" || value === "off" ? value : "on";
 }
 
 function text(value, max = 500) {
@@ -153,6 +160,7 @@ export function normalizeCatalog(value, { nextRevision = null } = {}) {
     schema: 1,
     revision: Number.isInteger(revisionValue) && revisionValue >= 0 ? revisionValue : 0,
     updatedAt: text(value?.updatedAt, 40) || null,
+    forYou: normalizeForYouMode(value?.forYou),
     lists,
   };
 }

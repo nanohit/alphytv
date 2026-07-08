@@ -366,6 +366,9 @@
       key,
       kind: target.kind,
       target: cleanTarget(target),
+      // Kinopoisk id when known — the "Для вас" recommender seeds from it.
+      kpId: (target.kind === "kp" || target.kind === "clps") ? String(target.kpId)
+        : (state.currentMeta?.kpId ? String(state.currentMeta.kpId) : existing?.kpId),
       title: target.title || existing?.title || "",
       poster: target.poster || existing?.poster || "",
       year: target.year || existing?.year || "",
@@ -377,6 +380,18 @@
       progress: existing?.progress || 0,
     });
   }
+  // Late kpId attach: zen/nd/ort plays learn their Kinopoisk id only after the
+  // metadata enrichment lands. Persist it into the existing history entry
+  // without bumping updatedAt so the recommender can seed from these plays too.
+  function attachHistoryKpId(key, kpId) {
+    if (!key || !/^\d+$/.test(String(kpId || ""))) return;
+    const hist = loadList(STORE_HISTORY);
+    const entry = hist.find((h) => h.key === key);
+    if (!entry || entry.kpId) return;
+    entry.kpId = String(kpId);
+    saveList(STORE_HISTORY, hist);
+  }
+
   // Recover title/poster/year for a target that carries no kpId (Ortified), e.g.
   // when reopened from Continue/Bookmarks where the URL is just the embed. Falls
   // back to whatever the history/bookmark entry kept so the watch tab is never bare.
@@ -2761,6 +2776,7 @@
       description: desc,
       isSeries: meta.isSeries ?? target?.isSeries,
     });
+    if (state.currentMeta?.kpId && target) attachHistoryKpId(keyFor(target), state.currentMeta.kpId);
     const sub = [year, meta.movieLength ? `${meta.movieLength} мин` : ""].filter(Boolean).join(" · ");
     let html = "";
     if (poster) html += `<div class="meta-poster"><img src="${escapeAttr(poster)}" alt=""></div>`;

@@ -11,7 +11,7 @@
   const ITEM_LABEL_MAX = 32;
 
   const state = {
-    catalog: { schema: 1, revision: 0, updatedAt: null, lists: [] },
+    catalog: { schema: 1, revision: 0, updatedAt: null, lists: [], forYou: "on" },
     blobUrl: "",
     fallbackUrl: `/curated-fallback.json?v=${CATALOG_CACHE_VERSION}`,
     admin: false,
@@ -156,8 +156,15 @@
       schema: 1,
       revision: Math.max(0, Number(value?.revision) || 0),
       updatedAt: value?.updatedAt || null,
+      forYou: normalizeForYouMode(value?.forYou),
       lists,
     };
+  }
+
+  // «Для вас» kill-switch, distributed to every client through the catalog
+  // envelope: "on" (default) | "frozen" (render caches, zero API calls) | "off".
+  function normalizeForYouMode(value) {
+    return value === "frozen" || value === "off" ? value : "on";
   }
 
   function setStatus(text, mode = "") {
@@ -826,15 +833,83 @@
     }
   }
 
+  // ---------------------------------------------------------------------
+  // «Для вас» — a synthetic, per-device row computed by foryou.js. Rendered
+  // with the same cards as curated lists but never stored in the catalog;
+  // only its mode flag lives in the envelope.
+  // ---------------------------------------------------------------------
+  function forYouItems() {
+    if (normalizeForYouMode(state.catalog.forYou) === "off") return [];
+    return window.alphyForYou?.getItems?.() || [];
+  }
+
+  function forYouBlock(items) {
+    const mode = normalizeForYouMode(state.catalog.forYou);
+    const block = document.createElement("section");
+    block.className = "curated-list foryou-list";
+    const header = document.createElement("div");
+    header.className = "curated-list-head";
+    const title = document.createElement("h3");
+    title.textContent = "Для вас";
+    header.appendChild(title);
+    if (state.admin) {
+      const controls = document.createElement("div");
+      controls.className = "curated-list-controls foryou-controls";
+      const select = document.createElement("select");
+      select.title = "Режим «Для вас» для всех устройств";
+      for (const [value, label] of [
+        ["on", "вкл"],
+        ["frozen", "заморожен (без запросов)"],
+        ["off", "выкл для всех"],
+      ]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        option.selected = value === mode;
+        select.appendChild(option);
+      }
+      select.addEventListener("change", () => {
+        state.catalog.forYou = normalizeForYouMode(select.value);
+        markDirty();
+        render();
+      });
+      controls.appendChild(select);
+      header.appendChild(controls);
+    }
+    block.appendChild(header);
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "curated-empty";
+      empty.textContent = mode === "off"
+        ? "Выключено для всех устройств."
+        : "Подборка появится после нескольких просмотров (считается локально на устройстве зрителя).";
+      block.appendChild(empty);
+      return block;
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "curated-row-wrap";
+    const row = document.createElement("div");
+    row.className = "curated-row";
+    items.forEach((item) => row.appendChild(makePublicCard(item)));
+    wrap.appendChild(row);
+    block.appendChild(wrap);
+    setupCuratedRow(wrap, row);
+    return block;
+  }
+
   function render() {
     if (!el.section || !el.lists) return;
-    const visible = state.admin || state.catalog.lists.some((list) => list.items.length);
+    window.alphyForYou?.setMode?.(normalizeForYouMode(state.catalog.forYou));
+    const fyItems = forYouItems();
+    const visible = state.admin || fyItems.length > 0 || state.catalog.lists.some((list) => list.items.length);
     el.section.classList.toggle("hidden", !visible);
     if (visible) document.getElementById("homeEmpty")?.classList.add("hidden");
     el.actions?.classList.toggle("hidden", !state.admin);
     curatedObservers.forEach((observer) => observer.disconnect());
     curatedObservers = [];
     el.lists.replaceChildren();
+
+    if (fyItems.length || state.admin) el.lists.appendChild(forYouBlock(fyItems));
 
     for (const [listIndex, list] of state.catalog.lists.entries()) {
       if (!state.admin && !list.items.length) continue;
@@ -969,6 +1044,7 @@
     });
     window.addEventListener("alphy:player-ready", updateAddButton);
     window.addEventListener("alphy:view", updateAddButton);
+    window.addEventListener("alphy:foryou", () => render());
     window.addEventListener("beforeunload", (event) => {
       if (!state.admin || !state.dirty) return;
       event.preventDefault();

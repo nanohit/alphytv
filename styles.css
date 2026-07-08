@@ -458,6 +458,12 @@ body.admin-mode .card-add-list { display: flex; }
 .curated-title-input:focus { outline: 0; border-color: var(--accent); }
 .curated-list-controls { display: flex; gap: 5px; flex: none; }
 .curated-list-controls button { width: 30px; padding: 0; font-size: 15px; }
+.foryou-controls select {
+  min-height: 30px; padding: 0 8px; border-radius: 8px;
+  border: 1px solid var(--stroke-strong); background: #0e0e0e;
+  color: #cfcfcf; cursor: pointer; font: inherit; font-size: 11px;
+}
+.foryou-controls select:hover { color: var(--accent); border-color: var(--accent); }
 /* Category shelf: 8 tiles per row, 2 rows = one page of 16; extra titles page
    off to the right via the arrows. The row places each card explicitly (see
    layoutCuratedCards in catalog.js) so reading order stays 1-8 then 9-16. */

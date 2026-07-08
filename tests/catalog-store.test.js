@@ -88,3 +88,10 @@ test("caps list and item counts", () => {
   assert.equal(catalog.lists.length, 24);
   assert.equal(catalog.lists[0].items.length, 60);
 });
+
+test("forYou mode survives normalization and defaults to on", () => {
+  assert.equal(normalizeCatalog({ lists: [] }).forYou, "on");
+  assert.equal(normalizeCatalog({ forYou: "frozen", lists: [] }).forYou, "frozen");
+  assert.equal(normalizeCatalog({ forYou: "off", lists: [] }).forYou, "off");
+  assert.equal(normalizeCatalog({ forYou: "junk", lists: [] }).forYou, "on");
+});
