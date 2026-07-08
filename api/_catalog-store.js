@@ -75,6 +75,17 @@ function normalizeTarget(value) {
     const pageUrl = publicHttpsUrl(value?.pageUrl);
     if (/(^|\.)newdeaf\.co\//i.test(pageUrl)) return { kind, pageUrl };
   }
+  if (kind === "soap" && /^\d+$/.test(String(value?.soapId || ""))) {
+    return { kind, soapId: String(value.soapId) };
+  }
+  if (kind === "clps" && /^\d+$/.test(String(value?.kpId || ""))) {
+    const target = { kind, kpId: String(value.kpId) };
+    const season = positiveIntegerText(value?.season);
+    const episode = positiveIntegerText(value?.episode);
+    if (season) target.season = Number(season);
+    if (episode) target.episode = Number(episode);
+    return target;
+  }
   return null;
 }
 

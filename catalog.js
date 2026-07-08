@@ -87,6 +87,14 @@
     if (kind === "soap" && /^\d+$/.test(String(value?.soapId || ""))) {
       return { kind, soapId: String(value.soapId) };
     }
+    if (kind === "clps" && /^\d+$/.test(String(value?.kpId || ""))) {
+      const target = { kind, kpId: String(value.kpId) };
+      const season = Number.parseInt(String(value?.season || ""), 10);
+      const episode = Number.parseInt(String(value?.episode || ""), 10);
+      if (Number.isInteger(season) && season > 0) target.season = season;
+      if (Number.isInteger(episode) && episode > 0) target.episode = episode;
+      return target;
+    }
     return null;
   }
 

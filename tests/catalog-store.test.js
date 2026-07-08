@@ -29,6 +29,31 @@ test("normalizes direct player targets and metadata", () => {
   assert.deepEqual(catalog.lists[0].items[0].externalId, { imdb: "tt3398228", tmdb: "61222" });
 });
 
+test("normalizes persistent soap and Collaps targets", () => {
+  const catalog = normalizeCatalog({
+    lists: [{
+      id: "players",
+      title: "Players",
+      items: [
+        {
+          key: "soap:123",
+          title: "Soap Movie",
+          target: { kind: "soap", soapId: 123 },
+        },
+        {
+          key: "clps:404900",
+          title: "Breaking Bad",
+          isSeries: true,
+          target: { kind: "clps", kpId: 404900, season: "1", episode: "1" },
+        },
+      ],
+    }],
+  });
+
+  assert.deepEqual(catalog.lists[0].items[0].target, { kind: "soap", soapId: "123" });
+  assert.deepEqual(catalog.lists[0].items[1].target, { kind: "clps", kpId: "404900", season: 1, episode: 1 });
+});
+
 test("rejects invalid targets, duplicate keys and non-https artwork", () => {
   const catalog = normalizeCatalog({
     lists: [{

@@ -19,10 +19,28 @@
   // this namespace versioned so those false misses cannot survive an upgrade.
   const ND_SEARCH_CACHE_NS = "ndsearch.v2";
   const SOAP_CDN_ORIGIN = "https://cdn-r11.soap4youand.me";
+  const COLLAPS_BASE_URL = "https://plapi.cdnvideohub.com/api/v1/player/sv";
+  const COLLAPS_PREVIEW_LIMIT = 1;
+  const COLLAPS_PREVIEW_IDLE_TIMEOUT = 3500;
+  const COLLAPS_PREVIEW_COOLDOWN_MS = 20 * 60e3;
+  const COLLAPS_REFRESH_SEC = 240;
+  const COLLAPS_QUALITY_FIELDS = [
+    ["mpeg4kUrl", "4K", 2160],
+    ["mpeg2kUrl", "2K", 1440],
+    ["mpegQhdUrl", "1440p", 1440],
+    ["mpegFullHdUrl", "1080p", 1080],
+    ["mpegHighUrl", "720p", 720],
+    ["mpegMediumUrl", "480p", 480],
+    ["mpegLowUrl", "360p", 360],
+    ["mpegLowestUrl", "240p", 240],
+    ["mpegTinyUrl", "144p", 144],
+  ];
   const TTL = {
     search: 6 * 3600e3,
     ndsearch: 6 * 3600e3,
     ndpage: 24 * 3600e3,
+    clpsplaylist: 2 * 3600e3,
+    clpsprobe: 6 * 3600e3,
     zona: 30 * 24 * 3600e3,
     meta: 7 * 24 * 3600e3,
     enriched: 30 * 24 * 3600e3,
@@ -92,6 +110,7 @@
     sources: {},
     opravar: null,
     serial: null,
+    collaps: null,
     currentMeta: null,
     zenithEmbedUrl: "",
     playerReady: false,
@@ -125,6 +144,8 @@
   const newdeafPageInflight = new Map();
   const soapWarmOrigins = new Set();
   const soapManifestPrefetches = new Set();
+  const collapsWarmOrigins = new Set();
+  const collapsProbeInflight = new Map();
 
   // =====================================================================
   // localStorage: TTL cache + bookmarks + history
@@ -218,6 +239,40 @@
     };
   }
 
+  // =====================================================================
+  // Collaps / CDNvideohub. Browser-only path:
+  // KP id -> public playlist -> video/{vkId} -> progressive OK.ru MP4.
+  // HLS/DASH exist but okcdn does not expose CORS for MSE, so keep this source
+  // on plain <video src=mp4> and re-resolve fresh signed URLs in the browser.
+  // =====================================================================
+  function collapsTarget(kpId, selection = {}) {
+    const target = { kind: "clps", kpId: String(kpId || "") };
+    const season = positiveInt(selection.season);
+    const episode = positiveInt(selection.episode);
+    if (season) target.season = season;
+    if (episode) target.episode = episode;
+    return target;
+  }
+
+  function collapsListItem(hit, details = {}) {
+    const target = collapsTarget(hit.kpId, hit.selection || hit);
+    const title = details.title || hit.title || `KP ${hit.kpId}`;
+    return {
+      id: crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+      key: keyFor(target),
+      title,
+      year: details.year || hit.year || "",
+      poster: details.poster || hit.poster || "",
+      description: details.description || "",
+      isSeries: !!(details.isSeries ?? hit.isSeries),
+      movieLength: details.movieLength || hit.movieLength || null,
+      rating: details.rating || hit.rating || {},
+      kpId: String(hit.kpId || ""),
+      target,
+      cachedAt: new Date().toISOString(),
+    };
+  }
+
   // Admin-only browser over the whole soap catalog: filter by name, toggle
   // 4K-only, click to play, "+" to add to a curated list. Pure client-side.
   async function showSoapBrowser() {
@@ -263,6 +318,7 @@
     if (t.kind === "opr") return `opr:${t.playerUrl}`;
     if (t.kind === "nd") return `nd:${t.pageUrl}`;
     if (t.kind === "soap") return `soap:${t.soapId}`;
+    if (t.kind === "clps") return `clps:${t.kpId}`;
     return "x";
   }
   function cleanTarget(t) {
@@ -272,6 +328,7 @@
     if (t.kind === "opr") return { kind: "opr", playerUrl: t.playerUrl, pageUrl: t.pageUrl || "" };
     if (t.kind === "nd") return { kind: "nd", pageUrl: t.pageUrl };
     if (t.kind === "soap") return { kind: "soap", soapId: String(t.soapId) };
+    if (t.kind === "clps") return collapsTarget(t.kpId, t);
     return t;
   }
   function hashFor(t) {
@@ -281,6 +338,12 @@
     if (t.kind === "opr") return legacyHashPath(`/watch/opr/${encodeURIComponent(t.playerUrl)}`);
     if (t.kind === "nd") return shortNewdeafPath(t.pageUrl) || legacyHashPath(`/watch/nd/${encodeURIComponent(t.pageUrl)}`);
     if (t.kind === "soap") return `/m/${encodeURIComponent(t.soapId)}`;
+    if (t.kind === "clps") {
+      const path = `/c/${encodeURIComponent(t.kpId)}`;
+      const season = positiveInt(t.season);
+      const episode = positiveInt(t.episode);
+      return season && episode ? `${path}/s${season}e${episode}` : path;
+    }
     return "/";
   }
 
@@ -333,6 +396,9 @@
   }
   function savedOpravarSelection(key) {
     return loadList(STORE_HISTORY).find((h) => h.key === key)?.opravarSelection || null;
+  }
+  function savedCollapsSelection(key) {
+    return loadList(STORE_HISTORY).find((h) => h.key === key)?.collapsSelection || null;
   }
   function savedSerialSelection(key) {
     return loadList(STORE_HISTORY).find((h) => h.key === key)?.serialSelection || null;
@@ -495,6 +561,176 @@
     return null;
   }
 
+  async function fetchCollapsJson(url, timeoutMs = 9000) {
+    const response = await fetchWithTimeout(url, {
+      headers: { Accept: "application/json" },
+      credentials: "omit",
+      mode: "cors",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+    }, timeoutMs);
+    const text = await response.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text.slice(0, 400) }; }
+    if (!response.ok) {
+      const error = new Error(`Collaps ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  }
+
+  async function fetchCollapsPlaylist(kpId) {
+    const id = String(kpId || "").trim();
+    if (!/^\d+$/.test(id)) throw new Error("Collaps: invalid kpId");
+    const cached = cacheGet("clpsplaylist", id);
+    if (cached?.items?.length) return cached;
+    const url = `${COLLAPS_BASE_URL}/playlist?pub=1&aggr=kp&id=${encodeURIComponent(id)}`;
+    const data = await fetchCollapsJson(url);
+    const playlist = normalizeCollapsPlaylist(data, id);
+    if (playlist.items.length) cacheSet("clpsplaylist", id, playlist, TTL.clpsplaylist);
+    return playlist;
+  }
+
+  async function fetchCollapsVideo(vkId) {
+    const id = String(vkId || "").trim();
+    if (!id) throw new Error("Collaps: missing vkId");
+    const data = await fetchCollapsJson(`${COLLAPS_BASE_URL}/video/${encodeURIComponent(id)}`);
+    const sources = normalizeCollapsSources(data?.sources || {});
+    return { raw: data, sources };
+  }
+
+  function normalizeCollapsPlaylist(data, kpId) {
+    const items = (Array.isArray(data?.items) ? data.items : [])
+      .map((item, index) => {
+        const vkId = compact(item?.vkId || item?.videoId || item?.id || "");
+        if (!vkId) return null;
+        const season = positiveInt(item?.season);
+        const episode = positiveInt(item?.episode);
+        return {
+          index,
+          cvhId: compact(item?.cvhId || ""),
+          vkId,
+          voiceStudio: compact(item?.voiceStudio || item?.translation || item?.voice || ""),
+          voiceType: compact(item?.voiceType || ""),
+          name: compact(item?.name || item?.title || ""),
+          ...(season ? { season } : {}),
+          ...(episode ? { episode } : {}),
+        };
+      })
+      .filter(Boolean);
+    const isSerial = !!data?.isSerial || items.some((item) => item.season || item.episode);
+    return {
+      kpId: String(kpId || ""),
+      titleName: compact(data?.titleName || data?.title || ""),
+      isSerial,
+      items,
+    };
+  }
+
+  function normalizeCollapsSources(sources) {
+    return COLLAPS_QUALITY_FIELDS
+      .map(([key, label, height]) => {
+        const url = compact(sources?.[key] || "");
+        if (!/^https:\/\//i.test(url)) return null;
+        return { key, label, height, url };
+      })
+      .filter(Boolean);
+  }
+
+  async function probeCollapsSearch(movies, token) {
+    if (collapsPreviewOnCooldown()) return [];
+    const candidates = (movies || [])
+      .filter((movie) => /^\d+$/.test(String(movie?.kpId || "")))
+      .slice(0, COLLAPS_PREVIEW_LIMIT)
+      .map((movie, rank) => ({ ...movie, rank }));
+    const out = [];
+    let cursor = 0;
+    const worker = async () => {
+      while (!isStale(token) && cursor < candidates.length) {
+        const movie = candidates[cursor];
+        cursor += 1;
+        try {
+          const hit = await probeCollapsMovie(movie);
+          if (hit) out.push(hit);
+        } catch (error) {
+          if (shouldCooldownCollapsPreview(error)) {
+            setCollapsPreviewCooldown(error);
+            break;
+          }
+          log("collaps-probe-item-warn", { kpId: movie?.kpId, message: error.message });
+        }
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    return out.sort((a, b) =>
+      (Number(b.qualityHeight) >= 1440) - (Number(a.qualityHeight) >= 1440) ||
+      Number(b.qualityHeight || 0) - Number(a.qualityHeight || 0) ||
+      Number(a.rank || 0) - Number(b.rank || 0)
+    );
+  }
+
+  async function probeCollapsMovie(movie) {
+    const kpId = String(movie?.kpId || "");
+    const cached = cacheGet("clpsprobe", kpId);
+    if (cached?.kpId) return { ...cached, rank: movie.rank ?? 0 };
+    const inflightKey = kpId;
+    if (collapsProbeInflight.has(inflightKey)) return collapsProbeInflight.get(inflightKey);
+    const pending = (async () => {
+      const playlist = await fetchCollapsPlaylist(kpId);
+      const item = chooseCollapsProbeItem(playlist.items);
+      if (!item) return null;
+      const video = await fetchCollapsVideo(item.vkId);
+      const best = video.sources[0];
+      if (!best) return null;
+      const hit = {
+        kpId,
+        title: movieTitle(movie) || playlist.titleName || `KP ${kpId}`,
+        year: movie?.year || "",
+        poster: movie?.poster || "",
+        rating: movie?.rating || {},
+        movieLength: movie?.movieLength || null,
+        isSeries: !!(playlist.isSerial || movie?.isSeries),
+        qualityLabel: best.label,
+        qualityHeight: best.height,
+        selection: {
+          ...(item.season ? { season: item.season } : {}),
+          ...(item.episode ? { episode: item.episode } : {}),
+        },
+        rank: Number(movie?.rank || 0),
+      };
+      cacheSet("clpsprobe", kpId, hit, TTL.clpsprobe);
+      return hit;
+    })().finally(() => collapsProbeInflight.delete(inflightKey));
+    collapsProbeInflight.set(inflightKey, pending);
+    return pending;
+  }
+
+  function chooseCollapsProbeItem(items) {
+    const list = Array.isArray(items) ? items : [];
+    return list.find((item) => item.season === 1 && item.episode === 1) ||
+      list.find((item) => item.episode === 1) ||
+      list[0] ||
+      null;
+  }
+
+  function collapsPreviewOnCooldown() {
+    return !!cacheGet("clpspreview", "cooldown");
+  }
+
+  function shouldCooldownCollapsPreview(error) {
+    const status = Number(error?.status || String(error?.message || "").match(/\b(401|403|429)\b/)?.[1] || 0);
+    if ([401, 403, 429].includes(status)) return true;
+    return /Failed to fetch|NetworkError|Load failed|CORS|blocked/i.test(String(error?.message || ""));
+  }
+
+  function setCollapsPreviewCooldown(error) {
+    cacheSet("clpspreview", "cooldown", {
+      at: Date.now(),
+      message: String(error?.message || error || "").slice(0, 120),
+    }, COLLAPS_PREVIEW_COOLDOWN_MS);
+  }
+
   async function resolveZona(kpId) {
     const cached = cacheGet("zona", kpId);
     if (cached && cached.embedUrl) return cached;
@@ -641,10 +877,16 @@
     if (!segs.length) return { view: "home" };
     if (segs[0] === "bookmarks") return { view: "bookmarks" };
     if (segs[0] === "search") return { view: "search", q: segs.slice(1).join("/") };
+    if (segs[0] === "watch" && (segs[1] === "clps" || segs[1] === "collaps") && /^\d+$/.test(segs[2] || "")) {
+      return { view: "watch", kind: "clps", raw: segs[2], selection: collapsSelectionFromEpisodeKey(segs[3]) };
+    }
     if (segs[0] === "watch") return { view: "watch", kind: segs[1], raw: segs.slice(2).join("/") || "" };
     if (/^\d+$/.test(segs[0])) return { view: "watch", kind: "zen", raw: segs[0] };
     if (segs[0] === "k" && /^\d+$/.test(segs[1] || "")) return { view: "watch", kind: "kp", raw: segs[1] };
     if (segs[0] === "m" && /^\d+$/.test(segs[1] || "")) return { view: "watch", kind: "soap", raw: segs[1] };
+    if (segs[0] === "c" && /^\d+$/.test(segs[1] || "")) {
+      return { view: "watch", kind: "clps", raw: segs[1], selection: collapsSelectionFromEpisodeKey(segs[2]) };
+    }
     if (segs[0] === "o" && /^\d+$/.test(segs[1] || "")) {
       return { view: "watch", kind: "ort", raw: ortifiedUrlFromShort(segs[1], segs[2]) };
     }
@@ -677,6 +919,7 @@
     if (route.kind === "opr") return { kind: "opr", playerUrl: route.raw };
     if (route.kind === "nd") return { kind: "nd", pageUrl: route.raw };
     if (route.kind === "soap") return { kind: "soap", soapId: route.raw };
+    if (route.kind === "clps") return collapsTarget(route.raw, route.selection || {});
     return null;
   }
 
@@ -729,6 +972,7 @@
   function showHome() {
     setView("home");
     warmNewdeafConnections();
+    warmCollapsConnections();
     document.title = "alphy";
     el.searchInput.value = "";
     const hist = loadList(STORE_HISTORY);
@@ -906,7 +1150,7 @@
   }
 
   function continueStatus(entry) {
-    const selection = entry?.serialSelection || entry?.opravarSelection || null;
+    const selection = entry?.serialSelection || entry?.opravarSelection || entry?.collapsSelection || null;
     const season = positiveInt(selection?.season);
     const episode = positiveInt(selection?.episode);
     const episodeLabel = season && episode ? `S${season}E${episode}` : "";
@@ -926,6 +1170,7 @@
     setView("search");
     warmNewdeafConnections();
     warmSoapConnections();
+    warmCollapsConnections();
     document.title = `${query} — alphy`;
     el.searchInput.value = query;
     el.resultsTitle.textContent = "Поиск…";
@@ -941,7 +1186,26 @@
 
     let pk = [];
     let nd = [];
+    let clps = [];
     let newdeafUnavailable = false;
+    let collapsProbeKey = "";
+    let collapsScheduledKey = "";
+    const startCollapsProbe = (movies) => {
+      const ids = (movies || []).map((m) => m.kpId).filter(Boolean).slice(0, COLLAPS_PREVIEW_LIMIT).join(",");
+      if (!ids || ids === collapsProbeKey || ids === collapsScheduledKey || collapsPreviewOnCooldown()) return;
+      collapsScheduledKey = ids;
+      scheduleIdle(() => {
+        if (isStale(token) || collapsScheduledKey !== ids || collapsPreviewOnCooldown()) return;
+        collapsScheduledKey = "";
+        collapsProbeKey = ids;
+        probeCollapsSearch(movies, token)
+          .then((hits) => {
+            clps = hits;
+            if (!isStale(token)) renderResults(nd, pk, query, { newdeafUnavailable, collapsHits: clps });
+          })
+          .catch((error) => log("collaps-probe-warn", error.message));
+      }, COLLAPS_PREVIEW_IDLE_TIMEOUT);
+    };
     const canStartNewdeafNow = /[а-яё]/i.test(query);
     const newdeafTask = canStartNewdeafNow
       ? searchNewdeaf(query)
@@ -963,17 +1227,20 @@
         nd = first.results;
         newdeafUnavailable = first.unavailable;
       }
-      renderResults(nd, pk, query, { newdeafUnavailable });
+      if (pk.length) startCollapsProbe(pk);
+      renderResults(nd, pk, query, { newdeafUnavailable, collapsHits: clps });
 
       const [poisk, newdeaf] = await Promise.all([poiskTask, newdeafTask]);
       pk = poisk.results;
       nd = newdeaf.results;
       newdeafUnavailable = newdeaf.unavailable;
+      if (pk.length) startCollapsProbe(pk);
     } else {
       const poisk = await poiskTask;
       if (isStale(token)) return;
       pk = poisk.results;
-      renderResults([], pk, query);
+      startCollapsProbe(pk);
+      renderResults([], pk, query, { collapsHits: clps });
 
       // newdeaf indexes Russian titles only. If the query has no Cyrillic, search
       // newdeaf with the Russian name from the top PoiskKino hit so English queries
@@ -989,8 +1256,8 @@
     if (isStale(token)) return;
     await soapTask;
     if (isStale(token)) return;
-    renderResults(nd, pk, query, { newdeafUnavailable });
-    if (!pk.length && !nd.length && !soapSearch(query, { limit: 1 }).length) {
+    renderResults(nd, pk, query, { newdeafUnavailable, collapsHits: clps });
+    if (!pk.length && !nd.length && !clps.length && !soapSearch(query, { limit: 1 }).length) {
       el.resultsTitle.textContent = "Ничего не найдено";
     }
   }
@@ -1008,6 +1275,10 @@
     const frag = document.createDocumentFragment();
     el.resultsTitle.textContent = "Результаты";
     if (ndCandidates.length) prefetchTopNewdeafPage(ndCandidates);
+    const collapsHits = Array.isArray(options.collapsHits) ? options.collapsHits : [];
+    const highCollapsHits = collapsHits.filter((hit) => Number(hit.qualityHeight) >= 1440);
+    const regularCollapsHits = collapsHits.filter((hit) => Number(hit.qualityHeight) < 1440);
+    for (const hit of highCollapsHits) frag.appendChild(makeCollapsCard(hit));
     // newdeaf first and prioritized: when a title is in both sources, the ad-free
     // Ortified path (newdeaf, with the embedded season/episode player) is the
     // preferred choice, so it leads the grid — same ordering as the old MVP.
@@ -1036,6 +1307,7 @@
       });
       frag.appendChild(card);
     }
+    for (const hit of regularCollapsHits) frag.appendChild(makeCollapsCard(hit));
     for (const movie of pkResults) {
       if (movie.kpId == null) continue;
       const title = movieTitle(movie);
@@ -1084,7 +1356,7 @@
       note.textContent = "Newdeaf не ответил этому браузеру — показаны остальные результаты.";
       frag.appendChild(note);
     }
-    if (!pkResults.length && !ndCandidates.length && !soapHits.length) {
+    if (!pkResults.length && !ndCandidates.length && !collapsHits.length && !soapHits.length) {
       const p = document.createElement("p");
       p.className = "muted";
       p.textContent = `Ничего не найдено по «${query}».`;
@@ -1092,6 +1364,32 @@
     }
     el.resultsGrid.replaceChildren(frag);
     layoutMobileGrid(el.resultsGrid);
+  }
+
+  function makeCollapsCard(hit) {
+    const target = collapsTarget(hit.kpId, hit.selection || {});
+    const details = {
+      title: hit.title || `KP ${hit.kpId}`,
+      year: hit.year || "",
+      poster: hit.poster || "",
+      rating: hit.rating || {},
+      movieLength: hit.movieLength || null,
+      isSeries: !!hit.isSeries,
+      kpId: String(hit.kpId || ""),
+    };
+    const quality = hit.qualityLabel || "MP4";
+    return makeCard({
+      title: details.title,
+      sub: [quality, details.isSeries ? "сериал" : "фильм", "CLPS"].filter(Boolean).join(" · "),
+      poster: details.poster,
+      ratingPill: "CLPS",
+      rating: details.rating,
+      movieLength: details.movieLength,
+      isSeries: details.isSeries,
+      bookmark: { target, details },
+      onClick: () => go(hashFor(target)),
+      onAdd: () => window.alphyCatalog?.addToList?.(collapsListItem(hit, details)),
+    });
   }
 
   function makeCard({
@@ -1237,6 +1535,7 @@
     if (r.kind === "opr") return playOpr(r.raw, token, null);
     if (r.kind === "nd") return playNd(r.raw, token);
     if (r.kind === "soap") return playSoap(r.raw, token);
+    if (r.kind === "clps") return playCollaps(r.raw, token, { selection: r.selection });
     throw new Error("Неизвестный тип контента");
   }
 
@@ -1581,6 +1880,469 @@
         setTimeout(renderSoapTracks, 50);
       });
       return btn;
+    });
+  }
+
+  async function playCollaps(kpId, token, opts = {}) {
+    const id = String(kpId || "").trim();
+    if (!/^\d+$/.test(id)) throw new Error("Collaps: неверный KP id");
+
+    const cachedMeta = opts.meta || cacheGet("meta", id);
+    const metaTask = cachedMeta ? Promise.resolve(cachedMeta) : fetchMovieMeta(id).catch(() => null);
+    const playlist = await fetchCollapsPlaylist(id);
+    if (isStale(token)) return;
+    const meta = await metaTask;
+    if (isStale(token)) return;
+    if (meta) cacheSet("meta", id, meta, TTL.meta);
+
+    const requested =
+      normalizeCollapsSelection(opts.selection) ||
+      normalizeCollapsSelection(savedCollapsSelection(`clps:${id}`));
+    const title = movieTitle(meta) || playlist.titleName || `KP ${id}`;
+    const target = {
+      kind: "clps",
+      kpId: id,
+      title,
+      poster: meta?.poster || "",
+      year: meta?.year || "",
+      isSeries: !!(playlist.isSerial || meta?.isSeries || requested?.season || requested?.episode),
+      ...(requested?.season ? { season: requested.season } : {}),
+      ...(requested?.episode ? { episode: requested.episode } : {}),
+    };
+    state.currentTarget = target;
+    setWatchHead(title, target);
+    renderMeta(mergeMetadata({ title, isSeries: target.isSeries }, meta || {}), target);
+    recordOpen(target);
+
+    const context = buildCollapsContext(playlist);
+    const selection = chooseCollapsSelection(context, requested);
+    if (!selection) throw new Error("Collaps не вернул озвучки/серии для этого KP");
+    await playCollapsSelection(context, selection, token, resumePosition(keyFor(target)), {
+      qualityKey: requested?.qualityKey,
+    });
+  }
+
+  async function playCollapsSelection(context, selection, token, resume = 0, opts = {}) {
+    const target = state.currentTarget;
+    if (!target || target.kind !== "clps") return;
+    const picked = chooseCollapsSelection(context, selection);
+    const item = picked?.item;
+    if (!item?.vkId) throw new Error("Collaps: не выбрана озвучка");
+
+    const resolved = await fetchCollapsVideo(item.vkId);
+    if (isStale(token)) return;
+    if (!resolved.sources.length) throw new Error("Collaps не отдал progressive MP4");
+
+    const stored = normalizeCollapsSelection(savedCollapsSelection(keyFor(target))) || {};
+    const source = chooseCollapsSource(
+      resolved.sources,
+      opts.qualityKey || selection?.qualityKey || stored.qualityKey,
+    );
+    if (!source?.url) throw new Error("Collaps: нет выбранного качества");
+
+    const nextSelection = cleanCollapsSelection({
+      ...picked,
+      qualityKey: source.key,
+    });
+    if (nextSelection.season) target.season = nextSelection.season;
+    if (nextSelection.episode) target.episode = nextSelection.episode;
+
+    const previous = state.collaps || {};
+    const playback = {
+      context,
+      selection: nextSelection,
+      item,
+      sources: resolved.sources,
+      videoMeta: resolved.raw || {},
+      qualityKey: source.key,
+      autoRefresh: opts.autoRefresh ?? previous.autoRefresh ?? true,
+      refreshSec: opts.refreshSec || previous.refreshSec || COLLAPS_REFRESH_SEC,
+      activeIndex: 0,
+      videos: [],
+      refreshTimer: null,
+      uiTimer: null,
+      watchdog: null,
+      lastAdvanceWall: Date.now(),
+      nextAt: 0,
+      pendingRefresh: false,
+      refreshing: false,
+      status: "",
+    };
+    state.collaps = playback;
+    persistCollapsSelection(target, nextSelection, resume);
+    await mountCollapsMp4(source.url, token, resume);
+    if (state.collaps !== playback) return;
+    if (isStale(token)) return;
+    renderCollapsControls();
+    startTracking(keyFor(target), target);
+  }
+
+  async function mountCollapsMp4(url, token, resume = 0) {
+    const c = state.collaps;
+    if (!c || isStale(token)) return;
+    stopCollapsTimers();
+    warmCollapsConnections(url);
+
+    const active = createCollapsVideo();
+    const buffer = createCollapsVideo();
+    buffer.style.display = "none";
+    c.videos = [active, buffer];
+    c.activeIndex = 0;
+    state.videoEl = active;
+    el.playerHost.replaceChildren(active, buffer);
+
+    await new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        active.removeEventListener("canplay", done);
+        active.removeEventListener("loadedmetadata", onMeta);
+        if (!isStale(token) && state.collaps === c) markPlayerReady();
+        resolve();
+      };
+      const onMeta = () => {
+        if (resume > 5) { try { active.currentTime = resume; } catch { /* ignore */ } }
+      };
+      active.addEventListener("loadedmetadata", onMeta);
+      active.addEventListener("canplay", done);
+      active.src = url;
+      active.load();
+      active.play().catch(() => { /* user gesture may be required */ });
+      setTimeout(done, 2500);
+    });
+    bindCollapsActive();
+    armCollapsTimers();
+  }
+
+  function createCollapsVideo() {
+    const video = document.createElement("video");
+    video.controls = true;
+    video.playsInline = true;
+    video.autoplay = true;
+    video.preload = "auto";
+    video.playbackRate = state.playbackRate;
+    return video;
+  }
+
+  function activeCollapsVideo() {
+    const c = state.collaps;
+    return c?.videos?.[c.activeIndex] || state.videoEl;
+  }
+
+  function bufferCollapsVideo() {
+    const c = state.collaps;
+    if (!c?.videos?.length) return null;
+    return c.videos[c.activeIndex === 0 ? 1 : 0];
+  }
+
+  function bindCollapsActive() {
+    const c = state.collaps;
+    const active = activeCollapsVideo();
+    const buffer = bufferCollapsVideo();
+    if (!c || !active) return;
+    if (buffer) {
+      buffer.onerror = null;
+      buffer.ontimeupdate = null;
+      buffer.oncanplay = null;
+      buffer.onplay = null;
+    }
+    active.ontimeupdate = () => { c.lastAdvanceWall = Date.now(); };
+    active.onplay = () => {
+      if (c.pendingRefresh && !c.refreshing) {
+        c.pendingRefresh = false;
+        refreshCollapsNow("возобновление").catch((error) => log("collaps-refresh-warn", error.message));
+      }
+    };
+    active.onerror = () => {
+      if (!c.refreshing) {
+        refreshCollapsNow("error").catch((error) => showError(new Error(`Collaps: ${error.message}`)));
+      }
+    };
+  }
+
+  async function resolveFreshCollapsSource(qualityKey = "") {
+    const c = state.collaps;
+    if (!c?.item?.vkId) return null;
+    const resolved = await fetchCollapsVideo(c.item.vkId);
+    if (state.collaps !== c) return null;
+    if (!resolved.sources.length) return null;
+    const source = chooseCollapsSource(resolved.sources, qualityKey || c.qualityKey);
+    c.sources = resolved.sources;
+    c.videoMeta = resolved.raw || {};
+    c.qualityKey = source.key;
+    c.selection = cleanCollapsSelection({ ...c.selection, qualityKey: source.key });
+    if (state.currentTarget) persistCollapsSelection(state.currentTarget, c.selection, activeCollapsVideo()?.currentTime || 0);
+    return source.url;
+  }
+
+  async function refreshCollapsNow(reason, qualityKey = "") {
+    const c = state.collaps;
+    if (!c || c.refreshing) return;
+    c.refreshing = true;
+    stopCollapsSchedule();
+    try {
+      const url = await resolveFreshCollapsSource(qualityKey);
+      if (!url) throw new Error("не удалось получить свежий MP4");
+      warmCollapsConnections(url);
+      const ok = await swapCollapsVideo(url);
+      if (!ok) hardReloadCollapsVideo(url);
+      c.lastAdvanceWall = Date.now();
+    } finally {
+      c.refreshing = false;
+      armCollapsTimers();
+      renderCollapsControls();
+      log("collaps-refresh", reason);
+    }
+  }
+
+  function swapCollapsVideo(url) {
+    const c = state.collaps;
+    const cur = activeCollapsVideo();
+    const next = bufferCollapsVideo();
+    if (!c || !cur || !next) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const wasPlaying = !cur.paused && !cur.ended;
+      let done = false;
+      const cleanup = () => {
+        next.removeEventListener("loadedmetadata", onMeta);
+        next.removeEventListener("canplay", onCan);
+        next.removeEventListener("error", onErr);
+      };
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        resolve(ok);
+      };
+      const onMeta = () => { try { next.currentTime = cur.currentTime; } catch { /* ignore */ } };
+      const onCan = () => {
+        if (state.collaps !== c) { finish(false); return; }
+        const drift = cur.currentTime - next.currentTime;
+        if (Math.abs(drift) > 0.5) { try { next.currentTime = cur.currentTime; } catch { /* ignore */ } }
+        next.volume = cur.volume;
+        next.muted = cur.muted;
+        next.playbackRate = cur.playbackRate;
+        if (wasPlaying) next.play().catch(() => {});
+        next.style.display = "block";
+        cur.style.display = "none";
+        try { cur.pause(); } catch { /* ignore */ }
+        c.activeIndex = c.activeIndex === 0 ? 1 : 0;
+        state.videoEl = next;
+        bindCollapsActive();
+        setTimeout(() => { try { cur.removeAttribute("src"); cur.load(); } catch { /* ignore */ } }, 250);
+        finish(true);
+      };
+      const onErr = () => finish(false);
+      next.muted = true;
+      next.addEventListener("loadedmetadata", onMeta);
+      next.addEventListener("canplay", onCan);
+      next.addEventListener("error", onErr);
+      next.src = url;
+      next.load();
+      setTimeout(() => finish(false), 12000);
+    });
+  }
+
+  function hardReloadCollapsVideo(url) {
+    const video = activeCollapsVideo();
+    if (!video) return;
+    const position = video.currentTime || 0;
+    const wasPlaying = !video.paused && !video.ended;
+    video.src = url;
+    video.load();
+    video.addEventListener("loadedmetadata", function once() {
+      video.removeEventListener("loadedmetadata", once);
+      if (position > 0) { try { video.currentTime = position; } catch { /* ignore */ } }
+      if (wasPlaying) video.play().catch(() => {});
+    });
+  }
+
+  function stopCollapsSchedule() {
+    const c = state.collaps;
+    if (!c) return;
+    clearTimeout(c.refreshTimer);
+    clearInterval(c.uiTimer);
+    c.refreshTimer = null;
+    c.uiTimer = null;
+  }
+
+  function stopCollapsTimers() {
+    const c = state.collaps;
+    if (!c) return;
+    stopCollapsSchedule();
+    clearInterval(c.watchdog);
+    c.watchdog = null;
+  }
+
+  function armCollapsTimers() {
+    const c = state.collaps;
+    if (!c) return;
+    stopCollapsSchedule();
+    if (!c.autoRefresh) {
+      ensureCollapsWatchdog();
+      return;
+    }
+    const delay = Math.round(c.refreshSec * 1000 * (0.85 + Math.random() * 0.3));
+    c.nextAt = Date.now() + delay;
+    c.refreshTimer = setTimeout(() => {
+      const video = activeCollapsVideo();
+      if (video && !video.paused && !video.ended) {
+        refreshCollapsNow("таймер").catch((error) => log("collaps-refresh-warn", error.message));
+      } else {
+        c.pendingRefresh = true;
+        armCollapsTimers();
+      }
+    }, delay);
+    ensureCollapsWatchdog();
+  }
+
+  function ensureCollapsWatchdog() {
+    const c = state.collaps;
+    if (!c || c.watchdog) return;
+    c.watchdog = setInterval(() => {
+      if (!c.autoRefresh || c.refreshing) return;
+      const video = activeCollapsVideo();
+      if (!video || video.paused || video.ended || video.readyState < 2) return;
+      if (Date.now() - (c.lastAdvanceWall || 0) > 8000) {
+        refreshCollapsNow("зависание").catch((error) => log("collaps-refresh-warn", error.message));
+      }
+    }, 2000);
+  }
+
+  function teardownCollapsPlayer() {
+    const c = state.collaps;
+    if (!c) return;
+    stopCollapsTimers();
+    for (const video of c.videos || []) {
+      try {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      } catch {
+        /* ignore */
+      }
+    }
+    state.collaps = null;
+  }
+
+  function renderCollapsControls() {
+    const c = state.collaps;
+    if (!c) return;
+    el.serialPanel.replaceChildren();
+    el.serialPanel.classList.add("hidden");
+    el.trackPanel.replaceChildren();
+    el.trackPanel.classList.remove("hidden");
+
+    if (c.context.isSerial) renderCollapsSerialControls(c.context, c.selection);
+
+    const voices = collapsVoicesForSelection(c.context, c.selection);
+    addTrackGroup("Озвучка", voices, (item, index) => {
+      const btn = document.createElement("button");
+      btn.textContent = collapsVoiceLabel(item, index);
+      if (item.vkId === c.selection.vkId) btn.className = "active";
+      btn.addEventListener("click", () => switchCollapsSelection({ ...c.selection, voiceIndex: index, vkId: item.vkId }));
+      return btn;
+    });
+
+    addTrackGroup("Качество", c.sources || [], (source) => {
+      const btn = document.createElement("button");
+      btn.textContent = source.label;
+      if (source.key === c.qualityKey) btn.className = "active";
+      btn.addEventListener("click", () => refreshCollapsNow("качество", source.key).catch((error) => showError(error)));
+      return btn;
+    });
+
+    addTrackGroup("Сессия", [{ refresh: true }, { auto: true }], (item) => {
+      const btn = document.createElement("button");
+      if (item.refresh) {
+        btn.textContent = "обновить";
+        btn.addEventListener("click", () => refreshCollapsNow("вручную").catch((error) => showError(error)));
+        return btn;
+      }
+      btn.textContent = c.autoRefresh ? "авто вкл" : "авто выкл";
+      if (c.autoRefresh) btn.className = "active";
+      btn.addEventListener("click", () => {
+        c.autoRefresh = !c.autoRefresh;
+        armCollapsTimers();
+        renderCollapsControls();
+      });
+      return btn;
+    });
+
+    addTrackGroup("Скорость", [0.5, 1, 1.25, 1.5, 1.75, 2].map((speed) => ({ speed })), (item) => {
+      const btn = document.createElement("button");
+      btn.textContent = `${item.speed}×`;
+      if (item.speed === state.playbackRate) btn.className = "active";
+      btn.addEventListener("click", () => {
+        state.playbackRate = item.speed;
+        try { localStorage.setItem("alphy.playbackRate", String(item.speed)); } catch { /* ignore */ }
+        for (const video of c.videos || []) video.playbackRate = item.speed;
+        setTimeout(renderCollapsControls, 50);
+      });
+      return btn;
+    });
+  }
+
+  function renderCollapsSerialControls(context, selection) {
+    const current = chooseCollapsSelection(context, selection);
+    const season = context.seasons.find((item) => item.season === current?.season);
+
+    addTrackGroup("", context.seasons, (item) => {
+      const btn = document.createElement("button");
+      btn.textContent = `Сезон ${item.season}`;
+      if (item.season === current?.season) btn.className = "active";
+      btn.addEventListener("click", () => {
+        const preferred = item.episodes.find((episode) => episode.episode === current?.episode) || item.episodes[0];
+        switchCollapsSelection({ season: item.season, episode: preferred?.episode, vkId: current?.vkId, qualityKey: current?.qualityKey });
+      });
+      return btn;
+    }, { panel: el.serialPanel, hideLabel: true, className: "serial-seasons" });
+
+    addTrackGroup("", season?.episodes || [], (item) => {
+      const btn = document.createElement("button");
+      btn.textContent = String(item.episode);
+      if (item.episode === current?.episode) btn.className = "active";
+      btn.addEventListener("click", () => {
+        switchCollapsSelection({ season: current?.season, episode: item.episode, vkId: current?.vkId, qualityKey: current?.qualityKey });
+      });
+      return btn;
+    }, { panel: el.serialPanel, hideLabel: true, className: "serial-episodes" });
+  }
+
+  async function switchCollapsSelection(nextSelection) {
+    const c = state.collaps;
+    const target = state.currentTarget;
+    if (!c || !target || target.kind !== "clps") return;
+    const next = chooseCollapsSelection(c.context, nextSelection);
+    if (!next || sameCollapsSelection(c.selection, next)) return;
+    const token = resolveToken;
+    const context = c.context;
+    const autoRefresh = c.autoRefresh;
+    const refreshSec = c.refreshSec;
+    const qualityKey = c.qualityKey;
+    teardownCollapsPlayer();
+    showPlayerLoading();
+    try {
+      await playCollapsSelection(context, next, token, 0, { qualityKey, autoRefresh, refreshSec });
+    } catch (error) {
+      if (!isStale(token)) showError(new Error(`Collaps: ${error.message}`));
+    }
+  }
+
+  function persistCollapsSelection(target, selection, position = 0) {
+    if (!target || target.kind !== "clps") return;
+    recordHistory({
+      key: keyFor(target),
+      kind: target.kind,
+      target: cleanTarget(target),
+      title: target.title || "",
+      poster: target.poster || "",
+      year: target.year || "",
+      collapsSelection: cleanCollapsSelection(selection),
+      position,
+      duration: 0,
+      progress: 0,
     });
   }
 
@@ -2228,6 +2990,7 @@
         progress: cur / dur,
       };
       if (audioLang) entry.audioLang = audioLang;
+      if (state.collaps?.selection) entry.collapsSelection = cleanCollapsSelection(state.collaps.selection);
       recordHistory(entry);
       if (Date.now() - state.lastSnapshotAt > 20_000) {
         captureVideoSnapshot(histKey, target);
@@ -2332,6 +3095,7 @@
 
   async function teardownPlayer() {
     stopTracking();
+    teardownCollapsPlayer();
     if (state.player) {
       await state.player.destroy().catch(() => {});
       state.player = null;
@@ -3337,6 +4101,24 @@ addEventListener('message', async (event) => {
     }
   }
 
+  function warmCollapsConnections(mediaUrl = "") {
+    const origins = [new URL(COLLAPS_BASE_URL).origin];
+    try {
+      if (mediaUrl) origins.push(new URL(mediaUrl).origin);
+    } catch {
+      /* ignore signed URL parse failures */
+    }
+    for (const origin of unique(origins)) {
+      if (!origin || collapsWarmOrigins.has(origin)) continue;
+      collapsWarmOrigins.add(origin);
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = origin;
+      link.crossOrigin = "anonymous";
+      document.head.appendChild(link);
+    }
+  }
+
   function scheduleIdle(callback, timeout = 2500) {
     if (typeof requestIdleCallback === "function") {
       return requestIdleCallback(callback, { timeout });
@@ -3636,6 +4418,142 @@ addEventListener('message', async (event) => {
   // =====================================================================
   // small helpers
   // =====================================================================
+  function buildCollapsContext(playlist) {
+    const items = Array.isArray(playlist?.items) ? playlist.items : [];
+    if (!playlist?.isSerial) {
+      return {
+        provider: "collaps",
+        kpId: playlist?.kpId || "",
+        titleName: playlist?.titleName || "",
+        isSerial: false,
+        voices: items,
+        seasons: [],
+      };
+    }
+
+    const seasonMap = new Map();
+    for (const item of items) {
+      const seasonNumber = positiveInt(item.season) || 1;
+      const episodeNumber = positiveInt(item.episode) || 1;
+      if (!seasonMap.has(seasonNumber)) seasonMap.set(seasonNumber, new Map());
+      const episodeMap = seasonMap.get(seasonNumber);
+      if (!episodeMap.has(episodeNumber)) episodeMap.set(episodeNumber, []);
+      episodeMap.get(episodeNumber).push(item);
+    }
+    const seasons = [...seasonMap.entries()]
+      .map(([season, episodeMap]) => ({
+        season,
+        episodes: [...episodeMap.entries()]
+          .map(([episode, voices]) => ({ episode, voices }))
+          .sort((a, b) => a.episode - b.episode),
+      }))
+      .filter((season) => season.episodes.length)
+      .sort((a, b) => a.season - b.season);
+    return {
+      provider: "collaps",
+      kpId: playlist?.kpId || "",
+      titleName: playlist?.titleName || "",
+      isSerial: true,
+      voices: [],
+      seasons,
+    };
+  }
+
+  function collapsVoicesForSelection(context, selection) {
+    if (!context?.isSerial) return context?.voices || [];
+    const picked = chooseCollapsSelection(context, selection);
+    const season = context.seasons.find((item) => item.season === picked?.season);
+    const episode = season?.episodes.find((item) => item.episode === picked?.episode);
+    return episode?.voices || [];
+  }
+
+  function chooseCollapsSelection(context, requested = {}) {
+    if (!context) return null;
+    const req = normalizeCollapsSelection(requested) || {};
+    if (!context.isSerial) {
+      const voices = context.voices || [];
+      const indexByVk = voices.findIndex((item) => req.vkId && item.vkId === req.vkId);
+      const indexByNumber = Number.isInteger(req.voiceIndex) && voices[req.voiceIndex] ? req.voiceIndex : -1;
+      const voiceIndex = indexByVk >= 0 ? indexByVk : indexByNumber >= 0 ? indexByNumber : 0;
+      const item = voices[voiceIndex];
+      return item ? {
+        voiceIndex,
+        vkId: item.vkId,
+        voiceName: collapsVoiceLabel(item, voiceIndex),
+        item,
+        ...(req.qualityKey ? { qualityKey: req.qualityKey } : {}),
+      } : null;
+    }
+
+    const seasons = context.seasons || [];
+    const season = seasons.find((item) => item.season === req.season) || seasons[0];
+    const episode =
+      season?.episodes.find((item) => item.episode === req.episode) ||
+      season?.episodes[0];
+    const voices = episode?.voices || [];
+    const indexByVk = voices.findIndex((item) => req.vkId && item.vkId === req.vkId);
+    const indexByNumber = Number.isInteger(req.voiceIndex) && voices[req.voiceIndex] ? req.voiceIndex : -1;
+    const voiceIndex = indexByVk >= 0 ? indexByVk : indexByNumber >= 0 ? indexByNumber : 0;
+    const item = voices[voiceIndex];
+    return item ? {
+      season: season.season,
+      episode: episode.episode,
+      voiceIndex,
+      vkId: item.vkId,
+      voiceName: collapsVoiceLabel(item, voiceIndex),
+      item,
+      ...(req.qualityKey ? { qualityKey: req.qualityKey } : {}),
+    } : null;
+  }
+
+  function sameCollapsSelection(a, b) {
+    return !!a && !!b &&
+      Number(a.season || 0) === Number(b.season || 0) &&
+      Number(a.episode || 0) === Number(b.episode || 0) &&
+      String(a.vkId || "") === String(b.vkId || "") &&
+      String(a.qualityKey || "") === String(b.qualityKey || "");
+  }
+
+  function cleanCollapsSelection(value = {}) {
+    const out = {};
+    const season = positiveInt(value.season);
+    const episode = positiveInt(value.episode);
+    const voiceIndex = Number.parseInt(String(value.voiceIndex ?? ""), 10);
+    if (season) out.season = season;
+    if (episode) out.episode = episode;
+    if (Number.isInteger(voiceIndex) && voiceIndex >= 0) out.voiceIndex = voiceIndex;
+    if (value.vkId) out.vkId = String(value.vkId);
+    if (value.voiceName) out.voiceName = String(value.voiceName).slice(0, 120);
+    if (collapsQualityByKey(value.qualityKey)) out.qualityKey = String(value.qualityKey);
+    return out;
+  }
+
+  function normalizeCollapsSelection(value = {}) {
+    if (!value || typeof value !== "object") return null;
+    const selection = cleanCollapsSelection(value);
+    return Object.keys(selection).length ? selection : null;
+  }
+
+  function collapsSelectionFromEpisodeKey(value) {
+    const match = String(value || "").match(/^s(\d+)e(\d+)$/i);
+    return match ? { season: Number(match[1]), episode: Number(match[2]) } : null;
+  }
+
+  function collapsQualityByKey(key) {
+    return COLLAPS_QUALITY_FIELDS.find(([field]) => field === key) || null;
+  }
+
+  function chooseCollapsSource(sources, qualityKey = "") {
+    const list = Array.isArray(sources) ? sources : [];
+    return list.find((source) => source.key === qualityKey) || list[0] || null;
+  }
+
+  function collapsVoiceLabel(item, index = 0) {
+    return [item?.voiceStudio, item?.voiceType].filter(Boolean).join(" · ") ||
+      item?.name ||
+      `Озвучка ${index + 1}`;
+  }
+
   function normalizeSerialSeasons(value) {
     return (Array.isArray(value) ? value : [])
       .map((season) => ({
@@ -3976,6 +4894,10 @@ addEventListener('message', async (event) => {
           return go(`/watch/opr/${encodeURIComponent(value)}`);
         }
         if (/newdeaf\.co$/i.test(url.host)) return go(`/watch/nd/${encodeURIComponent(value)}`);
+        if (/^plapi\.cdnvideohub\.com$/i.test(url.host) && /\/playlist$/i.test(url.pathname)) {
+          const id = url.searchParams.get("id");
+          if (/^\d+$/.test(id || "")) return go(`/c/${id}`);
+        }
       } catch { /* fall through to title search */ }
     }
     go(`/search/${encodeURIComponent(value)}`);
@@ -4049,6 +4971,7 @@ addEventListener('message', async (event) => {
       cacheSet("oprmeta", target.playerUrl, { ...meta, pageUrl: target.pageUrl || "" }, TTL.enriched);
     }
     if (target.kind === "kp") cacheSet("meta", target.kpId, { ...meta, kpId: target.kpId }, TTL.enriched);
+    if (target.kind === "clps") cacheSet("meta", target.kpId, { ...meta, kpId: target.kpId }, TTL.enriched);
     go(hashFor(target));
   }
 
@@ -4098,7 +5021,10 @@ addEventListener('message', async (event) => {
       go("/");
     });
     el.searchBtn.addEventListener("click", onSearchSubmit);
-    el.searchInput.addEventListener("focus", warmNewdeafConnections);
+    el.searchInput.addEventListener("focus", () => {
+      warmNewdeafConnections();
+      warmCollapsConnections();
+    });
     el.searchInput.addEventListener("keydown", (e) => { if (e.key === "Enter") onSearchSubmit(); });
     el.bookmarksToggle.addEventListener("click", () => go("/bookmarks"));
     el.soapBrowseBtn?.addEventListener("click", showSoapBrowser);
