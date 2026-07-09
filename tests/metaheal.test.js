@@ -241,6 +241,26 @@ test("curated series click hands meta to the watch page under the clean URL", as
   assert.equal(entry?.title, "Задорные друзья", "history entry created with the curated title");
 });
 
+test("boot sweep drops expired foryou caches but never its stateful keys", async () => {
+  const now = Date.now();
+  const seed = new Map();
+  seed.set("alphy.foryou.sim.111", JSON.stringify({ v: [{ id: "1", ru: "Старое" }], exp: now - 1000 }));
+  seed.set("alphy.foryou.sim.222", JSON.stringify({ v: [{ id: "2", ru: "Свежее" }], exp: now + 86400e3 }));
+  seed.set("alphy.foryou.quota.2026-07-09", "14");
+  seed.set("alphy.foryou.hidden.v1", JSON.stringify([{ id: "3", at: now }]));
+  seed.set("alphy.foryou.last.v1", JSON.stringify({ items: [], at: now }));
+  seed.set("alphy.cache.zona:42", JSON.stringify({ v: { embedUrl: "x" }, exp: now - 1000 }));
+  const ctx = makeSandbox({ storageSeed: seed });
+  ctx.run();
+  await sleep(100);
+  assert.equal(ctx.storage.has("alphy.foryou.sim.111"), false, "expired sim swept at boot");
+  assert.equal(ctx.storage.has("alphy.cache.zona:42"), false, "expired app cache swept at boot");
+  assert.ok(ctx.storage.has("alphy.foryou.sim.222"), "live sim kept");
+  assert.equal(ctx.storage.get("alphy.foryou.quota.2026-07-09"), "14", "quota counter untouched");
+  assert.ok(ctx.storage.has("alphy.foryou.hidden.v1"), "dismissals untouched");
+  assert.ok(ctx.storage.has("alphy.foryou.last.v1"), "cached row untouched");
+});
+
 test("curated click meta handoff survives quota exhaustion", async () => {
   const seed = new Map();
   let junkSize = 0;

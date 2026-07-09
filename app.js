@@ -184,7 +184,12 @@
       const now = Date.now();
       for (let i = 0; i < localStorage.length; i += 1) {
         const key = localStorage.key(i) || "";
-        if (!key.startsWith(CACHE_PREFIX)) continue;
+        // foryou.js uses the same {v, exp} envelope but deletes expired entries
+        // only on read — sims of films that left history are never read again,
+        // so without this sweep they would accumulate forever (~4KB per film).
+        // Its non-TTL keys (quota counters, hidden.v1, last.v1) carry no exp
+        // field and are therefore never treated as expired.
+        if (!key.startsWith(CACHE_PREFIX) && !key.startsWith("alphy.foryou.")) continue;
         let exp = 0;
         try { exp = JSON.parse(localStorage.getItem(key) || "{}").exp || 0; } catch { exp = 1; }
         if (exp && exp <= now) doomed.push(key);
