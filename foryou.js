@@ -41,7 +41,7 @@
   const MAX_SEEDS = 12;
   const MAX_SIM_FETCH_PER_RUN = 10;
   const MAX_META_FETCH_PER_RUN = 8;
-  const MAX_LOOKUP_PER_RUN = 3;
+  const MAX_LOOKUP_PER_RUN = 5;
   const DAILY_FETCH_CAP = 60;
   const FETCH_CONCURRENCY = 3;
   const ROW_SIZE = 18;

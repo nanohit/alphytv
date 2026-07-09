@@ -165,11 +165,50 @@
     }
   }
   function cacheSet(ns, key, value, ttlMs) {
+    const storageKey = `${CACHE_PREFIX}${ns}:${key}`;
+    const payload = JSON.stringify({ v: value, exp: ttlMs ? Date.now() + ttlMs : 0 });
     try {
-      localStorage.setItem(`${CACHE_PREFIX}${ns}:${key}`, JSON.stringify({ v: value, exp: ttlMs ? Date.now() + ttlMs : 0 }));
+      localStorage.setItem(storageKey, payload);
     } catch {
-      /* quota — ignore */
+      freeCacheSpace();
+      try { localStorage.setItem(storageKey, payload); } catch { /* still full — session runs on network */ }
     }
+  }
+  // Silent quota failures used to drop the ortmeta/curatedmeta handoff between the
+  // homepage and the watch page, leaving Ortified titles with a bare sidebar.
+  // Reclaim space from our own TTL cache instead: expired entries first, then the
+  // oldest-expiring third. History/bookmarks/foryou storage is never touched.
+  function dropExpiredCache() {
+    const doomed = [];
+    try {
+      const now = Date.now();
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i) || "";
+        if (!key.startsWith(CACHE_PREFIX)) continue;
+        let exp = 0;
+        try { exp = JSON.parse(localStorage.getItem(key) || "{}").exp || 0; } catch { exp = 1; }
+        if (exp && exp <= now) doomed.push(key);
+      }
+      doomed.forEach((key) => localStorage.removeItem(key));
+    } catch { /* ignore */ }
+    return doomed.length;
+  }
+  function freeCacheSpace() {
+    if (dropExpiredCache()) return;
+    try {
+      const entries = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i) || "";
+        if (!key.startsWith(CACHE_PREFIX)) continue;
+        let exp = Infinity;
+        try { exp = JSON.parse(localStorage.getItem(key) || "{}").exp || Infinity; } catch { exp = 0; }
+        entries.push({ key, exp });
+      }
+      entries.sort((a, b) => a.exp - b.exp);
+      entries.slice(0, Math.max(10, Math.ceil(entries.length / 3))).forEach((entry) => {
+        localStorage.removeItem(entry.key);
+      });
+    } catch { /* ignore */ }
   }
   function loadList(storeKey) {
     try {
@@ -180,10 +219,12 @@
     }
   }
   function saveList(storeKey, value) {
+    const payload = JSON.stringify(value);
     try {
-      localStorage.setItem(storeKey, JSON.stringify(value));
+      localStorage.setItem(storeKey, payload);
     } catch {
-      /* ignore */
+      freeCacheSpace();
+      try { localStorage.setItem(storeKey, payload); } catch { /* ignore */ }
     }
   }
 
@@ -353,7 +394,19 @@
       hist = hist.map((item) => item.key === entry.key ? item : ({ ...item, snapshot: "" }));
     }
     const i = hist.findIndex((h) => h.key === entry.key);
-    const merged = { ...(i >= 0 ? hist[i] : {}), ...entry, updatedAt: Date.now() };
+    const prev = i >= 0 ? hist[i] : null;
+    const merged = { ...(prev || {}), ...entry, updatedAt: Date.now() };
+    // A replay whose caches rotted (expired ortmeta, bare deep link) must never
+    // blank out metadata an earlier session already stored — progress reporters
+    // pass whatever the current target knows, which can be nothing.
+    if (prev) {
+      for (const field of ["title", "poster", "year", "movieLength", "kpId", "isSeries", "snapshot"]) {
+        if (!merged[field] && prev[field]) merged[field] = prev[field];
+      }
+      // rating flows through mergeMetadata and arrives as {} when unknown.
+      const ratingEmpty = !merged.rating || !Object.values(merged.rating).some((v) => v);
+      if (ratingEmpty && prev.rating && Object.values(prev.rating).some((v) => v)) merged.rating = prev.rating;
+    }
     if (i >= 0) hist[i] = merged;
     else hist.unshift(merged);
     hist.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
@@ -398,6 +451,69 @@
   function storedMeta(key) {
     const entry = loadList(STORE_HISTORY).find((x) => x.key === key) || loadList(STORE_BOOKMARKS).find((x) => x.key === key);
     return entry ? { title: entry.title, poster: entry.poster, year: entry.year } : null;
+  }
+
+  // Ortified/Opravar targets carry no kpId, so their sidebar lives entirely on the
+  // localStorage relay (ortmeta/oprmeta cache -> history entry). When both rot
+  // (TTL expiry, quota, a bare replay), recover from the published admin catalog —
+  // the same data the homepage cards render from. One same-origin fetch a session.
+  let curatedCatalogItemsPromise = null;
+  function curatedCatalogItems() {
+    if (!curatedCatalogItemsPromise) {
+      curatedCatalogItemsPromise = (async () => {
+        const grab = async (url) => {
+          const response = await fetch(url, { cache: "no-cache" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json();
+        };
+        let blobUrl = "";
+        try { blobUrl = String((await grab("/curated-config.json")).blobUrl || ""); } catch { /* fall through */ }
+        let payload = null;
+        if (blobUrl) { try { payload = await grab(blobUrl); } catch { /* fall through */ } }
+        if (!payload) { try { payload = await grab("/curated-live.json"); } catch { /* fall through */ } }
+        if (!payload) { try { payload = await grab("/curated-fallback.json"); } catch { return []; } }
+        const items = [];
+        for (const list of payload?.lists || []) {
+          for (const item of list?.items || []) if (item?.key) items.push(item);
+        }
+        return items;
+      })().catch(() => []);
+    }
+    return curatedCatalogItemsPromise;
+  }
+  async function findCuratedMeta(key) {
+    const items = await curatedCatalogItems();
+    const item = items.find((x) => x.key === key);
+    if (!item) return null;
+    return {
+      title: item.title || "",
+      year: item.year || "",
+      poster: item.poster || "",
+      description: item.description || "",
+      isSeries: !!item.isSeries,
+      movieLength: item.movieLength || null,
+      rating: item.rating || undefined,
+      kpId: item.kpId || undefined,
+    };
+  }
+  // Fire-and-forget heal for a watch page that opened with rotted/partial meta.
+  // Re-renders the sidebar, refreshes the meta cache, and writes the recovered
+  // title/poster/year back into history so the entry stops being invisible to
+  // Continue-watching and the recommender.
+  function healWatchMeta(target, token, baseMeta, cacheNs, cacheKey, fallbackHead) {
+    findCuratedMeta(keyFor(target)).then((curated) => {
+      if (!curated || isStale(token) || state.currentTarget !== target) return;
+      const merged = mergeMetadata(baseMeta || {}, curated);
+      if (!merged.title && !merged.poster) return;
+      cacheSet(cacheNs, cacheKey, merged, TTL.enriched);
+      target.title = merged.title || target.title;
+      target.poster = merged.poster || target.poster;
+      target.year = merged.year || target.year;
+      if (merged.isSeries) target.isSeries = true;
+      setWatchHead(target.title || fallbackHead, target);
+      renderMeta(merged, target);
+      recordOpen(target);
+    }).catch(() => {});
   }
 
   function resumePosition(key) {
@@ -2442,6 +2558,9 @@
       el.metaPanel.classList.add("hidden");
     }
     recordOpen(target);
+    if (!meta || !meta.title || !meta.description || !meta.rating) {
+      healWatchMeta(target, token, meta, "ortmeta", embedUrl, "Ortified");
+    }
     await playOrtifiedCleanroom(embedUrl, target, token);
   }
 
@@ -2467,6 +2586,9 @@
       el.metaPanel.classList.add("hidden");
     }
     recordOpen(target);
+    if (!meta || !meta.title || !meta.description || !meta.rating) {
+      healWatchMeta(target, token, meta, "oprmeta", playerUrl, "Opravar");
+    }
 
     try {
       const resolved = await resolveOpravar(playerUrl, pageUrl);
@@ -5014,6 +5136,7 @@ addEventListener('message', async (event) => {
   // boot
   // =====================================================================
   function boot() {
+    dropExpiredCache();
     state.playerPlaceholder = el.playerHost.innerHTML;
     const savedRate = parseFloat(localStorage.getItem("alphy.playbackRate") || "1");
     if ([0.5, 1, 1.25, 1.5, 1.75, 2].includes(savedRate)) state.playbackRate = savedRate;
