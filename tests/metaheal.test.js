@@ -198,6 +198,49 @@ test("ort progress reports cannot clobber stored meta", async () => {
   assert.equal(entry?.progress, 0.5, "progress itself is recorded");
 });
 
+// Real catalog series keys look like ?season=1&episode=1&episode=1 (duplicated
+// param from the admin add flow) while the router rebuilds a clean query — the
+// mismatch left every ort series bare even right after a curated click.
+const SERIES_EMBED_DIRTY = "https://api.ortified.ws/embed/movie/73418?season=1&episode=1&episode=1";
+const SERIES_EMBED_CLEAN = "https://api.ortified.ws/embed/movie/73418?season=1&episode=1";
+const SERIES_CATALOG = {
+  schema: 1, revision: 244, lists: [{ id: "l1", title: "Анимация", items: [{
+    id: "x2", key: `ort:${SERIES_EMBED_DIRTY}`, title: "Задорные друзья", year: "2020",
+    poster: "https://static.cdnlbox.club/poster/web/smiling.webp",
+    description: "Пим и Чарли поднимают людям настроение.",
+    isSeries: true, rating: { kp: 8.2, imdb: 8.5 },
+    target: { kind: "ort", embedUrl: SERIES_EMBED_DIRTY },
+  }] }],
+};
+
+test("ort series heals despite duplicated query params in the catalog key", async () => {
+  // Cold private-mode start: empty localStorage, deep link to a series episode.
+  const ctx = makeSandbox({ startPath: "/o/73418/s1e1", catalog: SERIES_CATALOG });
+  ctx.run();
+  await sleep(400);
+  const hist = JSON.parse(ctx.storage.get("alphy.history") || "[]");
+  const entry = hist.find((h) => h.key === `ort:${SERIES_EMBED_CLEAN}`);
+  assert.equal(entry?.title, "Задорные друзья", "series title healed via base-URL key match");
+  assert.ok(entry?.poster, "series poster healed");
+  const ortmetaRaw = ctx.storage.get(`alphy.cache.ortmeta:${SERIES_EMBED_CLEAN}`);
+  const ortmeta = ortmetaRaw ? JSON.parse(ortmetaRaw).v : null;
+  assert.ok(ortmeta?.rating?.kp, "ortmeta cached under the clean URL the router uses");
+});
+
+test("curated series click hands meta to the watch page under the clean URL", async () => {
+  const ctx = makeSandbox({ catalog: SERIES_CATALOG });
+  ctx.run();
+  await sleep(150);
+  ctx.sandbox.window.alphyBridge.openCuratedItem(SERIES_CATALOG.lists[0].items[0]);
+  await sleep(300);
+  const ortmetaRaw = ctx.storage.get(`alphy.cache.ortmeta:${SERIES_EMBED_CLEAN}`);
+  const ortmeta = ortmetaRaw ? JSON.parse(ortmetaRaw).v : null;
+  assert.equal(ortmeta?.title, "Задорные друзья", "handoff keyed by the router's clean URL");
+  const hist = JSON.parse(ctx.storage.get("alphy.history") || "[]");
+  const entry = hist.find((h) => h.key === `ort:${SERIES_EMBED_CLEAN}`);
+  assert.equal(entry?.title, "Задорные друзья", "history entry created with the curated title");
+});
+
 test("curated click meta handoff survives quota exhaustion", async () => {
   const seed = new Map();
   let junkSize = 0;

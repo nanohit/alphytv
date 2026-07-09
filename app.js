@@ -481,9 +481,24 @@
     }
     return curatedCatalogItemsPromise;
   }
+  // Ort series keys in the admin catalog carry whatever query string the embed was
+  // added with (historically even duplicated params like ?season=1&episode=1&episode=1),
+  // while the router reconstructs a clean one — and series meta is the same for every
+  // episode anyway. Compare ort keys by their base embed URL, query stripped.
+  function curatedKeyBase(key) {
+    const raw = String(key || "");
+    if (!raw.startsWith("ort:")) return raw;
+    try {
+      const url = new URL(raw.slice(4));
+      return `ort:${url.origin}${url.pathname}`;
+    } catch {
+      return raw;
+    }
+  }
   async function findCuratedMeta(key) {
     const items = await curatedCatalogItems();
-    const item = items.find((x) => x.key === key);
+    const base = curatedKeyBase(key);
+    const item = items.find((x) => curatedKeyBase(x.key) === base);
     if (!item) return null;
     return {
       title: item.title || "",
@@ -4966,6 +4981,15 @@ addEventListener('message', async (event) => {
     }
     return url.href;
   }
+  // The watch route keeps only {id, season, episode}, so playOrt always receives the
+  // rebuilt clean URL. Meta handoffs must be keyed by that same form — catalog items
+  // store whatever embed the admin added (including duplicated ?episode params).
+  function canonicalOrtEmbedUrl(embedUrl) {
+    const short = shortOrtifiedPath(embedUrl);
+    if (!short) return String(embedUrl || "");
+    const segs = short.split("/").filter(Boolean);
+    return ortifiedUrlFromShort(segs[1], segs[2]);
+  }
   function shortNewdeafPath(pageUrl) {
     try {
       const url = new URL(String(pageUrl || ""));
@@ -5104,7 +5128,7 @@ addEventListener('message', async (event) => {
       externalId: item.externalId,
     };
     cacheSet("curatedmeta", keyFor(target), meta, TTL.enriched);
-    if (target.kind === "ort") cacheSet("ortmeta", target.embedUrl, meta, TTL.enriched);
+    if (target.kind === "ort") cacheSet("ortmeta", canonicalOrtEmbedUrl(target.embedUrl), meta, TTL.enriched);
     if (target.kind === "opr") {
       cacheSet("oprmeta", target.playerUrl, { ...meta, pageUrl: target.pageUrl || "" }, TTL.enriched);
     }
