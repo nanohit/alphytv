@@ -136,6 +136,40 @@ test("toCuratedItem: produces a playable curated-shaped card", async () => {
   assert.equal(item.movieLength, 136);
 });
 
+test("hide removes a title from the row, persists, and stays hidden after reload", async () => {
+  const storage = new Map();
+  storage.set("alphy.foryou.last.v1", JSON.stringify({
+    items: Array.from({ length: 8 }, (_, i) => ({ id: `fy-${i}`, key: `kp:${i}`, title: `t${i}`, target: { kind: "kp", kpId: String(i) } })),
+    at: Date.now(),
+  }));
+  const { api } = await loadForYou(storage);
+  assert.equal(api.getItems().length, 8);
+  api.hide("3");
+  assert.equal(api.getItems().length, 7);
+  assert.ok(!api.getItems().some((item) => item.target.kpId === "3"), "hidden item gone from the row");
+  assert.ok(api._test.hiddenIds().has("3"), "dismissal persisted");
+  // A fresh session with the same storage keeps it hidden (cached row included).
+  const second = await loadForYou(storage);
+  assert.ok(!second.api.getItems().some((item) => item.target.kpId === "3"));
+  // Hiding is not a taste signal: seeds/history are untouched.
+  assert.equal(storage.has("alphy.history"), false);
+});
+
+test("hidden ids are excluded from future scoring but do not touch seeds", async () => {
+  const storage = new Map();
+  storage.set("alphy.foryou.hidden.v1", JSON.stringify([{ id: "20", at: Date.now() }]));
+  const { api } = await loadForYou(storage);
+  const seed = { kpId: "1", weight: 1 };
+  // compute() merges hiddenIds into excludeKp; emulate that contract here.
+  const exclude = new Set(api._test.hiddenIds());
+  const picked = api._test.scoreCandidates(
+    [{ seed, similars: [{ id: "10", ru: "Оставить" }, { id: "20", ru: "Скрытое" }] }],
+    exclude,
+    new Set(),
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(picked.map((p) => p.id))), ["10"]);
+});
+
 test("cached row paints instantly; mode off empties it", async () => {
   const storage = new Map();
   storage.set("alphy.foryou.last.v1", JSON.stringify({

@@ -1441,6 +1441,11 @@
         movieLength: match?.movieLength || null,
         isSeries: match?.isSeries ?? false,
       };
+      // An already-curated title opens through its resolved list target
+      // (instant Ortified/Zona) instead of re-running the newdeaf resolve.
+      const ready = match
+        ? window.alphyCatalog?.findReady?.(movieTitle(match), match.year, !!match.isSeries)
+        : null;
       const card = makeCard({
         title,
         sub: [match?.year, match?.isSeries ? "сериал" : "Newdeaf"].filter(Boolean).join(" · "),
@@ -1449,7 +1454,9 @@
         movieLength: match?.movieLength,
         isSeries: match?.isSeries,
         bookmark: { target, details },
-        onClick: () => go(`/watch/nd/${encodeURIComponent(item.url)}`),
+        onClick: ready
+          ? () => openCuratedItem({ ...ready, kpId: ready.kpId || (match?.kpId != null ? String(match.kpId) : "") })
+          : () => go(`/watch/nd/${encodeURIComponent(item.url)}`),
       });
       frag.appendChild(card);
     }
@@ -1466,6 +1473,7 @@
         movieLength: movie.movieLength || null,
         isSeries: !!movie.isSeries,
       };
+      const ready = window.alphyCatalog?.findReady?.(title, movie.year, !!movie.isSeries);
       const card = makeCard({
         title,
         sub: [movie.year, movie.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · "),
@@ -1474,7 +1482,9 @@
         movieLength: movie.movieLength,
         isSeries: movie.isSeries,
         bookmark: { target, details },
-        onClick: () => go(`/watch/kp/${encodeURIComponent(movie.kpId)}`),
+        onClick: ready
+          ? () => openCuratedItem({ ...ready, kpId: ready.kpId || String(movie.kpId) })
+          : () => go(`/watch/kp/${encodeURIComponent(movie.kpId)}`),
       });
       frag.appendChild(card);
     }

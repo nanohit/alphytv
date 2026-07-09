@@ -838,9 +838,56 @@
   // with the same cards as curated lists but never stored in the catalog;
   // only its mode flag lives in the envelope.
   // ---------------------------------------------------------------------
+  // Identity of a "ready" curated title: normalized title + release year + type.
+  // Same normalization as the recommender uses, so both sides agree.
+  function readyTitleKey(title, year, isSeries) {
+    const t = String(title || "")
+      .toLocaleLowerCase("ru-RU")
+      .replace(/[ёе]/g, "е")
+      .replace(/[^a-zа-я0-9]+/gi, " ")
+      .trim();
+    const y = String(year || "").trim();
+    if (!t || !/^\d{4}$/.test(y)) return "";
+    return `${t}|${y}|${isSeries ? "s" : "f"}`;
+  }
+
+  // title+year+type -> curated item with an already-resolved player target
+  // (ort/zen/clps/...). kp: targets are skipped — opening them is the same
+  // resolve flow the caller already has. Rebuilt on every render.
+  let readyIndex = new Map();
+  function rebuildReadyIndex() {
+    readyIndex = new Map();
+    for (const list of state.catalog.lists) {
+      for (const item of list.items) {
+        if (!item?.target?.kind || item.target.kind === "kp") continue;
+        const key = readyTitleKey(item.title, item.year, item.isSeries);
+        if (key && !readyIndex.has(key)) readyIndex.set(key, item);
+      }
+    }
+  }
+  function findReady(title, year, isSeries) {
+    return readyIndex.get(readyTitleKey(title, year, isSeries)) || null;
+  }
+
   function forYouItems() {
     if (normalizeForYouMode(state.catalog.forYou) === "off") return [];
-    return window.alphyForYou?.getItems?.() || [];
+    const items = window.alphyForYou?.getItems?.() || [];
+    // A recommendation the admin already curated opens instantly through the
+    // list's resolved target instead of re-running the full kp resolve flow.
+    return items.map((item) => {
+      const ready = findReady(item.title, item.year, item.isSeries);
+      if (!ready) return item;
+      return {
+        ...ready,
+        id: item.id,
+        fyKpId: String(item.target?.kpId || ""),
+        // Keep the recommender's kpId so the play lands in history with it.
+        kpId: ready.kpId || String(item.target?.kpId || ""),
+        // Prefer the kp poster/ratings: Yandex CDN loads in RU, cdnlbox may not.
+        poster: item.poster || ready.poster,
+        rating: (item.rating?.kp || item.rating?.imdb) ? item.rating : ready.rating,
+      };
+    });
   }
 
   function forYouBlock(items) {
@@ -890,16 +937,40 @@
     wrap.className = "curated-row-wrap";
     const row = document.createElement("div");
     row.className = "curated-row";
-    items.forEach((item) => row.appendChild(makePublicCard(item)));
+    items.forEach((item) => row.appendChild(makeForYouCard(item)));
     wrap.appendChild(row);
     block.appendChild(wrap);
     setupCuratedRow(wrap, row);
     return block;
   }
 
+  // A «Для вас» card is a regular curated card plus a dismiss cross: hiding a
+  // title only removes it from the row (no negative taste signal).
+  function makeForYouCard(item) {
+    const card = makePublicCard(item);
+    const kpId = String(item.fyKpId || item.target?.kpId || "");
+    const media = card.querySelector(".card-media");
+    if (!media || !/^\d+$/.test(kpId)) return card;
+    const hideButton = document.createElement("button");
+    hideButton.type = "button";
+    hideButton.className = "fy-hide";
+    hideButton.title = "Скрыть и больше не рекомендовать";
+    hideButton.setAttribute("aria-label", "Скрыть рекомендацию");
+    hideButton.textContent = "✕";
+    hideButton.addEventListener("keydown", (event) => event.stopPropagation());
+    hideButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      window.alphyForYou?.hide?.(kpId);
+    });
+    media.appendChild(hideButton);
+    return card;
+  }
+
   function render() {
     if (!el.section || !el.lists) return;
     window.alphyForYou?.setMode?.(normalizeForYouMode(state.catalog.forYou));
+    rebuildReadyIndex();
     const fyItems = forYouItems();
     const visible = state.admin || fyItems.length > 0 || state.catalog.lists.some((list) => list.items.length);
     el.section.classList.toggle("hidden", !visible);
@@ -1066,6 +1137,9 @@
     isAdmin: () => state.admin,
     getCatalog: () => JSON.parse(JSON.stringify(state.catalog)),
     addToList: (item) => openPicker(item),
+    // Search/recommendations consult this to open an already-curated title
+    // through its resolved list target instead of the full kp resolve flow.
+    findReady,
   };
 
   init();

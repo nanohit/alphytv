@@ -32,6 +32,8 @@
   const QUOTA_PREFIX = "alphy.foryou.quota.";
   const LAST_KEY = "alphy.foryou.last.v1";
   const KEY_CURSOR_KEY = "alphy.foryou.keycursor";
+  const HIDDEN_KEY = "alphy.foryou.hidden.v1";
+  const HIDDEN_CAP = 400;
 
   const SIM_TTL = 30 * 24 * 3600e3;
   const META_TTL = 30 * 24 * 3600e3;
@@ -118,6 +120,28 @@
     } catch {
       return [];
     }
+  }
+
+  // --- dismissed recommendations -----------------------------------------
+  // A hidden title is only removed from the row and never suggested again.
+  // It is NOT a negative taste signal: hiding one gross body horror must not
+  // stop the engine from recommending body horror — the seeds stay untouched.
+
+  function hiddenIds() {
+    return new Set(loadStore(HIDDEN_KEY).map((entry) => String(entry?.id ?? entry)));
+  }
+
+  function hide(kpId) {
+    const id = String(kpId || "");
+    if (!/^\d+$/.test(id)) return;
+    const list = loadStore(HIDDEN_KEY);
+    if (!list.some((entry) => String(entry?.id ?? entry) === id)) list.push({ id, at: Date.now() });
+    try { localStorage.setItem(HIDDEN_KEY, JSON.stringify(list.slice(-HIDDEN_CAP))); } catch { /* ignore */ }
+    state.items = state.items.filter((item) => String(item?.target?.kpId || "") !== id);
+    try { localStorage.setItem(LAST_KEY, JSON.stringify({ items: state.items, at: Date.now() })); } catch { /* ignore */ }
+    window.dispatchEvent(new CustomEvent("alphy:foryou"));
+    // Backfill the freed slot: similars are cached, so this is (near) zero-network.
+    compute();
   }
 
   // --- daily fetch budget ------------------------------------------------
@@ -472,6 +496,7 @@
     const network = state.mode === "on";
     try {
       const { seeds, unresolved, excludeKp, excludeTitles } = buildSeeds();
+      for (const id of hiddenIds()) excludeKp.add(id);
 
       // Backfill kpIds for a few title-only entries (zen/newdeaf plays).
       if (network && seeds.length < MAX_SEEDS && unresolved.length) {
@@ -588,8 +613,15 @@
   window.alphyForYou = {
     setMode,
     getMode: () => state.mode,
-    getItems: () => (state.mode === "off" ? [] : state.items),
+    getItems: () => {
+      if (state.mode === "off") return [];
+      const hidden = hiddenIds();
+      return hidden.size
+        ? state.items.filter((item) => !hidden.has(String(item?.target?.kpId || "")))
+        : state.items;
+    },
+    hide,
     refresh: () => compute(),
-    _test: { buildSeeds, scoreCandidates, normTitle, recencyWeight, engagementWeight, toCuratedItem },
+    _test: { buildSeeds, scoreCandidates, normTitle, recencyWeight, engagementWeight, toCuratedItem, hiddenIds },
   };
 })();
