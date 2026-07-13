@@ -2633,6 +2633,13 @@
 
   async function resolveKpPlaybackSource(kpId, meta, selection) {
     const cachedZona = cacheGet("zona", kpId);
+    // A mid-watch Zenith title keeps its player: resume position and озвучка
+    // live under the kp: history key and do not transfer to Collaps.
+    if (cachedZona?.embedUrl && resumePosition(`kp:${kpId}`) > 0) {
+      return { kind: "zen", resolved: cachedZona };
+    }
+    const cachedCollaps = cacheGet("clpsprobe", kpId);
+    if (cachedCollaps?.kpId) return { kind: "clps", hit: cachedCollaps };
     if (cachedZona?.embedUrl) return { kind: "zen", resolved: cachedZona };
 
     if (!collapsPreviewOnCooldown()) {
@@ -2706,7 +2713,7 @@
     if (isStale(token)) return;
     if (source.kind === "clps") {
       try {
-        await playCollaps(id, token, { meta, selection: source.hit.selection });
+        await playCollaps(id, token, { meta, selection: requestedSelection || source.hit.selection });
         if (!isStale(token)) replaceHash(hashFor(state.currentTarget));
         return;
       } catch (error) {
@@ -4619,11 +4626,18 @@ addEventListener('message', async (event) => {
     preparedTargets.add(prepKey);
     try {
       if (target.kind === "kp") {
-        if (cacheGet("zona", target.kpId)?.embedUrl) {
-          await ensureShaka();
-        } else if (!collapsPreviewOnCooldown()) {
+        const hasZona = !!cacheGet("zona", target.kpId)?.embedUrl;
+        if (hasZona) ensureShaka().catch(() => {});
+        if (!collapsPreviewOnCooldown()) {
           warmCollapsConnections();
-          await probeCollapsMovie({ ...details, kpId: String(target.kpId), rank: 0 });
+          try {
+            await probeCollapsMovie({ ...details, kpId: String(target.kpId), rank: 0 });
+          } catch (error) {
+            if (shouldCooldownCollapsPreview(error)) setCollapsPreviewCooldown(error);
+            throw error;
+          }
+        } else if (hasZona) {
+          await ensureShaka();
         }
       } else if (target.kind === "clps") {
         warmCollapsConnections();
@@ -5682,6 +5696,8 @@ addEventListener('message', async (event) => {
     openCuratedItem,
     addCardBookmark,
     armCardIntent,
+    prepareTarget,
+    resolveKpPlaybackSource,
     layoutMobileGrid,
     resolvePosterByTitle,
     resolveCardMeta,

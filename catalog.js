@@ -940,6 +940,10 @@
     const row = document.createElement("div");
     row.className = "curated-row";
     items.forEach((item) => row.appendChild(makeForYouCard(item)));
+    const top = items[0];
+    const warmTop = () => window.alphyBridge?.prepareTarget?.(top?.target, top);
+    if (typeof requestIdleCallback === "function") requestIdleCallback(warmTop, { timeout: 1800 });
+    else setTimeout(warmTop, 650);
     wrap.appendChild(row);
     block.appendChild(wrap);
     setupCuratedRow(wrap, row);
