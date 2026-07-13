@@ -1,4 +1,5 @@
 import { getZonaLib, zonaUserAgent } from "./zona-runtime-and-loader.js";
+import { RezkaClient } from "./rezka.js";
 
 const DEFAULT_POISKKINO_BASE_URL = "https://api.poiskkino.dev";
 
@@ -39,6 +40,10 @@ export default {
 
       if (url.pathname === "/subs") {
         return await handleSubtitles(request, env, url);
+      }
+
+      if (url.pathname === "/resolve-rezka") {
+        return await handleRezkaResolve(request, env, url);
       }
 
       return json(request, env, { ok: false, error: "not_found" }, 404);
@@ -694,6 +699,70 @@ async function handleSubtitles(request, env, url) {
       // subs5 itself caches the files for a year. Keeps repeat loads off the resolver.
       "cache-control": "public, max-age=86400",
     },
+  });
+}
+
+// LAST-RESORT source: HDRezka anonymous MP4s. Called by the client only after
+// Collaps AND Zona/Zenith have all failed for a title. The video bytes stream
+// browser -> Voidboost directly; this endpoint only relays the small signed URLs
+// (a few KB), so it adds no video bandwidth to the resolver. Signed URLs are
+// short-lived, hence no-store.
+async function handleRezkaResolve(request, env, url) {
+  const kp = (url.searchParams.get("kp") || url.searchParams.get("kpId") || "").trim();
+  const id = (url.searchParams.get("id") || "").trim();
+  const title = (url.searchParams.get("title") || "").trim();
+  const year = (url.searchParams.get("year") || "").trim();
+  const translator = (url.searchParams.get("translator") || "").trim();
+
+  if (!kp && !id && !title) {
+    return json(request, env, { ok: false, error: "missing_kp_id_or_title" }, 400);
+  }
+  if (kp && !/^\d+$/.test(kp)) return json(request, env, { ok: false, error: "invalid_kp" }, 400);
+  if (id && !/^\d+$/.test(id)) return json(request, env, { ok: false, error: "invalid_id" }, 400);
+  if (translator && !/^\d+$/.test(translator)) {
+    return json(request, env, { ok: false, error: "invalid_translator" }, 400);
+  }
+
+  const client = new RezkaClient();
+  let resolved;
+  try {
+    resolved = await client.resolve({
+      kpId: kp || null,
+      rezkaId: id || null,
+      title: title || null,
+      year: year || null,
+      translatorId: translator || null,
+      withTranslators: true,
+    });
+  } catch (error) {
+    return json(request, env, {
+      ok: false,
+      error: "rezka_resolve_failed",
+      message: String(error?.message || error),
+    }, 502);
+  }
+
+  if (!resolved.best?.url) {
+    return json(request, env, {
+      ok: false,
+      error: "rezka_no_anonymous_stream",
+      movie: resolved.movie,
+    }, 502);
+  }
+
+  return json(request, env, {
+    ok: true,
+    provider: "rezka",
+    movie: {
+      rezkaId: resolved.movie.rezkaId,
+      title: resolved.movie.title,
+      year: resolved.movie.year,
+    },
+    translatorId: resolved.translatorId,
+    translators: resolved.translators,
+    streams: resolved.playable.map((s) => ({ label: s.label, quality: s.quality, url: s.url })),
+    subtitles: resolved.subtitles,
+    best: { label: resolved.best.label, quality: resolved.best.quality, url: resolved.best.url },
   });
 }
 

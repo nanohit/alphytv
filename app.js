@@ -118,6 +118,7 @@
     opravar: null,
     serial: null,
     collaps: null,
+    rezka: null,
     currentMeta: null,
     zenithEmbedUrl: "",
     playerReady: false,
@@ -2709,45 +2710,66 @@
       }).catch(() => {});
     }
 
-    let source = await sourceTask;
-    if (isStale(token)) return;
-    if (source.kind === "clps") {
-      try {
-        await playCollaps(id, token, { meta, selection: requestedSelection || source.hit.selection });
-        if (!isStale(token)) replaceHash(hashFor(state.currentTarget));
-        return;
-      } catch (error) {
-        if (isStale(token)) return;
-        log("collaps-fast-path-fallback", { kpId: id, message: error.message });
-        showPlayerLoading();
-        state.currentTarget = target;
-        setWatchHead(target.title || `kpId ${id}`, target);
-        if (meta) renderMeta(meta, target);
-        ensureShaka().catch(() => {});
-        source = { kind: "zen", resolved: await resolveZona(id) };
-        if (isStale(token)) return;
+    // Collaps -> Zona/Zenith, then HDRezka as the last resort. Any failure in the
+    // whole chain (cold Zona resolve, Collaps play error whose Zona fallback also
+    // failed, or a Zenith embed with no sources) drops into the catch, which tries
+    // HDRezka before letting the original, more familiar error surface.
+    try {
+      let source = await sourceTask;
+      if (isStale(token)) return;
+      if (source.kind === "clps") {
+        try {
+          await playCollaps(id, token, { meta, selection: requestedSelection || source.hit.selection });
+          if (!isStale(token)) replaceHash(hashFor(state.currentTarget));
+          return;
+        } catch (error) {
+          if (isStale(token)) return;
+          log("collaps-fast-path-fallback", { kpId: id, message: error.message });
+          showPlayerLoading();
+          state.currentTarget = target;
+          setWatchHead(target.title || `kpId ${id}`, target);
+          if (meta) renderMeta(meta, target);
+          ensureShaka().catch(() => {});
+          source = { kind: "zen", resolved: await resolveZona(id) };
+          if (isStale(token)) return;
+        }
       }
-    }
 
-    const resolved = source.resolved;
-    if (resolved.zenithId) {
-      cacheSet("curatedmeta", `zen:${resolved.zenithId}`, {
-        ...(meta || {}),
-        title: target.title,
-        poster: target.poster,
-        year: target.year,
-        isSeries: target.isSeries,
+      const resolved = source.resolved;
+      if (resolved.zenithId) {
+        cacheSet("curatedmeta", `zen:${resolved.zenithId}`, {
+          ...(meta || {}),
+          title: target.title,
+          poster: target.poster,
+          year: target.year,
+          isSeries: target.isSeries,
+          kpId: id,
+        }, TTL.enriched);
+        replaceHash(`/watch/zen/${encodeURIComponent(resolved.zenithId)}`);
+      }
+      await playZenithEmbed(resolved.embedUrl, target, token, {
+        histKey: `kp:${id}`,
+        resume: resumePosition(`kp:${id}`),
+        audioLang: savedAudioLang(`kp:${id}`),
+        serialSelection: requestedSelection,
+        forceSeries: target.isSeries,
+      });
+    } catch (error) {
+      if (isStale(token)) return;
+      log("kp-sources-exhausted", { kpId: id, message: error.message });
+      showPlayerLoading();
+      state.currentTarget = target;
+      setWatchHead(target.title || `kpId ${id}`, target);
+      if (meta) renderMeta(meta, target);
+      replaceHash(`/watch/kp/${encodeURIComponent(id)}`);
+      const played = await tryRezkaLastResort(target, meta, token, {
         kpId: id,
-      }, TTL.enriched);
-      replaceHash(`/watch/zen/${encodeURIComponent(resolved.zenithId)}`);
+        histKey: `kp:${id}`,
+        resume: resumePosition(`kp:${id}`),
+        serialSelection: requestedSelection,
+      });
+      if (!played && !isStale(token)) throw error;
     }
-    await playZenithEmbed(resolved.embedUrl, target, token, {
-      histKey: `kp:${id}`,
-      resume: resumePosition(`kp:${id}`),
-      audioLang: savedAudioLang(`kp:${id}`),
-      serialSelection: requestedSelection,
-      forceSeries: target.isSeries,
-    });
   }
 
   async function playZen(zenithId, token) {
@@ -3053,7 +3075,19 @@
       if (isStale(token)) return;
       movie = chooseMovie(results, title, year);
     }
-    if (!movie) throw new Error("PoiskKino не вернул kpId для Zona fallback");
+    if (!movie) {
+      // No kpId means Collaps/Zona/Zenith can't even be tried — but HDRezka
+      // resolves by title, so give the last resort a chance before failing.
+      const target = state.currentTarget || { kind: "kp", title, year };
+      const played = await tryRezkaLastResort(target, opts.meta || null, token, {
+        title, year,
+        histKey: keyFor(target),
+        resume: resumePosition(keyFor(target)),
+        serialSelection: opts.serialSelection,
+      });
+      if (played || isStale(token)) return;
+      throw new Error("PoiskKino не вернул kpId для Zona fallback");
+    }
     const meta = mergeMetadata(opts.meta || {}, movie);
     cacheSet("meta", movie.kpId, meta, TTL.meta);
     replaceHash(`/watch/kp/${encodeURIComponent(movie.kpId)}`);
@@ -3062,6 +3096,308 @@
       serialSelection: opts.serialSelection,
       forceSeries: !!(opts.forceSeries || meta.isSeries || opts.serialSelection),
     });
+  }
+
+  // =====================================================================
+  // Playback — HDRezka (the LAST-RESORT source)
+  //
+  // Only reached when Collaps AND Zona/Zenith all fail for a title. The resolver
+  // relays short-lived signed Voidboost MP4/VTT URLs (a few KB); the video bytes
+  // stream browser -> Voidboost directly, so this never loads the resolver with
+  // video. It is NEVER prefetched speculatively — the resolver call happens only
+  // on a real failed-through click. A localStorage kill switch (alphy.rezka.off)
+  // lets it be disabled without a redeploy if the upstream misbehaves.
+  // =====================================================================
+  const rezkaResolveCache = new Map();
+  const REZKA_RESOLVE_TTL_MS = 8 * 60e3;
+
+  function rezkaLastResortEnabled() {
+    try { return localStorage.getItem("alphy.rezka.off") !== "1"; } catch { return true; }
+  }
+
+  function rezkaTranslatorName(t) {
+    const base = t?.name || `Озвучка ${t?.id}`;
+    const tags = [t?.director ? "реж." : "", t?.camrip ? "camrip" : ""].filter(Boolean).join(", ");
+    return tags ? `${base} (${tags})` : base;
+  }
+
+  function savedRezkaPref(key, field) {
+    return loadList(STORE_HISTORY).find((h) => h.key === key)?.[field] || null;
+  }
+  function persistRezkaPref(key, patch) {
+    const t = state.currentTarget;
+    if (!t || !key) return;
+    recordHistory({
+      key, kind: t.kind, target: cleanTarget(t),
+      title: t.title || "", poster: t.poster || "", year: t.year || "", ...patch,
+    });
+  }
+
+  async function resolveRezka({ kpId = null, title = null, year = null, rezkaId = null, translator = null } = {}) {
+    const params = new URLSearchParams();
+    if (rezkaId) params.set("id", String(rezkaId));
+    else if (title) { params.set("title", title); if (year) params.set("year", String(year)); }
+    else if (kpId) params.set("kp", String(kpId));
+    else throw new Error("HDRezka: не задан фильм");
+    if (translator) params.set("translator", String(translator));
+    const path = `/resolve-rezka?${params}`;
+    const cached = rezkaResolveCache.get(path);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const data = await resolverJson(path, { retries: 0, timeoutMs: 20000 });
+    if (!data.ok || !data.best?.url) throw new Error(data.message || "HDRezka не вернул поток");
+    rezkaResolveCache.set(path, { value: data, expiresAt: Date.now() + REZKA_RESOLVE_TTL_MS });
+    return data;
+  }
+
+  function chooseRezkaStream(streams, wantLabel) {
+    const sorted = [...streams].sort((a, b) => (b.quality || 0) - (a.quality || 0));
+    if (wantLabel) {
+      const match = sorted.find((s) => s.label === wantLabel);
+      if (match) return match;
+    }
+    return sorted[0];
+  }
+
+  async function playRezka(resolved, target, token, opts = {}) {
+    if (isStale(token)) return;
+    await teardownPlayer();
+    resetSubtitleRequest();
+    const histKey = opts.histKey || keyFor(target);
+    const streams = (resolved.streams || []).filter((s) => s.url);
+    if (!streams.length) throw new Error("HDRezka не вернул качество");
+    const pick = chooseRezkaStream(streams, opts.qualityKey || savedRezkaPref(histKey, "rezkaQuality"));
+
+    state.rezka = {
+      streams: [...streams].sort((a, b) => (b.quality || 0) - (a.quality || 0)),
+      subtitles: resolved.subtitles || [],
+      translators: resolved.translators || [],
+      translatorId: resolved.translatorId,
+      movie: resolved.movie || {},
+      target,
+      histKey,
+      qualityLabel: pick.label,
+    };
+
+    const video = document.createElement("video");
+    video.controls = true;
+    video.playsInline = true;
+    video.autoplay = true;
+    video.preload = "auto";
+    video.playbackRate = state.playbackRate;
+    // Deliberately NO crossOrigin: the Voidboost MP4 host sends no CORS headers,
+    // and native <video> playback of a cross-origin source does not need them.
+    // Subtitles are attached as same-origin blob <track>s instead (see below), so
+    // we never force the media element into a CORS check the CDN would fail.
+    if (isStale(token)) return;
+    el.playerHost.replaceChildren(video);
+    state.videoEl = video;
+
+    const resume = opts.resume || 0;
+    video.addEventListener("loadedmetadata", () => {
+      if (resume > 5) { try { video.currentTime = resume; } catch { /* ignore */ } }
+    }, { once: true });
+
+    let ready = false;
+    const onReady = () => {
+      if (ready || isStale(token) || state.videoEl !== video) return;
+      ready = true;
+      video.playbackRate = state.playbackRate;
+      renderRezkaControls();
+      markPlayerReady();
+      const snap = () => {
+        const t = state.currentTarget;
+        if (t) setTimeout(() => captureVideoSnapshot(histKey, t), 350);
+      };
+      video.addEventListener("loadeddata", snap, { once: true });
+      video.addEventListener("playing", snap);
+      video.addEventListener("pause", snap);
+      video.addEventListener("seeked", snap);
+      setTimeout(snap, 2200);
+      startTracking(histKey, target);
+      video.play().catch(() => { /* user gesture may be required */ });
+    };
+    video.addEventListener("canplay", onReady, { once: true });
+    video.addEventListener("error", () => {
+      if (isStale(token) || state.videoEl !== video) return;
+      log("rezka-video-error", { code: video.error?.code, histKey });
+      // If it never produced a decodable frame, every source is now exhausted, so
+      // surface a clear error rather than leaving a silent black player.
+      if (video.readyState < 2) {
+        showError(new Error("HDRezka: поток не открылся (ссылка истекла или недоступна из вашей сети). Откройте заново."));
+      }
+    });
+    // Start loading the MP4 immediately — do not block first bytes on the subtitle
+    // fetch below.
+    video.src = pick.url;
+    video.load();
+
+    // Subtitles come straight from the resolve. Fetch each VTT client-side (the
+    // Voidboost subtitle host sends Access-Control-Allow-Origin: *) and attach it
+    // as a same-origin blob <track> so it works without crossOrigin on the video.
+    // Runs alongside playback; controls re-render once tracks land.
+    attachRezkaSubtitles(video, state.rezka.subtitles, token).then(() => {
+      if (!isStale(token) && state.videoEl === video && ready) renderRezkaControls();
+    });
+
+    // If canplay is slow (cold CDN), still reveal controls so the user isn't stuck
+    // on a spinner over an already-loading <video>.
+    setTimeout(onReady, 2600);
+  }
+
+  async function attachRezkaSubtitles(video, subs, token) {
+    for (const sub of subs || []) {
+      if (isStale(token)) return;
+      try {
+        const res = await fetch(sub.url, { cache: "no-store" });
+        if (!res.ok) continue;
+        const raw = (await res.text()).replace(/^﻿/, "");
+        if (!raw.trim()) continue;
+        const vtt = /^WEBVTT/i.test(raw.trim()) ? raw : subtitleTextToVtt(raw, "srt");
+        const blobUrl = URL.createObjectURL(new Blob([vtt], { type: "text/vtt;charset=utf-8" }));
+        state.subtitleObjectUrls.push(blobUrl);
+        const track = document.createElement("track");
+        track.kind = "subtitles";
+        track.label = sub.label || sub.lang || "Субтитры";
+        track.srclang = sub.lang || "und";
+        track.src = blobUrl;
+        video.appendChild(track);
+      } catch (error) {
+        log("rezka-subtitle-warn", { url: sub.url, message: error.message });
+      }
+    }
+  }
+
+  function renderRezkaControls() {
+    const r = state.rezka;
+    const video = state.videoEl;
+    if (!r || !video) return;
+    el.serialPanel.replaceChildren();
+    el.serialPanel.classList.add("hidden");
+    el.trackPanel.replaceChildren();
+    el.trackPanel.classList.remove("hidden");
+
+    // Audio track (dub) — only when the film page yielded more than one translator.
+    if (r.translators.length > 1) {
+      addTrackGroup("Озвучка", r.translators, (t) => {
+        const btn = document.createElement("button");
+        btn.textContent = rezkaTranslatorName(t);
+        if (Number(t.id) === Number(r.translatorId)) btn.className = "active";
+        btn.addEventListener("click", () => { switchRezkaTranslator(t.id).catch((e) => showError(e)); });
+        return btn;
+      });
+    }
+
+    // Quality — the label is HDRezka's; the active button also shows the real
+    // decoded resolution so a "720p" that is physically 480p is never disguised.
+    addTrackGroup("Качество", r.streams, (s) => {
+      const btn = document.createElement("button");
+      const real = (s.label === r.qualityLabel && video.videoWidth)
+        ? ` · ${video.videoWidth}×${video.videoHeight}` : "";
+      btn.textContent = `${s.label}${real}`;
+      if (s.label === r.qualityLabel) btn.className = "active";
+      btn.addEventListener("click", () => switchRezkaQuality(s.label));
+      return btn;
+    });
+
+    // Subtitles — native text tracks (from the blob <track>s), off by default.
+    const tracks = [...video.textTracks];
+    if (tracks.length) {
+      const anyShowing = tracks.some((t) => t.mode === "showing");
+      addTrackGroup("Субтитры", [{ off: true }, ...tracks], (item) => {
+        const btn = document.createElement("button");
+        if (item.off) {
+          btn.textContent = "Выкл";
+          if (!anyShowing) btn.className = "active";
+          btn.addEventListener("click", () => {
+            for (const t of video.textTracks) t.mode = "disabled";
+            setTimeout(renderRezkaControls, 40);
+          });
+        } else {
+          btn.textContent = item.label || item.language || "Субтитры";
+          if (item.mode === "showing") btn.className = "active";
+          btn.addEventListener("click", () => {
+            for (const t of video.textTracks) t.mode = (t === item ? "showing" : "disabled");
+            setTimeout(renderRezkaControls, 40);
+          });
+        }
+        return btn;
+      });
+    }
+
+    const note = document.createElement("div");
+    note.className = "track-note muted";
+    note.textContent = "Резервный источник (HDRezka), без рекламы. Ярлык качества — от источника; фактическое разрешение показано на активной кнопке.";
+    el.trackPanel.appendChild(note);
+  }
+
+  function switchRezkaQuality(label) {
+    const r = state.rezka;
+    const video = state.videoEl;
+    if (!r || !video || label === r.qualityLabel) return;
+    const stream = r.streams.find((s) => s.label === label);
+    if (!stream?.url) return;
+    const at = video.currentTime || 0;
+    const wasPlaying = !video.paused;
+    r.qualityLabel = label;
+    persistRezkaPref(r.histKey, { rezkaQuality: label });
+    video.addEventListener("loadedmetadata", () => {
+      try { video.currentTime = at; } catch { /* ignore */ }
+      if (wasPlaying) video.play().catch(() => { /* ignore */ });
+    }, { once: true });
+    video.src = stream.url;
+    video.load();
+    renderRezkaControls();
+  }
+
+  async function switchRezkaTranslator(translatorId) {
+    const r = state.rezka;
+    if (!r || Number(translatorId) === Number(r.translatorId)) return;
+    if (!r.movie?.rezkaId) return;
+    const token = resolveToken;
+    const at = state.videoEl?.currentTime || 0;
+    const resolved = await resolveRezka({ rezkaId: r.movie.rezkaId, translator: translatorId });
+    if (isStale(token)) return;
+    persistRezkaPref(r.histKey, { rezkaTranslator: String(translatorId) });
+    await playRezka(resolved, r.target, token, {
+      histKey: r.histKey,
+      resume: at,
+      qualityKey: r.qualityLabel,
+    });
+  }
+
+  // The last-resort entry point: resolve HDRezka for a title and play it. Returns
+  // true if playback started, false if HDRezka could not deliver (so the caller
+  // surfaces the ORIGINAL, more familiar error instead of a Rezka-specific one).
+  async function tryRezkaLastResort(target, meta, token, opts = {}) {
+    if (!rezkaLastResortEnabled()) return false;
+    const kpId = opts.kpId || (target?.kind === "kp" ? target.kpId : null) || meta?.kpId || null;
+    const title = cleanMovieTitle(opts.title || movieTitle(meta) || target?.title || "");
+    const year = opts.year || meta?.year || target?.year || null;
+    if (!kpId && !title) return false;
+    // A series episode picker is out of scope for the fallback — HDRezka series
+    // need per-episode get_stream calls the resolver does not yet make.
+    if (target?.isSeries || meta?.isSeries || opts.serialSelection) return false;
+    try {
+      const savedDub = opts.histKey ? savedRezkaPref(opts.histKey, "rezkaTranslator") : null;
+      // Title+year is the resolver's fast path (no KinoPoisk->title lookup).
+      const resolved = await resolveRezka({
+        title: title || null,
+        year: title ? year : null,
+        kpId: title ? null : kpId,
+        translator: savedDub,
+      });
+      if (isStale(token)) return true;
+      log("rezka-last-resort", { title: resolved.movie?.title, best: resolved.best?.label });
+      await playRezka(resolved, target, token, {
+        histKey: opts.histKey || keyFor(target),
+        resume: opts.resume || 0,
+      });
+      return true;
+    } catch (error) {
+      if (isStale(token)) return true;
+      log("rezka-last-resort-fail", { message: error.message });
+      return false;
+    }
   }
 
   function mergeMetadata(base, enriched) {
@@ -3527,6 +3863,7 @@
     state.videoEl = null;
     state.opravar = null;
     state.serial = null;
+    state.rezka = null;
     state.playerReady = false;
     window.dispatchEvent(new CustomEvent("alphy:player-ready", { detail: { ready: false } }));
     // Remove the old <iframe>/<video> from the DOM: stops its audio instantly and
