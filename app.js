@@ -18,11 +18,16 @@
   // Older builds cached a transient empty Newdeaf result for six hours. Keep
   // this namespace versioned so those false misses cannot survive an upgrade.
   const ND_SEARCH_CACHE_NS = "ndsearch.v2";
+  const SHAKA_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/shaka-player@4.11.17/dist/shaka-player.compiled.js";
+  const HLS_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js";
   const SOAP_CDN_ORIGIN = "https://cdn-r11.soap4youand.me";
   const COLLAPS_BASE_URL = "https://plapi.cdnvideohub.com/api/v1/player/sv";
   const COLLAPS_PREVIEW_LIMIT = 1;
   const COLLAPS_PREVIEW_IDLE_TIMEOUT = 3500;
   const COLLAPS_PREVIEW_COOLDOWN_MS = 20 * 60e3;
+  const COLLAPS_FAST_PATH_TIMEOUT_MS = 1400;
+  const ZENITH_BROWSER_FAST_WINDOW_MS = 1400;
+  const ZENITH_PARSED_CACHE_MS = 90e3;
   const COLLAPS_REFRESH_SEC = 240;
   const COLLAPS_QUALITY_FIELDS = [
     ["mpeg4kUrl", "4K", 2160],
@@ -41,6 +46,8 @@
     ndpage: 24 * 3600e3,
     clpsplaylist: 2 * 3600e3,
     clpsprobe: 6 * 3600e3,
+    clpsmiss: 60 * 60e3,
+    clpsvideo: 90e3,
     zona: 30 * 24 * 3600e3,
     meta: 7 * 24 * 3600e3,
     enriched: 30 * 24 * 3600e3,
@@ -146,6 +153,13 @@
   const soapManifestPrefetches = new Set();
   const collapsWarmOrigins = new Set();
   const collapsProbeInflight = new Map();
+  const collapsVideoInflight = new Map();
+  const embedTextCache = new Map();
+  const embedTextInflight = new Map();
+  const zenithParsedCache = new Map();
+  const externalScriptPromises = new Map();
+  const preparedTargets = new Set();
+  let speculativeIntentBudget = 4;
 
   // =====================================================================
   // localStorage: TTL cache + bookmarks + history
@@ -643,10 +657,42 @@
     return button;
   }
 
+  function loadExternalScript(name, src, ready) {
+    if (ready()) return Promise.resolve();
+    if (externalScriptPromises.has(name)) return externalScriptPromises.get(name);
+    const pending = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+      script.crossOrigin = "anonymous";
+      script.dataset.alphyPlayer = name;
+      script.addEventListener("load", () => {
+        if (ready()) resolve();
+        else reject(new Error(`${name} загрузился без ожидаемого API`));
+      }, { once: true });
+      script.addEventListener("error", () => reject(new Error(`Не удалось загрузить ${name}`)), { once: true });
+      document.head.appendChild(script);
+    }).catch((error) => {
+      externalScriptPromises.delete(name);
+      document.querySelector(`script[data-alphy-player="${name}"]`)?.remove();
+      throw error;
+    });
+    externalScriptPromises.set(name, pending);
+    return pending;
+  }
+
+  function ensureShaka() {
+    return loadExternalScript("Shaka", SHAKA_SCRIPT_URL, () => !!window.shaka?.Player);
+  }
+
+  function ensureHls() {
+    return loadExternalScript("hls.js", HLS_SCRIPT_URL, () => !!window.Hls);
+  }
+
   // =====================================================================
   // Resolver client
   // =====================================================================
-  async function resolverJson(path, { retries = 2, timeoutMs = 15000 } = {}) {
+  async function resolverJson(path, { retries = 2, timeoutMs = 15000, fetchCache = "no-store" } = {}) {
     if (!state.resolverBaseUrl) throw new Error("Resolver URL не настроен");
     const url = /^https?:\/\//i.test(path) ? path : `${state.resolverBaseUrl}${path}`;
     let lastError;
@@ -654,7 +700,7 @@
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const response = await fetch(url, { cache: "no-store", credentials: "omit", signal: controller.signal });
+        const response = await fetch(url, { cache: fetchCache, credentials: "omit", signal: controller.signal });
         const text = await response.text();
         let data;
         try { data = JSON.parse(text); } catch { data = { ok: false, raw: text.slice(0, 500) }; }
@@ -743,12 +789,22 @@
     return playlist;
   }
 
-  async function fetchCollapsVideo(vkId) {
+  async function fetchCollapsVideo(vkId, { force = false } = {}) {
     const id = String(vkId || "").trim();
     if (!id) throw new Error("Collaps: missing vkId");
-    const data = await fetchCollapsJson(`${COLLAPS_BASE_URL}/video/${encodeURIComponent(id)}`);
-    const sources = normalizeCollapsSources(data?.sources || {});
-    return { raw: data, sources };
+    if (!force) {
+      const cached = cacheGet("clpsvideo", id);
+      if (cached?.sources?.length) return cached;
+    }
+    if (collapsVideoInflight.has(id)) return collapsVideoInflight.get(id);
+    const pending = (async () => {
+      const data = await fetchCollapsJson(`${COLLAPS_BASE_URL}/video/${encodeURIComponent(id)}`);
+      const value = { raw: data, sources: normalizeCollapsSources(data?.sources || {}) };
+      if (value.sources.length) cacheSet("clpsvideo", id, value, TTL.clpsvideo);
+      return value;
+    })().finally(() => collapsVideoInflight.delete(id));
+    collapsVideoInflight.set(id, pending);
+    return pending;
   }
 
   function normalizeCollapsPlaylist(data, kpId) {
@@ -825,15 +881,22 @@
     const kpId = String(movie?.kpId || "");
     const cached = cacheGet("clpsprobe", kpId);
     if (cached?.kpId) return { ...cached, rank: movie.rank ?? 0 };
+    if (cacheGet("clpsmiss", kpId)) return null;
     const inflightKey = kpId;
     if (collapsProbeInflight.has(inflightKey)) return collapsProbeInflight.get(inflightKey);
     const pending = (async () => {
       const playlist = await fetchCollapsPlaylist(kpId);
-      const item = chooseCollapsProbeItem(playlist.items);
-      if (!item) return null;
+      const item = chooseCollapsProbeItem(playlist.items, movie?.selection);
+      if (!item) {
+        cacheSet("clpsmiss", kpId, true, TTL.clpsmiss);
+        return null;
+      }
       const video = await fetchCollapsVideo(item.vkId);
       const best = video.sources[0];
-      if (!best) return null;
+      if (!best) {
+        cacheSet("clpsmiss", kpId, true, TTL.clpsmiss);
+        return null;
+      }
       const hit = {
         kpId,
         title: movieTitle(movie) || playlist.titleName || `KP ${kpId}`,
@@ -857,8 +920,13 @@
     return pending;
   }
 
-  function chooseCollapsProbeItem(items) {
+  function chooseCollapsProbeItem(items, selection = {}) {
     const list = Array.isArray(items) ? items : [];
+    const season = positiveInt(selection?.season);
+    const episode = positiveInt(selection?.episode);
+    const requested = list.find((item) =>
+      (!season || item.season === season) && (!episode || item.episode === episode));
+    if (requested) return requested;
     return list.find((item) => item.season === 1 && item.episode === 1) ||
       list.find((item) => item.episode === 1) ||
       list[0] ||
@@ -891,19 +959,26 @@
     // getVideoSources come back empty and breaks series that otherwise resolve.
     const path = `/resolve-zona?kpId=${encodeURIComponent(kpId)}`;
     const candidates = isLocal
-      ? [path]
-      : [new URL(`/api${path}`, location.origin).href, path];
+      ? [{ url: path, timeoutMs: 6000 }]
+      : [
+          { url: new URL(`/api${path}`, location.origin).href, timeoutMs: 6500 },
+          { url: path, timeoutMs: 6000 },
+        ];
     let lastError;
     for (const candidate of candidates) {
       try {
-        const data = await resolverJson(candidate, { retries: 0, timeoutMs: 10000 });
+        const data = await resolverJson(candidate.url, {
+          retries: 0,
+          timeoutMs: candidate.timeoutMs,
+          fetchCache: "default",
+        });
         if (!data.embedUrl) throw new Error("Zenith временно недоступен");
         const value = { zenithId: data.zenithId, embedUrl: data.embedUrl };
         cacheSet("zona", kpId, value, TTL.zona);
         return value;
       } catch (error) {
         lastError = error;
-        log("zona-resolver-fallback", { candidate, message: error.message });
+        log("zona-resolver-fallback", { candidate: candidate.url, message: error.message });
       }
     }
     throw lastError || new Error("Zenith временно недоступен");
@@ -1288,6 +1363,7 @@
         open();
       }
     });
+    armCardIntent(card, entry.target, entry);
     return card;
   }
 
@@ -1320,14 +1396,17 @@
   async function showSearch(query, token) {
     setView("search");
     warmNewdeafConnections();
-    warmSoapConnections();
     warmCollapsConnections();
     document.title = `${query} — alphy`;
     el.searchInput.value = query;
     el.resultsTitle.textContent = "Поиск…";
     el.resultsGrid.replaceChildren();
 
-    const soapTask = loadSoapCatalog();
+    // SOAP titles are overwhelmingly Latin. Avoid competing with PoiskKino,
+    // Newdeaf and posters for a 600KB catalog on ordinary Russian searches.
+    const wantsSoap = /[a-z]/i.test(query);
+    if (wantsSoap) warmSoapConnections();
+    const soapTask = wantsSoap ? loadSoapCatalog() : Promise.resolve([]);
     const poiskTask = searchPoiskkino(query)
       .then((results) => ({ results }))
       .catch((error) => {
@@ -1459,6 +1538,7 @@
         movieLength: match?.movieLength,
         isSeries: match?.isSeries,
         bookmark: { target, details },
+        intent: { target: ready?.target || target, details },
         onClick: ready
           ? () => openCuratedItem({ ...ready, kpId: ready.kpId || (match?.kpId != null ? String(match.kpId) : "") })
           : () => go(`/watch/nd/${encodeURIComponent(item.url)}`),
@@ -1487,6 +1567,7 @@
         movieLength: movie.movieLength,
         isSeries: movie.isSeries,
         bookmark: { target, details },
+        intent: { target: ready?.target || target, details },
         onClick: ready
           ? () => openCuratedItem({ ...ready, kpId: ready.kpId || String(movie.kpId) })
           : () => go(`/watch/kp/${encodeURIComponent(movie.kpId)}`),
@@ -1562,6 +1643,7 @@
     movieLength,
     isSeries,
     bookmark,
+    intent,
     onBookmarkChange,
     onClick,
     onRemove,
@@ -1649,6 +1731,8 @@
         onClick();
       }
     });
+    const prep = intent || bookmark;
+    if (prep?.target) armCardIntent(card, prep.target, prep.details || {});
     return card;
   }
   function blankPoster() {
@@ -1787,7 +1871,7 @@
       backBufferLength: 60,
       abrEwmaFastVoD: 3,
       abrEwmaSlowVoD: 9,
-      abrEwmaDefaultEstimate: 5_000_000,
+      abrEwmaDefaultEstimate: initialBandwidthEstimate(5_000_000),
       abrEwmaDefaultEstimateMax: 12_000_000,
       abrBandWidthFactor: 0.88,
       abrBandWidthUpFactor: 0.68,
@@ -1860,7 +1944,21 @@
       video.play().catch(() => { /* gesture may be required */ });
     };
 
+    const nativeHls = !!video.canPlayType("application/vnd.apple.mpegurl");
+    // iOS has native HLS and no MSE, so downloading hls.js there is pure latency.
+    if (!window.MediaSource && nativeHls) {
+      video.src = url;
+      video.addEventListener("loadedmetadata", onReady, { once: true });
+      return;
+    }
+
     // hls.js (Chrome/Firefox/desktop Safari via MSE) — full custom track UI.
+    try {
+      await ensureHls();
+    } catch (error) {
+      if (!nativeHls) throw error;
+    }
+    if (isStale(token)) return;
     if (window.Hls && window.Hls.isSupported()) {
       const hls = new Hls(soapHlsConfig());
       let networkRecoveries = 0;
@@ -1916,7 +2014,7 @@
 
     // Native HLS (iOS Safari, no MSE) — plays demuxed TS directly; the media
     // element exposes audio/text tracks, quality is auto-managed by the OS.
-    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    if (nativeHls) {
       video.src = url;
       video.addEventListener("loadedmetadata", onReady, { once: true });
       return;
@@ -2052,7 +2150,7 @@
     const metaTask = cachedMeta ? Promise.resolve(cachedMeta) : fetchMovieMeta(id).catch(() => null);
     const playlist = await fetchCollapsPlaylist(id);
     if (isStale(token)) return;
-    const meta = await metaTask;
+    let meta = cachedMeta || await settleWithin(metaTask, 200);
     if (isStale(token)) return;
     if (meta) cacheSet("meta", id, meta, TTL.meta);
 
@@ -2074,6 +2172,22 @@
     setWatchHead(title, target);
     renderMeta(mergeMetadata({ title, isSeries: target.isSeries }, meta || {}), target);
     recordOpen(target);
+
+    if (!meta) {
+      metaTask.then((fresh) => {
+        const current = state.currentTarget;
+        if (!fresh || isStale(token) || current?.kind !== "clps" || String(current.kpId || "") !== id) return;
+        meta = fresh;
+        cacheSet("meta", id, fresh, TTL.meta);
+        current.title = movieTitle(fresh) || current.title;
+        current.poster = fresh.poster || current.poster;
+        current.year = fresh.year || current.year;
+        current.isSeries = !!(playlist.isSerial || fresh.isSeries || current.isSeries);
+        setWatchHead(current.title || `KP ${id}`, current);
+        renderMeta(mergeMetadata({ title: current.title, isSeries: current.isSeries }, fresh), current);
+        recordOpen(current);
+      }).catch(() => {});
+    }
 
     const context = buildCollapsContext(playlist);
     const selection = chooseCollapsSelection(context, requested);
@@ -2225,7 +2339,7 @@
   async function resolveFreshCollapsSource(qualityKey = "") {
     const c = state.collaps;
     if (!c?.item?.vkId) return null;
-    const resolved = await fetchCollapsVideo(c.item.vkId);
+    const resolved = await fetchCollapsVideo(c.item.vkId, { force: true });
     if (state.collaps !== c) return null;
     if (!resolved.sources.length) return null;
     const source = chooseCollapsSource(resolved.sources, qualityKey || c.qualityKey);
@@ -2507,16 +2621,61 @@
     });
   }
 
+  function settleWithin(promise, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve(null), timeoutMs);
+      promise.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error) => { clearTimeout(timer); reject(error); },
+      );
+    });
+  }
+
+  async function resolveKpPlaybackSource(kpId, meta, selection) {
+    const cachedZona = cacheGet("zona", kpId);
+    if (cachedZona?.embedUrl) return { kind: "zen", resolved: cachedZona };
+
+    if (!collapsPreviewOnCooldown()) {
+      try {
+        const hit = await settleWithin(probeCollapsMovie({
+          ...(meta || {}),
+          kpId: String(kpId),
+          title: movieTitle(meta),
+          selection,
+          rank: 0,
+        }), COLLAPS_FAST_PATH_TIMEOUT_MS);
+        if (hit?.kpId) return { kind: "clps", hit };
+      } catch (error) {
+        if (shouldCooldownCollapsPreview(error)) setCollapsPreviewCooldown(error);
+        log("collaps-fast-path-warn", { kpId, message: error.message });
+      }
+    }
+
+    // Loading the player library overlaps the only server-side stage. If Zona is
+    // cold, its several seconds are now useful work instead of dead spinner time.
+    ensureShaka().catch((error) => log("shaka-preload-warn", error.message));
+    return { kind: "zen", resolved: await resolveZona(kpId) };
+  }
+
   async function playKp(kpId, token, opts = {}) {
-    let meta = opts.meta || cacheGet("meta", kpId);
-    if (!meta) { meta = await fetchMovieMeta(kpId); if (isStale(token)) return; }
-    if (meta) cacheSet("meta", kpId, meta, TTL.meta);
+    const id = String(kpId || "");
+    let meta = opts.meta || cacheGet("meta", id);
+    const metaTask = meta ? Promise.resolve(meta) : fetchMovieMeta(id).catch(() => null);
     const requestedSelection = normalizeSerialHint(opts.serialSelection)
-      || normalizeSerialHint(savedSerialSelection(`kp:${kpId}`));
+      || normalizeSerialHint(savedSerialSelection(`kp:${id}`));
+    const sourceTask = resolveKpPlaybackSource(id, meta, requestedSelection);
+    sourceTask.catch(() => {});
+
+    // Metadata must never serialize in front of source resolution. Give a cold
+    // direct link a tiny window for a real title, then let playback continue and
+    // paint metadata whenever it arrives.
+    if (!meta) meta = await settleWithin(metaTask, 250);
+    if (isStale(token)) return;
+    if (meta) cacheSet("meta", id, meta, TTL.meta);
     const isSeries = !!(opts.forceSeries || meta?.isSeries || requestedSelection);
     const target = {
       kind: "kp",
-      kpId,
+      kpId: id,
       title: movieTitle(meta),
       poster: meta?.poster,
       year: meta?.year,
@@ -2527,8 +2686,43 @@
     renderMeta(meta, target);
     recordOpen(target);
 
-    const resolved = await resolveZona(kpId);
+    if (!meta) {
+      metaTask.then((fresh) => {
+        const current = state.currentTarget;
+        if (!fresh || isStale(token) || String(current?.kpId || "") !== id) return;
+        meta = fresh;
+        cacheSet("meta", id, fresh, TTL.meta);
+        current.title = movieTitle(fresh) || current.title;
+        current.poster = fresh.poster || current.poster;
+        current.year = fresh.year || current.year;
+        current.isSeries = !!(opts.forceSeries || fresh.isSeries || requestedSelection || current.isSeries);
+        setWatchHead(current.title || `kpId ${id}`, current);
+        renderMeta(fresh, current);
+        recordOpen(current);
+      }).catch(() => {});
+    }
+
+    let source = await sourceTask;
     if (isStale(token)) return;
+    if (source.kind === "clps") {
+      try {
+        await playCollaps(id, token, { meta, selection: source.hit.selection });
+        if (!isStale(token)) replaceHash(hashFor(state.currentTarget));
+        return;
+      } catch (error) {
+        if (isStale(token)) return;
+        log("collaps-fast-path-fallback", { kpId: id, message: error.message });
+        showPlayerLoading();
+        state.currentTarget = target;
+        setWatchHead(target.title || `kpId ${id}`, target);
+        if (meta) renderMeta(meta, target);
+        ensureShaka().catch(() => {});
+        source = { kind: "zen", resolved: await resolveZona(id) };
+        if (isStale(token)) return;
+      }
+    }
+
+    const resolved = source.resolved;
     if (resolved.zenithId) {
       cacheSet("curatedmeta", `zen:${resolved.zenithId}`, {
         ...(meta || {}),
@@ -2536,14 +2730,14 @@
         poster: target.poster,
         year: target.year,
         isSeries: target.isSeries,
-        kpId,
+        kpId: id,
       }, TTL.enriched);
       replaceHash(`/watch/zen/${encodeURIComponent(resolved.zenithId)}`);
     }
     await playZenithEmbed(resolved.embedUrl, target, token, {
-      histKey: `kp:${kpId}`,
-      resume: resumePosition(`kp:${kpId}`),
-      audioLang: savedAudioLang(`kp:${kpId}`),
+      histKey: `kp:${id}`,
+      resume: resumePosition(`kp:${id}`),
+      audioLang: savedAudioLang(`kp:${id}`),
       serialSelection: requestedSelection,
       forceSeries: target.isSeries,
     });
@@ -2595,6 +2789,8 @@
   }
 
   async function playOpr(playerUrl, token, ndMeta) {
+    const shakaTask = ensureShaka();
+    shakaTask.catch(() => {});
     const meta = ndMeta || cacheGet("oprmeta", playerUrl) || storedMeta(`opr:${playerUrl}`);
     const pageUrl = meta?.pageUrl || "";
     const serialHint = normalizeSerialHint(meta?.serialSelection) ||
@@ -2962,7 +3158,7 @@
   async function playOrtifiedCleanroom(embedUrl, target, token) {
     if (isStale(token)) return;
     showPlayerLoading();
-    const html = await fetchThirdPartyText(embedUrl, { preferSandbox: true, label: "ortified" });
+    const html = await fetchCachedEmbedText(embedUrl, { preferSandbox: true, label: "ortified" });
     if (isStale(token)) return;
     const sanitized = sanitizeOrtifiedHtml(html, embedUrl, "cleanroom-block");
     if (!sanitized.stats.ok) throw new Error("В Ortified HTML нет makePlayer");
@@ -2991,17 +3187,40 @@
   // =====================================================================
   // Playback — Zenith via Shaka
   // =====================================================================
+  function zenithBrowserFetchBlocked() {
+    try { return Number(sessionStorage.getItem("alphy.zenithBrowserBlockedUntil") || 0) > Date.now(); }
+    catch { return false; }
+  }
+
+  function rememberZenithBrowserFetch(blocked) {
+    try {
+      if (blocked) sessionStorage.setItem("alphy.zenithBrowserBlockedUntil", String(Date.now() + 30 * 60e3));
+      else sessionStorage.removeItem("alphy.zenithBrowserBlockedUntil");
+    } catch { /* session-only optimization */ }
+  }
+
   async function playZenithEmbed(embedUrl, target, token, opts = {}) {
     if (isStale(token)) return;
     showPlayerLoading();
     state.zenithEmbedUrl = embedUrl;
+    const shakaTask = ensureShaka();
+    shakaTask.catch(() => {});
     let parsed = { sources: {}, meta: {}, playlist: { current: null, seasons: [] } };
-    if (!opts.forceWorker) {
+    if (!opts.forceWorker && !zenithBrowserFetchBlocked()) {
       try {
-        const html = await fetchThirdPartyText(embedUrl, { preferSandbox: false, label: "zenith" });
+        // A browser that can reach Zenith directly normally answers quickly. Do
+        // one abortable CORS attempt; XHR/sandbox retries can each hang for tens
+        // of seconds and the resolver is both faster and more reliable here.
+        const html = await fetchThirdPartyText(embedUrl, {
+          directOnly: true,
+          timeoutMs: ZENITH_BROWSER_FAST_WINDOW_MS,
+          label: "zenith",
+        });
         if (isStale(token)) return;
         parsed = parseZenithEmbed(html);
+        rememberZenithBrowserFetch(false);
       } catch (error) {
+        rememberZenithBrowserFetch(true);
         log("zenith-browser-fallback", { message: error.message });
       }
     }
@@ -3009,7 +3228,7 @@
       !parsed.sources.dash && !parsed.sources.hls && !parsed.sources.dasha ||
       ((opts.forceSeries || target?.isSeries || opts.serialSelection) && !parsed.playlist?.seasons?.length);
     if (opts.forceWorker || needsWorker) {
-      parsed = await resolveZenithThroughWorker(embedUrl);
+      parsed = await resolveZenithThroughWorker(embedUrl, { force: !!opts.forceWorker });
       if (isStale(token)) return;
     }
 
@@ -3034,6 +3253,8 @@
     state.audioNames = parsed.meta.audioNames || [];
     if (!media) throw new Error("Zenith embed не отдал dash/hls");
     if (selection) persistSerialSelection(target, selection);
+    await shakaTask;
+    if (isStale(token)) return;
     await playShaka(media.url, media.kind, token, {
       resume: opts.resume || 0,
       audioLang: opts.audioLang,
@@ -3043,19 +3264,26 @@
     if (opts.histKey) startTracking(opts.histKey, target);
   }
 
-  async function resolveZenithThroughWorker(embedUrl) {
+  async function resolveZenithThroughWorker(embedUrl, { force = false } = {}) {
     const id = embedUrl.match(/\/movie\/(\d+)/i)?.[1] || "";
     if (!id) throw new Error("Не удалось извлечь Zenith id");
+    const cached = zenithParsedCache.get(id);
+    if (!force && cached?.expiresAt > Date.now()) return cached.value;
     const data = await resolverJson(`/zenith?id=${encodeURIComponent(id)}`);
     if (!data.hasSources) throw new Error("Worker Zenith fallback не отдал источники");
-    return {
+    const value = {
       sources: data.sources || {},
       meta: data.meta || {},
       playlist: data.playlist || { current: null, seasons: [] },
     };
+    zenithParsedCache.set(id, { value, expiresAt: Date.now() + ZENITH_PARSED_CACHE_MS });
+    if (zenithParsedCache.size > 12) zenithParsedCache.delete(zenithParsedCache.keys().next().value);
+    return value;
   }
 
   async function playShaka(url, kind, token, opts = {}) {
+    if (isStale(token)) return;
+    await ensureShaka();
     if (isStale(token)) return;
     await teardownPlayer();
     state.opravar = opts.opravar || null;
@@ -3079,9 +3307,20 @@
     state.player = player;
     await player.attach(video);
     player.configure({
-      streaming: { retryParameters: { maxAttempts: 2, baseDelay: 500, backoffFactor: 1.4 } },
+      streaming: {
+        bufferingGoal: 20,
+        rebufferingGoal: 2,
+        bufferBehind: 30,
+        retryParameters: { maxAttempts: 3, baseDelay: 450, backoffFactor: 1.5 },
+      },
       manifest: { dash: { ignoreMinBufferTime: true } },
-      abr: { enabled: false },
+      abr: {
+        enabled: true,
+        defaultBandwidthEstimate: initialBandwidthEstimate(4_000_000),
+        switchInterval: 4,
+        bandwidthUpgradeTarget: 0.8,
+        bandwidthDowngradeTarget: 0.95,
+      },
     });
     player.addEventListener("trackschanged", renderTracks);
     player.addEventListener("variantchanged", renderTracks);
@@ -3101,7 +3340,6 @@
     }
     // Restore saved озвучка (audio language) and resume position from history.
     if (opts.audioLang) { try { player.selectAudioLanguage(opts.audioLang); } catch { /* ignore */ } }
-    selectHighestShakaVariant(player, opts.audioLang);
     if (opts.resume > 5) { try { video.currentTime = opts.resume; } catch { /* ignore */ } }
     video.playbackRate = state.playbackRate;
     renderTracks();
@@ -3132,6 +3370,11 @@
     player.configure({ abr: { enabled: false } });
     player.selectVariantTrack(best, true);
     return best;
+  }
+
+  function shakaAbrEnabled(player) {
+    try { return player?.getConfiguration?.().abr?.enabled !== false; }
+    catch { return true; }
   }
 
   function startTracking(histKey, target) {
@@ -3316,8 +3559,9 @@
         btn.textContent = audioNameFor(track.language, index);
         if (track.active) btn.className = "active";
         btn.addEventListener("click", () => {
+          const keepAuto = shakaAbrEnabled(player);
           player.selectAudioLanguage(track.language, (track.roles || [])[0]);
-          selectHighestShakaVariant(player, track.language);
+          if (!keepAuto) selectHighestShakaVariant(player, track.language);
           persistAudio(track.language);
           setTimeout(renderTracks, 250);
         });
@@ -3330,10 +3574,21 @@
       variants.filter((track) => !activeAudio || track.language === activeAudio),
       (track) => `${track.height || 0}|${Math.round((track.bandwidth || 0) / 1000)}`
     ).sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0));
-    addTrackGroup("Качество", qualityChoices, (track) => {
+    const abrEnabled = shakaAbrEnabled(player);
+    addTrackGroup("Качество", [{ auto: true }, ...qualityChoices], (track) => {
       const btn = document.createElement("button");
+      if (track.auto) {
+        const active = variants.find((item) => item.active);
+        btn.textContent = active?.height ? `Авто (${active.height}p)` : "Авто";
+        if (abrEnabled) btn.className = "active";
+        btn.addEventListener("click", () => {
+          player.configure({ abr: { enabled: true } });
+          setTimeout(renderTracks, 250);
+        });
+        return btn;
+      }
       btn.textContent = `${track.height ? `${track.height}p` : "auto"} ${bitrateLabel(track)}`.trim();
-      if (track.active) btn.className = "active";
+      if (!abrEnabled && track.active) btn.className = "active";
       btn.addEventListener("click", () => {
         player.configure({ abr: { enabled: false } });
         player.selectVariantTrack(track, true);
@@ -4084,6 +4339,20 @@ LIMIT 1`;
   // Engine: third-party fetch, newdeaf parsing, Zenith/Ortified parsing
   // (ported verbatim from the proven MVP — do not "simplify".)
   // =====================================================================
+  function fetchCachedEmbedText(url, options = {}, ttlMs = 2 * 60e3) {
+    const cached = embedTextCache.get(url);
+    if (cached?.text && cached.expiresAt > Date.now()) return Promise.resolve(cached.text);
+    if (embedTextInflight.has(url)) return embedTextInflight.get(url);
+    const pending = fetchThirdPartyText(url, options)
+      .then((text) => {
+        embedTextCache.set(url, { text, expiresAt: Date.now() + ttlMs });
+        return text;
+      })
+      .finally(() => embedTextInflight.delete(url));
+    embedTextInflight.set(url, pending);
+    return pending;
+  }
+
   function progressHook() {
     // We build the Ortified cleanroom srcdoc ourselves, so a script we inject runs
     // in the SAME document as the player's <video> and can read its position even
@@ -4132,6 +4401,7 @@ LIMIT 1`;
     const preferSandbox = !!options.preferSandbox;
     const timeoutMs = options.timeoutMs || 30000;
     const sandboxTimeoutMs = options.sandboxTimeoutMs || timeoutMs;
+    if (options.directOnly) return directFetchText(url, timeoutMs);
     if (preferSandbox) {
       try {
         return await sandboxFetchText(url, options.label, sandboxTimeoutMs);
@@ -4296,13 +4566,25 @@ addEventListener('message', async (event) => {
 
   function prefetchTopNewdeafPage(candidates) {
     const pageUrl = candidates?.[0]?.url;
-    if (!pageUrl || newdeafPagePrefetches.has(pageUrl) || cacheGet("ndpage", pageUrl)) return;
+    if (!pageUrl || newdeafPagePrefetches.has(pageUrl)) return;
+    const warmPlayer = (parsed) => {
+      const embedUrl = parsed?.ortified?.[0];
+      if (embedUrl) return fetchCachedEmbedText(embedUrl, { preferSandbox: true, label: "ortified-prefetch" });
+      return null;
+    };
+    const cached = cacheGet("ndpage", pageUrl);
+    if (cached) {
+      scheduleIdle(() => warmPlayer(cached)?.catch((error) => log("ortified-prefetch-warn", error.message)));
+      return;
+    }
     newdeafPagePrefetches.add(pageUrl);
     scheduleIdle(() => {
-      resolveNewdeafPage(pageUrl).catch((error) => {
-        newdeafPagePrefetches.delete(pageUrl);
-        log("newdeaf-prefetch-warn", error.message);
-      });
+      resolveNewdeafPage(pageUrl)
+        .then((parsed) => warmPlayer(parsed))
+        .catch((error) => {
+          newdeafPagePrefetches.delete(pageUrl);
+          log("newdeaf-prefetch-warn", error.message);
+        });
     });
   }
 
@@ -4328,6 +4610,70 @@ addEventListener('message', async (event) => {
           log("soap-prefetch-warn", error.message);
         });
     }, 1800);
+  }
+
+  async function prepareTarget(target, details = {}) {
+    if (!target?.kind) return;
+    const prepKey = keyFor(target);
+    if (preparedTargets.has(prepKey)) return;
+    preparedTargets.add(prepKey);
+    try {
+      if (target.kind === "kp") {
+        if (cacheGet("zona", target.kpId)?.embedUrl) {
+          await ensureShaka();
+        } else if (!collapsPreviewOnCooldown()) {
+          warmCollapsConnections();
+          await probeCollapsMovie({ ...details, kpId: String(target.kpId), rank: 0 });
+        }
+      } else if (target.kind === "clps") {
+        warmCollapsConnections();
+        const playlist = await fetchCollapsPlaylist(target.kpId);
+        const item = playlist.items.find((entry) =>
+          (!target.season || entry.season === target.season) &&
+          (!target.episode || entry.episode === target.episode)) || chooseCollapsProbeItem(playlist.items);
+        if (item?.vkId) await fetchCollapsVideo(item.vkId);
+      } else if (target.kind === "soap") {
+        if (window.MediaSource) ensureHls().catch(() => {});
+        const movies = await loadSoapCatalog();
+        const movie = movies.find((entry) => String(entry.id) === String(target.soapId));
+        if (movie) prefetchTopSoapManifest([movie]);
+      } else if (target.kind === "zen" || target.kind === "opr") {
+        await ensureShaka();
+      } else if (target.kind === "ort") {
+        await fetchCachedEmbedText(target.embedUrl, { preferSandbox: true, label: "ortified-intent" });
+      } else if (target.kind === "nd") {
+        const parsed = await resolveNewdeafPage(target.pageUrl);
+        const embedUrl = parsed?.ortified?.[0];
+        if (embedUrl) await fetchCachedEmbedText(embedUrl, { preferSandbox: true, label: "ortified-intent" });
+      }
+    } catch (error) {
+      preparedTargets.delete(prepKey);
+      throw error;
+    }
+  }
+
+  function armCardIntent(card, target, details = {}) {
+    if (!card || !target?.kind) return;
+    let timer = null;
+    let claimedSpeculativeSlot = false;
+    const run = (speculative) => {
+      if (speculative) {
+        if (claimedSpeculativeSlot || speculativeIntentBudget <= 0) return;
+        claimedSpeculativeSlot = true;
+        speculativeIntentBudget -= 1;
+      }
+      prepareTarget(target, details).catch((error) => log("intent-prefetch-warn", error.message));
+    };
+    const schedule = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => run(true), 220);
+    };
+    const cancel = () => { clearTimeout(timer); timer = null; };
+    card.addEventListener("pointerenter", schedule, { passive: true });
+    card.addEventListener("pointerleave", cancel, { passive: true });
+    card.addEventListener("focus", schedule);
+    card.addEventListener("blur", cancel);
+    card.addEventListener("pointerdown", () => run(false), { passive: true });
   }
 
   function pageUrlCandidates(pageUrl) {
@@ -4713,7 +5059,31 @@ addEventListener('message', async (event) => {
 
   function chooseCollapsSource(sources, qualityKey = "") {
     const list = Array.isArray(sources) ? sources : [];
-    return list.find((source) => source.key === qualityKey) || list[0] || null;
+    const explicit = list.find((source) => source.key === qualityKey);
+    if (explicit) return explicit;
+    const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    const effective = String(connection?.effectiveType || "").toLowerCase();
+    const downlink = Number(connection?.downlink || 0);
+    const cap = connection?.saveData || /(^|-)2g$/.test(effective)
+      ? 480
+      : effective === "3g" || (downlink > 0 && downlink < 5)
+        ? 720
+        : 1080;
+    // Progressive MP4 cannot adapt after startup. Begin at a quality that reaches
+    // first frame quickly; 2K/4K remain one tap away and an explicit saved choice
+    // always wins on the next open.
+    return list.find((source) => Number(source.height || 0) <= cap) || list[list.length - 1] || null;
+  }
+
+  function initialBandwidthEstimate(fallback) {
+    const nav = globalThis.navigator || {};
+    const connection = nav.connection || nav.mozConnection || nav.webkitConnection;
+    const effective = String(connection?.effectiveType || "").toLowerCase();
+    const downlink = Number(connection?.downlink || 0);
+    if (connection?.saveData || /(^|-)2g$/.test(effective)) return 700_000;
+    if (effective === "3g") return 1_800_000;
+    if (downlink > 0) return Math.max(900_000, Math.min(10_000_000, downlink * 650_000));
+    return fallback;
   }
 
   function collapsVoiceLabel(item, index = 0) {
@@ -5213,8 +5583,6 @@ addEventListener('message', async (event) => {
     });
     el.saveResolverBtn.addEventListener("click", saveResolver);
     el.healthBtn.addEventListener("click", () => testResolver());
-    // Warm the static soap catalog so user search + the admin browser are instant.
-    loadSoapCatalog();
     window.addEventListener("hashchange", route);
     window.addEventListener("popstate", route);
     window.addEventListener("storage", (event) => {
@@ -5313,6 +5681,7 @@ addEventListener('message', async (event) => {
     getCurrentCuratedItem: currentCuratedItem,
     openCuratedItem,
     addCardBookmark,
+    armCardIntent,
     layoutMobileGrid,
     resolvePosterByTitle,
     resolveCardMeta,

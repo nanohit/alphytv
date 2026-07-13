@@ -460,6 +460,7 @@
     const image = document.createElement("img");
     image.className = "poster";
     image.loading = "lazy";
+    image.decoding = "async";
     const cachedPoster = posterUrlCacheGet(item.id);
     image.src = cachedPoster || item.poster || item.backdrop || "";
     // "resolved" => a known RU-reachable poster; "primary" => may be the blocked
@@ -517,6 +518,7 @@
         open();
       }
     });
+    window.alphyBridge?.armCardIntent?.(card, item.target, item);
     return card;
   }
 
