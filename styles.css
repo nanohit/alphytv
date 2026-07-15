@@ -30,7 +30,7 @@ body {
 }
 
 .quick-lists-toggle {
-  position: fixed; z-index: 30; left: 0; top: 50%;
+  position: fixed; z-index: 30; left: 0; top: 75%;
   width: 38px; min-height: 190px; padding: 14px 8px;
   border: 1px solid #2b2b2b; border-left: 0;
   border-radius: 0 6px 6px 0; background: rgba(8,8,8,.94); color: #a9a9a9;
@@ -584,8 +584,10 @@ body.admin-mode .card-add-list { display: flex; }
   overflow-y: hidden;
   padding: 7px 5px 14px;
   scroll-padding-inline: 5px;
-  scroll-snap-type: x proximity;
-  scroll-behavior: smooth;
+  /* Desktop shelves stay exactly where the user leaves them. Arrow clicks
+     request smooth scrolling explicitly in JS. */
+  scroll-snap-type: none;
+  scroll-behavior: auto;
   overscroll-behavior-inline: contain;
   scrollbar-width: none;
   -ms-overflow-style: none;
@@ -838,6 +840,10 @@ body.admin-mode .card-add-list { display: flex; }
     scrollbar-width: none;
     -ms-overflow-style: none;
   }
+  .curated-row {
+    scroll-snap-type: x proximity;
+    scroll-behavior: smooth;
+  }
   .card-grid::-webkit-scrollbar,
   .curated-row::-webkit-scrollbar { width: 0; height: 0; display: none; }
   .card-grid.mobile-two-row,
@@ -941,7 +947,7 @@ body.admin-mode .card-add-list { display: flex; }
   .serial-panel .track-buttons button { padding: 5px 8px; font-size: 11px; }
   .curated-list { scroll-margin-top: 66px; }
   .quick-lists-toggle {
-    top: 50%; width: 34px; min-height: 116px;
+    top: 75%; width: 34px; min-height: 116px;
     padding: 12px 7px; font-size: 11px;
   }
   .quick-lists-drawer { padding: 19px 16px; }

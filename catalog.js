@@ -792,7 +792,7 @@
       card.style.setProperty("--curated-c", String(column));
       card.style.removeProperty("--mobile-row");
       card.style.removeProperty("--mobile-column");
-      card.classList.toggle("page-lead", top && (column - 1) % visibleColumns === 0);
+      card.classList.toggle("page-lead", mobile && top && (column - 1) % visibleColumns === 0);
     });
 
     // Desktop keeps eight full cards across. Mobile width is owned by CSS so
