@@ -8,6 +8,7 @@ const MAX_LISTS = 24;
 const MAX_ITEMS_PER_LIST = 60;
 const MAX_BODY_BYTES = 512 * 1024;
 const ITEM_LABEL_MAX = 32;
+const DEFAULT_BANNER_TEXT = "Добавьте сайт в закладки";
 
 export function emptyCatalog() {
   return {
@@ -16,6 +17,7 @@ export function emptyCatalog() {
     updatedAt: null,
     forYou: "on",
     bookmarkBanner: false,
+    bookmarkBannerText: DEFAULT_BANNER_TEXT,
     lists: [],
   };
 }
@@ -163,6 +165,7 @@ export function normalizeCatalog(value, { nextRevision = null } = {}) {
     updatedAt: text(value?.updatedAt, 40) || null,
     forYou: normalizeForYouMode(value?.forYou),
     bookmarkBanner: value?.bookmarkBanner === true,
+    bookmarkBannerText: text(value?.bookmarkBannerText, 120) || DEFAULT_BANNER_TEXT,
     lists,
   };
 }

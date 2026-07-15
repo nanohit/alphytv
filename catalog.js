@@ -9,14 +9,14 @@
   const ADMIN_LOGOUT_URL = "/api/admin/logout";
   const ADMIN_FLAG_KEY = "alphy.admin.active.v2";
   const DRAFT_KEY = "alphy.curated.draft.v1";
-  const SHELF_HINT_KEY = "alphy.shelf.hint.v1";
-  const SHELF_HINT_INTERVAL = 14 * 24 * 3600e3;
+  const DEFAULT_BANNER_TEXT = "Добавьте сайт в закладки";
   const SAVE_DELAY_MS = 1200;
   const ITEM_LABEL_MAX = 32;
 
   const state = {
     catalog: {
-      schema: 1, revision: 0, updatedAt: null, lists: [], forYou: "on", bookmarkBanner: false,
+      schema: 1, revision: 0, updatedAt: null, lists: [], forYou: "on",
+      bookmarkBanner: false, bookmarkBannerText: DEFAULT_BANNER_TEXT,
     },
     blobUrl: "",
     fallbackUrl: `/curated-fallback.json?v=${CATALOG_CACHE_VERSION}`,
@@ -41,6 +41,7 @@
     entry: document.getElementById("adminEntry"),
     banner: document.getElementById("bookmarkBanner"),
     bannerToggle: document.getElementById("bookmarkBannerToggle"),
+    bannerText: document.getElementById("bookmarkBannerText"),
     quickToggle: document.getElementById("quickListsToggle"),
     quickDrawer: document.getElementById("quickListsDrawer"),
     quickBackdrop: document.getElementById("quickListsBackdrop"),
@@ -159,6 +160,7 @@
       updatedAt: value?.updatedAt || null,
       forYou: normalizeForYouMode(value?.forYou),
       bookmarkBanner: value?.bookmarkBanner === true,
+      bookmarkBannerText: String(value?.bookmarkBannerText || "").trim().slice(0, 120) || DEFAULT_BANNER_TEXT,
       lists,
     };
   }
@@ -773,7 +775,6 @@
   const CURATED_DESKTOP_GAP = 14;
   const CURATED_SIDE_PADDING = 10;
   let curatedObservers = [];
-  let shelfHintScheduled = false;
 
   function layoutCuratedCards(row) {
     const cards = [...row.children].filter((child) => child.classList.contains("card"));
@@ -820,18 +821,30 @@
   function setupCuratedRow(wrap, row) {
     const prev = curatedNavButton("prev", "‹");
     const next = curatedNavButton("next", "›");
+    const track = document.createElement("div");
+    track.className = "curated-scroll-track hidden";
+    track.setAttribute("aria-hidden", "true");
+    const thumb = document.createElement("span");
+    thumb.className = "curated-scroll-thumb";
+    track.appendChild(thumb);
     const pageStride = () => Math.max(120, Math.round(row.clientWidth * .88));
     prev.addEventListener("click", () => row.scrollBy({ left: -pageStride(), behavior: "smooth" }));
     next.addEventListener("click", () => row.scrollBy({ left: pageStride(), behavior: "smooth" }));
-    wrap.append(prev, next);
+    wrap.append(prev, next, track);
     const sync = () => {
-      const max = row.scrollWidth - row.clientWidth - 2;
+      const max = Math.max(0, row.scrollWidth - row.clientWidth);
       const overflows = max > 2;
       prev.classList.toggle("hidden", !overflows);
       next.classList.toggle("hidden", !overflows);
       prev.disabled = !overflows || row.scrollLeft <= 2;
-      next.disabled = !overflows || row.scrollLeft >= max;
-      if (overflows) maybeHintShelfScroll(row, max);
+      next.disabled = !overflows || row.scrollLeft >= max - 2;
+      track.classList.toggle("hidden", !overflows);
+      if (overflows) {
+        const thumbPercent = Math.max(12, Math.min(100, (row.clientWidth / row.scrollWidth) * 100));
+        const leftPercent = (Math.max(0, row.scrollLeft) / max) * (100 - thumbPercent);
+        thumb.style.width = `${thumbPercent}%`;
+        thumb.style.left = `${Math.max(0, Math.min(100 - thumbPercent, leftPercent))}%`;
+      }
     };
     row.addEventListener("scroll", sync, { passive: true });
     const relayout = () => {
@@ -847,29 +860,6 @@
       observer.observe(row);
       curatedObservers.push(observer);
     }
-  }
-
-  function maybeHintShelfScroll(row, max) {
-    if (shelfHintScheduled || typeof row.scrollTo !== "function") return;
-    if (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    let previous = 0;
-    try { previous = Number(localStorage.getItem(SHELF_HINT_KEY)) || 0; } catch { /* ignore */ }
-    if (Date.now() - previous < SHELF_HINT_INTERVAL) return;
-    shelfHintScheduled = true;
-    try { localStorage.setItem(SHELF_HINT_KEY, String(Date.now())); } catch { /* ignore */ }
-
-    let cancelled = false;
-    const cancel = () => { cancelled = true; };
-    for (const event of ["pointerdown", "touchstart", "wheel"]) {
-      row.addEventListener(event, cancel, { once: true, passive: true });
-    }
-    setTimeout(() => {
-      if (cancelled || row.scrollLeft > 2) return;
-      row.scrollTo({ left: Math.min(42, max), behavior: "smooth" });
-      setTimeout(() => {
-        if (!cancelled && row.scrollLeft < 70) row.scrollTo({ left: 0, behavior: "smooth" });
-      }, 430);
-    }, 900);
   }
 
   // ---------------------------------------------------------------------
@@ -1023,6 +1013,11 @@
     el.quickDrawer?.setAttribute("aria-hidden", "false");
   }
 
+  function desktopHoverNavigation() {
+    return typeof matchMedia === "function"
+      && matchMedia("(min-width: 901px) and (hover: hover) and (pointer: fine)").matches;
+  }
+
   function renderQuickListNav(items) {
     state.quickListItems = items;
     el.quickNav?.replaceChildren();
@@ -1051,8 +1046,11 @@
 
   function applyBookmarkBanner() {
     const enabled = state.catalog.bookmarkBanner === true;
+    const text = String(state.catalog.bookmarkBannerText || "").trim() || DEFAULT_BANNER_TEXT;
     el.banner?.classList.toggle("hidden", !enabled);
+    if (el.banner) el.banner.textContent = text;
     if (el.bannerToggle) el.bannerToggle.checked = enabled;
+    if (el.bannerText && el.bannerText.value !== text) el.bannerText.value = text;
   }
 
   function render() {
@@ -1183,7 +1181,19 @@
       markDirty();
       applyBookmarkBanner();
     });
+    el.bannerText?.addEventListener("input", () => {
+      if (!state.admin) return;
+      state.catalog.bookmarkBannerText = el.bannerText.value.slice(0, 120);
+      if (el.banner) el.banner.textContent = el.bannerText.value.trim() || DEFAULT_BANNER_TEXT;
+      markDirty();
+    });
     el.quickToggle?.addEventListener("click", openQuickLists);
+    el.quickToggle?.addEventListener("pointerenter", () => {
+      if (desktopHoverNavigation()) openQuickLists();
+    });
+    el.quickDrawer?.addEventListener("pointerleave", () => {
+      if (desktopHoverNavigation()) closeQuickLists();
+    });
     el.quickClose?.addEventListener("click", closeQuickLists);
     el.quickBackdrop?.addEventListener("click", closeQuickLists);
     el.create?.addEventListener("click", createList);

@@ -121,4 +121,9 @@ test("findReady matches curated titles by normalized title + year + type", async
   assert.equal(find("Обсессия", "2024", false), null, "year must match exactly");
   assert.equal(find("Обсессия", "", false), null, "no year — no match");
   assert.equal(find("Кино через резолв", "2024", false), null, "kp-target items are not shortcuts");
+  assert.equal(
+    sandbox.window.alphyCatalog.getCatalog().bookmarkBannerText,
+    "Добавьте сайт в закладки",
+    "older catalog snapshots receive the editable banner text default",
+  );
 });
