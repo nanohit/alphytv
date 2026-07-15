@@ -95,3 +95,9 @@ test("forYou mode survives normalization and defaults to on", () => {
   assert.equal(normalizeCatalog({ forYou: "off", lists: [] }).forYou, "off");
   assert.equal(normalizeCatalog({ forYou: "junk", lists: [] }).forYou, "on");
 });
+
+test("bookmark banner is an explicit catalog boolean", () => {
+  assert.equal(normalizeCatalog({ lists: [] }).bookmarkBanner, false);
+  assert.equal(normalizeCatalog({ bookmarkBanner: true, lists: [] }).bookmarkBanner, true);
+  assert.equal(normalizeCatalog({ bookmarkBanner: "true", lists: [] }).bookmarkBanner, false);
+});

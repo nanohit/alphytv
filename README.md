@@ -134,9 +134,11 @@ ALPHY_ADMIN_USER
 ALPHY_ADMIN_PASSWORD
 ```
 
-Credentials are sent only to same-origin `/api/admin/*` over HTTPS and are kept
-in `sessionStorage`, never in the frontend bundle or URL. Catalog saves use a
-revision guard, a local unsaved-draft backup, and a 1.2-second debounce.
+The footer's `admin` link uses the browser's native HTTP Basic prompt against
+same-origin `/api/admin/login`. The raw credentials never enter frontend JS or
+web storage; a signed, eight-hour `HttpOnly` cookie authorizes catalog calls.
+Catalog saves use a revision guard, a local unsaved-draft backup, and a
+1.2-second debounce.
 
 See [docs/CURATED_ADMIN.md](docs/CURATED_ADMIN.md) for the data model and
 operational details.

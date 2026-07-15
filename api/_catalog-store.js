@@ -15,6 +15,7 @@ export function emptyCatalog() {
     revision: 0,
     updatedAt: null,
     forYou: "on",
+    bookmarkBanner: false,
     lists: [],
   };
 }
@@ -161,6 +162,7 @@ export function normalizeCatalog(value, { nextRevision = null } = {}) {
     revision: Number.isInteger(revisionValue) && revisionValue >= 0 ? revisionValue : 0,
     updatedAt: text(value?.updatedAt, 40) || null,
     forYou: normalizeForYouMode(value?.forYou),
+    bookmarkBanner: value?.bookmarkBanner === true,
     lists,
   };
 }

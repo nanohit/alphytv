@@ -26,9 +26,11 @@ ALPHY_ADMIN_PASSWORD
 BLOB_READ_WRITE_TOKEN
 ```
 
-The frontend keeps credentials in `sessionStorage` for the current tab. It
-sends HTTP Basic authorization only to the same-origin admin endpoints. No
-credential is embedded in static assets, localStorage, catalog JSON, or links.
+The footer's `admin` link opens the browser's native HTTP Basic prompt against
+`/api/admin/login`. After a successful login, a signed eight-hour `HttpOnly`
+cookie authorizes the same-origin admin endpoints. Raw credentials never enter
+frontend JavaScript, browser storage, the bundle, or a URL, and no credential
+is embedded in static assets, localStorage, catalog JSON, or links.
 
 Admin mode is enabled atomically only after both the credential check and the
 catalog read succeed. A storage failure is reported separately from invalid

@@ -21,6 +21,59 @@ body {
   min-height: 100vh;
 }
 
+.bookmark-banner {
+  width: 100%; min-height: 25px; padding: 4px 16px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent); color: #000;
+  font-size: 12px; font-weight: 600; line-height: 1.15; text-align: center;
+}
+
+.quick-lists-toggle {
+  position: fixed; z-index: 30; left: 0; top: 54%;
+  padding: 11px 6px; border: 1px solid #2b2b2b; border-left: 0;
+  border-radius: 0 6px 6px 0; background: rgba(8,8,8,.94); color: #a9a9a9;
+  font: inherit; font-size: 10px; font-weight: 500; letter-spacing: 0;
+  writing-mode: vertical-rl; cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.quick-lists-toggle:hover,
+.quick-lists-toggle:focus-visible { color: var(--accent); border-color: #525200; outline: 0; }
+.quick-lists-backdrop {
+  position: fixed; z-index: 38; inset: 0; border: 0;
+  background: rgba(0,0,0,.46); opacity: 0; pointer-events: none;
+  transition: opacity .18s;
+}
+.quick-lists-drawer {
+  position: fixed; z-index: 40; inset: 0 auto 0 0;
+  width: min(280px, 82vw); padding: 22px 18px;
+  border-right: 1px solid #292929; background: rgba(7,7,7,.98);
+  transform: translateX(-101%); transition: transform .2s cubic-bezier(.2,.8,.2,1);
+  overflow-y: auto;
+}
+.quick-lists-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 19px; color: #d8d8d8;
+}
+.quick-lists-head strong { font-size: 13px; font-weight: 600; }
+.quick-lists-head button {
+  border: 0; background: transparent; color: #666; font: inherit;
+  font-size: 10px; cursor: pointer;
+}
+.quick-lists-head button:hover { color: #aaa; }
+.quick-lists-nav { display: grid; gap: 2px; }
+.quick-lists-nav button {
+  width: 100%; padding: 10px 9px; border: 0; border-left: 2px solid transparent;
+  border-radius: 0; background: transparent; color: #c7c7c7;
+  font: inherit; font-size: 13px; line-height: 1.25; text-align: left; cursor: pointer;
+}
+.quick-lists-nav button:hover,
+.quick-lists-nav button:focus-visible {
+  border-left-color: var(--accent); color: #fff; outline: 0;
+}
+body.quick-lists-open { overflow: hidden; }
+body.quick-lists-open .quick-lists-backdrop { opacity: 1; pointer-events: auto; }
+body.quick-lists-open .quick-lists-drawer { transform: translateX(0); }
+
 .hidden { display: none !important; }
 .muted { color: var(--muted); }
 .search-note { grid-column: 1 / -1; margin: 4px 0 0; }
@@ -218,7 +271,7 @@ header {
 .card:focus-visible .card-hover-meta { opacity: 1; }
 .card-bookmark {
   position: absolute; z-index: 4; top: -1px; right: 7px;
-  width: 24px; height: 31px; padding: 0;
+  width: 30px; height: 38px; padding: 0;
   border: 0; background: transparent; color: #fff;
   display: inline-flex; align-items: flex-start; justify-content: center;
   cursor: pointer; opacity: 0;
@@ -227,7 +280,7 @@ header {
   transition: opacity .15s, transform .15s, color .15s;
 }
 .card-bookmark svg {
-  width: 21px; height: 28px;
+  width: 27px; height: 35px;
   fill: transparent;
   stroke: currentColor;
   transition: fill .15s, color .15s, transform .15s;
@@ -457,6 +510,14 @@ body.admin-mode .card-add-list { display: flex; }
 .catalog-state[data-mode="dirty"], .catalog-state[data-mode="saving"] { color: #d9d966; }
 .catalog-state[data-mode="error"] { color: #e28f8f; }
 .admin-catalog-actions { display: flex; gap: 7px; }
+.banner-admin-toggle {
+  min-height: 30px; padding: 0 9px; border: 1px solid var(--stroke-strong);
+  border-radius: 8px; background: #0e0e0e; color: #cfcfcf;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; cursor: pointer;
+}
+.banner-admin-toggle input { width: 13px; height: 13px; accent-color: var(--accent); }
+.banner-admin-toggle:has(input:checked) { color: var(--accent); border-color: #5a5a1a; }
 .admin-catalog-actions button,
 .curated-list-controls button {
   min-height: 30px; padding: 0 10px; border-radius: 8px;
@@ -468,12 +529,12 @@ body.admin-mode .card-add-list { display: flex; }
 .admin-catalog-actions button:disabled,
 .curated-list-controls button:disabled { opacity: .35; cursor: default; }
 .curated-lists { display: grid; gap: 22px; }
-.curated-list { min-width: 0; }
+.curated-list { min-width: 0; scroll-margin-top: 24px; }
 .curated-list-head {
   min-height: 31px; display: flex; align-items: center; justify-content: space-between;
   gap: 8px; margin-bottom: 7px;
 }
-.curated-list-head h3 { font-size: 14px; font-weight: 600; }
+.curated-list-head h3 { font-size: 18px; font-weight: 600; }
 .curated-title-input {
   width: min(460px, 100%); min-width: 0; padding: 7px 9px;
   border: 1px solid var(--stroke-strong); border-radius: 8px;
@@ -488,22 +549,23 @@ body.admin-mode .card-add-list { display: flex; }
   color: #cfcfcf; cursor: pointer; font: inherit; font-size: 11px;
 }
 .foryou-controls select:hover { color: var(--accent); border-color: var(--accent); }
-/* Category shelf: 8 tiles per row, 2 rows = one page of 16; extra titles page
-   off to the right via the arrows. The row places each card explicitly (see
-   layoutCuratedCards in catalog.js) so reading order stays 1-8 then 9-16. */
+/* Category shelves use one or two balanced rows. JS calculates the row split
+   from the actual viewport, so an overflow never leaves a long 5+1 tail. */
 .curated-row-wrap { position: relative; }
 .curated-row {
   display: grid;
   grid-auto-flow: column;
-  grid-template-rows: repeat(2, auto);
+  grid-template-rows: repeat(var(--curated-rows, 2), max-content);
   grid-auto-columns: var(--curated-col, clamp(117px, 11.9vw, 138px));
   align-content: start;
   gap: 18px 14px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 7px 1px 10px;
+  padding: 7px 5px 14px;
+  scroll-padding-inline: 5px;
   scroll-snap-type: x proximity;
   scroll-behavior: smooth;
+  overscroll-behavior-inline: contain;
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
@@ -515,26 +577,25 @@ body.admin-mode .card-add-list { display: flex; }
 }
 .curated-row > .card.page-lead { scroll-snap-align: start; }
 
-/* Paging arrows — only added when a list overflows one page (>16). */
+/* Plain arrows only: no edge gradients or dark hover curtains. */
 .curated-nav {
-  position: absolute; top: 7px; bottom: 10px; width: 54px;
-  display: grid; align-items: center; padding: 0 4px;
-  border: 0; cursor: pointer; z-index: 6;
-  opacity: 0; transition: opacity .2s;
+  position: absolute; top: 50%; width: 34px; height: 46px;
+  display: grid; place-items: center; padding: 0;
+  border: 0; background: transparent; cursor: pointer; z-index: 6;
+  opacity: .72; transform: translateY(-50%); transition: opacity .16s;
 }
-.curated-nav-prev { left: 0; justify-items: start;
-  background: linear-gradient(90deg, var(--bg) 16%, rgba(0,0,0,0) 100%); }
-.curated-nav-next { right: 0; justify-items: end;
-  background: linear-gradient(270deg, var(--bg) 16%, rgba(0,0,0,0) 100%); }
+.curated-nav-prev { left: 1px; }
+.curated-nav-next { right: 1px; }
 .curated-nav .glyph {
-  width: 34px; height: 34px; border-radius: 50%;
+  width: 30px; height: 42px;
   display: grid; place-items: center;
-  background: rgba(18,18,18,.94); border: 1px solid var(--stroke-strong);
-  color: #eaeaea; font-size: 19px; line-height: 1; padding-bottom: 2px;
-  transition: color .16s, border-color .16s, transform .16s;
+  background: transparent; border: 0;
+  color: #f1f1f1; font-size: 34px; line-height: 1; padding-bottom: 4px;
+  text-shadow: 0 1px 4px #000, 0 0 10px #000;
+  transition: color .16s, transform .16s;
 }
 .curated-row-wrap:hover .curated-nav { opacity: 1; }
-.curated-nav:hover .glyph { color: var(--accent); border-color: var(--accent); transform: scale(1.06); }
+.curated-nav:hover .glyph { color: var(--accent); transform: scale(1.08); }
 .curated-nav:disabled { opacity: 0; pointer-events: none; }
 .curated-empty {
   padding: 16px; border: 1px dashed var(--stroke-strong); border-radius: 10px;
@@ -602,10 +663,16 @@ body.admin-mode .card-add-list { display: flex; }
 .list-picker-options button:hover { border-color: var(--accent); }
 .list-picker-options .list-picker-create { color: var(--accent); }
 
-.site-footer { display: flex; justify-content: center; padding: 42px 0 0; }
+.site-footer {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  justify-content: center; padding: 48px 0 0;
+}
+.footer-contact { color: #4d4d4d; font-size: 10px; line-height: 1.3; }
+.footer-contact a { color: inherit; text-decoration: none; }
+.footer-contact a:hover { color: #777; }
 .admin-entry {
-  border: 0; background: transparent; color: #292929; cursor: pointer;
-  font-size: 9px; letter-spacing: .08em; text-transform: lowercase;
+  border: 0; background: transparent; color: #242424; cursor: pointer;
+  font-size: 8px; letter-spacing: 0; text-transform: lowercase;
 }
 .admin-entry:hover { color: #555; }
 
@@ -697,13 +764,14 @@ body.admin-mode .card-add-list { display: flex; }
 
 @media (max-width: 560px) {
   :root {
-    --mobile-card-width: calc((100vw - 43px) / 4);
+    --mobile-card-width: calc((100vw - 42px) / 3.5);
     --card-gap: 6px;
   }
   .container { padding: 14px 12px 42px; }
-  header { margin-bottom: 18px; gap: 10px; }
-  .logo-image { height: 40px; max-width: 130px; }
-  .search-box { gap: 5px; }
+  header { flex-direction: row; align-items: center; margin-bottom: 20px; gap: 8px; }
+  .brand { min-width: 0; flex: 0 0 auto; justify-content: flex-start; }
+  .logo-image { height: 28px; max-width: 72px; }
+  .search-box { min-width: 0; gap: 5px; }
   .search-box input { min-width: 0; padding: 9px 10px; font-size: 12px; }
   .search-button, .icon-btn { width: 38px; height: 38px; border-radius: 10px; }
   .search-button svg { width: 20px; height: 20px; }
@@ -737,23 +805,26 @@ body.admin-mode .card-add-list { display: flex; }
   .curated-row.mobile-two-row {
     grid-template-rows: repeat(2, max-content);
   }
-  .card-grid > .card,
-  .curated-row > .card {
+  .card-grid > .card {
     grid-row: var(--mobile-row);
     grid-column: var(--mobile-column);
+  }
+  .curated-row > .card {
+    grid-row: var(--curated-r);
+    grid-column: var(--curated-c);
   }
   .card { width: var(--mobile-card-width); }
   .card-media { border-radius: 7px; }
   .card .ctitle {
-    margin: 6px 1px 2px; font-size: 10.5px; line-height: 1.17;
+    margin: 7px 1px 2px; font-size: 11.5px; line-height: 1.18;
     display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
     overflow: hidden;
   }
   .card .cmeta { margin: 0 1px; font-size: 8px; }
   .card-bookmark {
-    top: -1px; right: 4px; width: 19px; height: 25px;
+    top: -1px; right: 4px; width: 27px; height: 35px;
   }
-  .card-bookmark svg { width: 17px; height: 23px; stroke-width: 2.2; }
+  .card-bookmark svg { width: 24px; height: 32px; stroke-width: 2.1; }
   .card-hover-meta {
     gap: 6px;
     padding: 5px 4px;
@@ -810,7 +881,7 @@ body.admin-mode .card-add-list { display: flex; }
   .curated-section { margin-bottom: 26px; }
   .curated-lists { gap: 18px; }
   .curated-list-head { min-height: 26px; margin-bottom: 3px; }
-  .curated-list-head h3 { font-size: 14px; }
+  .curated-list-head h3 { font-size: 17px; }
   .curated-toolbar { align-items: center; }
   .curated-list-head { align-items: stretch; }
   .curated-title-input { font-size: 13px; }
@@ -829,6 +900,11 @@ body.admin-mode .card-add-list { display: flex; }
   }
   .meta-poster .card-bookmark svg { width: 27px; height: 36px; }
   .serial-panel .track-buttons button { padding: 5px 8px; font-size: 11px; }
+  .quick-lists-toggle { top: 62%; padding: 10px 5px; font-size: 9px; }
+  .quick-lists-drawer { padding: 19px 16px; }
+  .quick-lists-nav button { padding-block: 11px; font-size: 14px; }
+  .bookmark-banner { min-height: 23px; padding-block: 3px; font-size: 11px; }
+  .admin-catalog-actions { flex-wrap: wrap; justify-content: flex-end; }
 }
 
 @media (hover: none) {

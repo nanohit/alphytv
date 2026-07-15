@@ -5,13 +5,19 @@
   const CONFIG_URL = `/curated-config.json?v=${CATALOG_CACHE_VERSION}`;
   const ADMIN_CHECK_URL = "/api/admin/check";
   const ADMIN_CATALOG_URL = "/api/admin/catalog";
-  const AUTH_KEY = "alphy.admin.auth.v1";
+  const ADMIN_LOGIN_URL = "/api/admin/login";
+  const ADMIN_LOGOUT_URL = "/api/admin/logout";
+  const ADMIN_FLAG_KEY = "alphy.admin.active.v2";
   const DRAFT_KEY = "alphy.curated.draft.v1";
+  const SHELF_HINT_KEY = "alphy.shelf.hint.v1";
+  const SHELF_HINT_INTERVAL = 14 * 24 * 3600e3;
   const SAVE_DELAY_MS = 1200;
   const ITEM_LABEL_MAX = 32;
 
   const state = {
-    catalog: { schema: 1, revision: 0, updatedAt: null, lists: [], forYou: "on" },
+    catalog: {
+      schema: 1, revision: 0, updatedAt: null, lists: [], forYou: "on", bookmarkBanner: false,
+    },
     blobUrl: "",
     fallbackUrl: `/curated-fallback.json?v=${CATALOG_CACHE_VERSION}`,
     admin: false,
@@ -20,6 +26,8 @@
     queued: false,
     saveTimer: null,
     pendingItem: null,
+    homeActive: !document.getElementById("homeView")?.classList.contains("hidden"),
+    quickListItems: [],
   };
 
   const el = {
@@ -31,12 +39,13 @@
     save: document.getElementById("saveCatalogBtn"),
     addCurrent: document.getElementById("addToListBtn"),
     entry: document.getElementById("adminEntry"),
-    adminDialog: document.getElementById("adminDialog"),
-    loginForm: document.getElementById("adminLoginForm"),
-    user: document.getElementById("adminUserInput"),
-    password: document.getElementById("adminPasswordInput"),
-    loginError: document.getElementById("adminLoginError"),
-    loginButton: document.getElementById("adminLoginBtn"),
+    banner: document.getElementById("bookmarkBanner"),
+    bannerToggle: document.getElementById("bookmarkBannerToggle"),
+    quickToggle: document.getElementById("quickListsToggle"),
+    quickDrawer: document.getElementById("quickListsDrawer"),
+    quickBackdrop: document.getElementById("quickListsBackdrop"),
+    quickClose: document.getElementById("quickListsClose"),
+    quickNav: document.getElementById("quickListsNav"),
     picker: document.getElementById("listPickerDialog"),
     pickerOptions: document.getElementById("listPickerOptions"),
   };
@@ -45,31 +54,23 @@
     return crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   }
 
-  function loadAuth() {
+  function adminFlag() {
     try {
-      const auth = JSON.parse(sessionStorage.getItem(AUTH_KEY) || "null");
-      return auth?.user && auth?.password ? auth : null;
+      return sessionStorage.getItem(ADMIN_FLAG_KEY) === "1";
     } catch {
-      return null;
+      return false;
     }
   }
 
-  function saveAuth(auth) {
+  function saveAdminFlag(active) {
     try {
-      if (auth) sessionStorage.setItem(AUTH_KEY, JSON.stringify(auth));
-      else sessionStorage.removeItem(AUTH_KEY);
+      if (active) sessionStorage.setItem(ADMIN_FLAG_KEY, "1");
+      else sessionStorage.removeItem(ADMIN_FLAG_KEY);
+      // Remove credentials left by the pre-cookie login flow.
+      sessionStorage.removeItem("alphy.admin.auth.v1");
     } catch {
       // Session persistence is a convenience, not a requirement.
     }
-  }
-
-  function adminHeaders(extra = {}) {
-    const auth = loadAuth();
-    if (!auth) return extra;
-    return {
-      ...extra,
-      Authorization: `Basic ${btoa(`${auth.user}:${auth.password}`)}`,
-    };
   }
 
   function normalizeTarget(value) {
@@ -157,6 +158,7 @@
       revision: Math.max(0, Number(value?.revision) || 0),
       updatedAt: value?.updatedAt || null,
       forYou: normalizeForYouMode(value?.forYou),
+      bookmarkBanner: value?.bookmarkBanner === true,
       lists,
     };
   }
@@ -231,7 +233,6 @@
 
   async function loadAdminCatalog() {
     const payload = await fetchJson(ADMIN_CATALOG_URL, {
-      headers: adminHeaders(),
       cache: "no-store",
     });
     state.catalog = normalizeCatalog(payload.catalog);
@@ -295,7 +296,7 @@
       try {
         payload = await fetchJson(ADMIN_CATALOG_URL, {
           method: "PUT",
-          headers: adminHeaders({ "Content-Type": "application/json" }),
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ catalog: state.catalog, baseRevision }),
         });
       } catch (error) {
@@ -303,7 +304,7 @@
         baseRevision = Number(error.payload.catalog.revision) || 0;
         payload = await fetchJson(ADMIN_CATALOG_URL, {
           method: "PUT",
-          headers: adminHeaders({ "Content-Type": "application/json" }),
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ catalog: state.catalog, baseRevision }),
         });
       }
@@ -330,52 +331,54 @@
     state.admin = !!enabled;
     document.body.classList.toggle("admin-mode", state.admin);
     el.actions?.classList.toggle("hidden", !state.admin);
-    if (el.entry) el.entry.textContent = state.admin ? "admin · выход" : "admin entry";
+    if (el.entry) {
+      el.entry.textContent = "admin";
+      el.entry.title = state.admin ? "Выйти из режима администратора" : "Войти как администратор";
+    }
     updateAddButton();
     render();
     window.dispatchEvent(new CustomEvent("alphy:admin", { detail: { active: state.admin } }));
   }
 
+  function adminReturnRequested() {
+    return new URLSearchParams(location.search).get("admin") === "1";
+  }
+
+  function cleanAdminReturnParam() {
+    const url = new URL(location.href);
+    if (!url.searchParams.has("admin")) return;
+    url.searchParams.delete("admin");
+    history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }
+
   async function verifyStoredAdmin() {
-    if (!loadAuth()) return false;
+    const requested = adminReturnRequested();
+    if (!requested && !adminFlag()) return false;
     try {
-      await fetchJson(ADMIN_CHECK_URL, { headers: adminHeaders(), cache: "no-store" });
+      await fetchJson(ADMIN_CHECK_URL, { cache: "no-store" });
       await loadAdminCatalog();
+      saveAdminFlag(true);
       setAdminMode(true);
       if (restoreDraft()) render();
+      cleanAdminReturnParam();
       return true;
     } catch (error) {
-      if (error.status === 401) saveAuth(null);
+      saveAdminFlag(false);
       setAdminMode(false);
+      cleanAdminReturnParam();
       if (error.status !== 401) setStatus("админ-каталог временно недоступен", "error");
       return false;
     }
   }
 
-  async function login(user, password) {
-    saveAuth({ user, password });
-    let authenticated = false;
-    try {
-      await fetchJson(ADMIN_CHECK_URL, { headers: adminHeaders(), cache: "no-store" });
-      authenticated = true;
-      await loadAdminCatalog();
-      setAdminMode(true);
-      if (restoreDraft()) render();
-      return { ok: true };
-    } catch (error) {
-      if (!authenticated || error.status === 401) saveAuth(null);
-      setAdminMode(false);
-      if (error.status === 401) return { ok: false, reason: "credentials" };
-      return {
-        ok: false,
-        reason: authenticated ? "catalog" : "network",
-      };
-    }
-  }
-
-  function logout() {
+  async function logout() {
     if (state.saveTimer) clearTimeout(state.saveTimer);
-    saveAuth(null);
+    saveAdminFlag(false);
+    try {
+      await fetch(ADMIN_LOGOUT_URL, { method: "POST", cache: "no-store" });
+    } catch {
+      // The local mode still closes even if the cookie cleanup request failed.
+    }
     state.dirty = false;
     saveDraft(false);
     setAdminMode(false);
@@ -762,29 +765,41 @@
   }
 
   // ---------------------------------------------------------------------
-  // Category shelf layout: 8 tiles across, 2 rows = one page of 16. Cards are
-  // placed explicitly so the reading order is row-major (1-8, then 9-16) while
-  // the grid still flows horizontally into the next page. Anything past 16
-  // scrolls off to the right and gets prev/next arrows.
+  // Category shelf layout. Once a shelf needs a second row, split the entire
+  // list evenly: N/2 on top and N/2 below (top gets the odd card). This avoids
+  // tails such as 5+1 on phones and 8+2 on desktop.
   // ---------------------------------------------------------------------
-  const CURATED_COLS = 8;
-  const CURATED_PAGE = CURATED_COLS * 2; // 16 tiles per visible page
-  const CURATED_COL_GAP = 14; // keep in sync with .curated-row column-gap
+  const CURATED_DESKTOP_COLS = 8;
+  const CURATED_DESKTOP_GAP = 14;
+  const CURATED_SIDE_PADDING = 10;
   let curatedObservers = [];
+  let shelfHintScheduled = false;
 
   function layoutCuratedCards(row) {
     const cards = [...row.children].filter((child) => child.classList.contains("card"));
+    const mobile = typeof matchMedia === "function" && matchMedia("(max-width: 560px)").matches;
+    const visibleColumns = mobile ? 3 : CURATED_DESKTOP_COLS;
+    const twoRows = cards.length > visibleColumns + (mobile ? 1 : 0);
+    const topCount = twoRows ? Math.ceil(cards.length / 2) : cards.length;
+    row.style.setProperty("--curated-rows", twoRows ? "2" : "1");
+    row.classList.toggle("mobile-two-row", twoRows);
+
     cards.forEach((card, index) => {
-      const pageIndex = index % CURATED_PAGE;
-      const page = Math.floor(index / CURATED_PAGE);
-      card.style.setProperty("--curated-r", pageIndex < CURATED_COLS ? "1" : "2");
-      card.style.setProperty("--curated-c", String(page * CURATED_COLS + (pageIndex % CURATED_COLS) + 1));
-      card.classList.toggle("page-lead", pageIndex === 0);
+      const top = !twoRows || index < topCount;
+      const column = top ? index + 1 : index - topCount + 1;
+      card.style.setProperty("--curated-r", top ? "1" : "2");
+      card.style.setProperty("--curated-c", String(column));
+      card.style.removeProperty("--mobile-row");
+      card.style.removeProperty("--mobile-column");
+      card.classList.toggle("page-lead", top && (column - 1) % visibleColumns === 0);
     });
-    // Size columns so exactly 8 fill the viewport => clean one-page paging.
+
+    // Desktop keeps eight full cards across. Mobile width is owned by CSS so
+    // exactly 3.5 cards remain visible as an affordance for horizontal scroll.
     const width = row.clientWidth;
-    if (width > 0) {
-      const col = Math.floor((width - (CURATED_COLS - 1) * CURATED_COL_GAP) / CURATED_COLS);
+    if (!mobile && width > 0) {
+      const gaps = (CURATED_DESKTOP_COLS - 1) * CURATED_DESKTOP_GAP;
+      const col = Math.floor((width - CURATED_SIDE_PADDING - gaps) / CURATED_DESKTOP_COLS);
       row.style.setProperty("--curated-col", `${Math.max(96, col)}px`);
     }
     return cards.length;
@@ -803,26 +818,25 @@
   }
 
   function setupCuratedRow(wrap, row) {
-    const count = [...row.children].filter((child) => child.classList.contains("card")).length;
-    let sync = null;
-    if (count > CURATED_PAGE) {
-      const prev = curatedNavButton("prev", "‹");
-      const next = curatedNavButton("next", "›");
-      const pageStride = () => row.clientWidth + CURATED_COL_GAP;
-      prev.addEventListener("click", () => row.scrollBy({ left: -pageStride(), behavior: "smooth" }));
-      next.addEventListener("click", () => row.scrollBy({ left: pageStride(), behavior: "smooth" }));
-      wrap.append(prev, next);
-      sync = () => {
-        const max = row.scrollWidth - row.clientWidth - 2;
-        prev.disabled = row.scrollLeft <= 2;
-        next.disabled = row.scrollLeft >= max;
-      };
-      row.addEventListener("scroll", sync, { passive: true });
-    }
+    const prev = curatedNavButton("prev", "‹");
+    const next = curatedNavButton("next", "›");
+    const pageStride = () => Math.max(120, Math.round(row.clientWidth * .88));
+    prev.addEventListener("click", () => row.scrollBy({ left: -pageStride(), behavior: "smooth" }));
+    next.addEventListener("click", () => row.scrollBy({ left: pageStride(), behavior: "smooth" }));
+    wrap.append(prev, next);
+    const sync = () => {
+      const max = row.scrollWidth - row.clientWidth - 2;
+      const overflows = max > 2;
+      prev.classList.toggle("hidden", !overflows);
+      next.classList.toggle("hidden", !overflows);
+      prev.disabled = !overflows || row.scrollLeft <= 2;
+      next.disabled = !overflows || row.scrollLeft >= max;
+      if (overflows) maybeHintShelfScroll(row, max);
+    };
+    row.addEventListener("scroll", sync, { passive: true });
     const relayout = () => {
       layoutCuratedCards(row);
-      window.alphyBridge?.layoutMobileGrid?.(row);
-      sync?.();
+      sync();
     };
     relayout();
     // The home view can be hidden when render() runs (clientWidth 0); a
@@ -833,6 +847,29 @@
       observer.observe(row);
       curatedObservers.push(observer);
     }
+  }
+
+  function maybeHintShelfScroll(row, max) {
+    if (shelfHintScheduled || typeof row.scrollTo !== "function") return;
+    if (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    let previous = 0;
+    try { previous = Number(localStorage.getItem(SHELF_HINT_KEY)) || 0; } catch { /* ignore */ }
+    if (Date.now() - previous < SHELF_HINT_INTERVAL) return;
+    shelfHintScheduled = true;
+    try { localStorage.setItem(SHELF_HINT_KEY, String(Date.now())); } catch { /* ignore */ }
+
+    let cancelled = false;
+    const cancel = () => { cancelled = true; };
+    for (const event of ["pointerdown", "touchstart", "wheel"]) {
+      row.addEventListener(event, cancel, { once: true, passive: true });
+    }
+    setTimeout(() => {
+      if (cancelled || row.scrollLeft > 2) return;
+      row.scrollTo({ left: Math.min(42, max), behavior: "smooth" });
+      setTimeout(() => {
+        if (!cancelled && row.scrollLeft < 70) row.scrollTo({ left: 0, behavior: "smooth" });
+      }, 430);
+    }, 900);
   }
 
   // ---------------------------------------------------------------------
@@ -973,25 +1010,77 @@
     return card;
   }
 
+  function closeQuickLists() {
+    document.body.classList.remove("quick-lists-open");
+    el.quickToggle?.setAttribute("aria-expanded", "false");
+    el.quickDrawer?.setAttribute("aria-hidden", "true");
+  }
+
+  function openQuickLists() {
+    if (!state.homeActive || !state.quickListItems.length) return;
+    document.body.classList.add("quick-lists-open");
+    el.quickToggle?.setAttribute("aria-expanded", "true");
+    el.quickDrawer?.setAttribute("aria-hidden", "false");
+  }
+
+  function renderQuickListNav(items) {
+    state.quickListItems = items;
+    el.quickNav?.replaceChildren();
+    for (const item of items) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = item.title;
+      button.addEventListener("click", () => {
+        closeQuickLists();
+        document.getElementById(item.id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      el.quickNav?.appendChild(button);
+    }
+    const visible = state.homeActive && items.length > 0;
+    el.quickToggle?.classList.toggle("hidden", !visible);
+    if (!visible) closeQuickLists();
+  }
+
+  function listAnchor(list, index) {
+    const suffix = String(list?.id || "")
+      .replace(/[^a-z0-9_-]+/gi, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60);
+    return `curated-${suffix || index + 1}`;
+  }
+
+  function applyBookmarkBanner() {
+    const enabled = state.catalog.bookmarkBanner === true;
+    el.banner?.classList.toggle("hidden", !enabled);
+    if (el.bannerToggle) el.bannerToggle.checked = enabled;
+  }
+
   function render() {
     if (!el.section || !el.lists) return;
+    applyBookmarkBanner();
     window.alphyForYou?.setMode?.(normalizeForYouMode(state.catalog.forYou));
     rebuildReadyIndex();
     const fyItems = forYouItems();
     const visible = state.admin || fyItems.length > 0 || state.catalog.lists.some((list) => list.items.length);
     el.section.classList.toggle("hidden", !visible);
-    if (visible) document.getElementById("homeEmpty")?.classList.add("hidden");
     el.actions?.classList.toggle("hidden", !state.admin);
     curatedObservers.forEach((observer) => observer.disconnect());
     curatedObservers = [];
     el.lists.replaceChildren();
+    const quickItems = [];
 
-    if (fyItems.length || state.admin) el.lists.appendChild(forYouBlock(fyItems));
+    if (fyItems.length || state.admin) {
+      const block = forYouBlock(fyItems);
+      block.id = "curated-for-you";
+      el.lists.appendChild(block);
+      if (fyItems.length) quickItems.push({ id: block.id, title: "Для вас" });
+    }
 
     for (const [listIndex, list] of state.catalog.lists.entries()) {
       if (!state.admin && !list.items.length) continue;
       const block = document.createElement("section");
       block.className = "curated-list";
+      block.id = listAnchor(list, listIndex);
       block.appendChild(listHeader(list, listIndex));
       if (!list.items.length) {
         const empty = document.createElement("div");
@@ -1013,7 +1102,9 @@
         setupCuratedRow(wrap, row);
       }
       el.lists.appendChild(block);
+      if (list.items.length) quickItems.push({ id: block.id, title: list.title });
     }
+    renderQuickListNav(quickItems);
     updateAddButton();
   }
 
@@ -1068,6 +1159,13 @@
     el.addCurrent.classList.toggle("hidden", !(state.admin && item));
   }
 
+  function adminLoginHref() {
+    const current = new URL(location.href);
+    current.searchParams.delete("admin");
+    const returnPath = `${current.pathname}${current.search}${current.hash}`;
+    return `${ADMIN_LOGIN_URL}?return=${encodeURIComponent(returnPath)}`;
+  }
+
   function bind() {
     for (const button of document.querySelectorAll("[data-close-dialog]")) {
       button.addEventListener("click", () => closeDialog(button.closest("dialog")));
@@ -1077,42 +1175,17 @@
         logout();
         return;
       }
-      el.loginError?.classList.add("hidden");
-      if (el.user) el.user.value = "";
-      if (el.password) el.password.value = "";
-      showDialog(el.adminDialog);
-      setTimeout(() => el.user?.focus(), 0);
+      location.assign(adminLoginHref());
     });
-    el.loginForm?.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const user = el.user?.value.trim() || "";
-      const password = el.password?.value || "";
-      if (!user || !password) {
-        el.loginError.textContent = "Введите логин и пароль";
-        el.loginError.classList.remove("hidden");
-        return;
-      }
-      el.loginError?.classList.add("hidden");
-      if (el.loginButton) {
-        el.loginButton.disabled = true;
-        el.loginButton.textContent = "Проверяем…";
-      }
-      const result = await login(user, password);
-      if (el.loginButton) {
-        el.loginButton.disabled = false;
-        el.loginButton.textContent = "Войти";
-      }
-      if (result.ok) {
-        closeDialog(el.adminDialog);
-      } else {
-        el.loginError.textContent = result.reason === "credentials"
-          ? "Неверный логин или пароль"
-          : result.reason === "catalog"
-            ? "Логин принят, но каталог сейчас недоступен. Повторите через минуту."
-            : "Не удалось связаться с сервером. Проверьте соединение и повторите.";
-        el.loginError.classList.remove("hidden");
-      }
+    el.bannerToggle?.addEventListener("change", () => {
+      if (!state.admin) return;
+      state.catalog.bookmarkBanner = el.bannerToggle.checked;
+      markDirty();
+      applyBookmarkBanner();
     });
+    el.quickToggle?.addEventListener("click", openQuickLists);
+    el.quickClose?.addEventListener("click", closeQuickLists);
+    el.quickBackdrop?.addEventListener("click", closeQuickLists);
     el.create?.addEventListener("click", createList);
     el.save?.addEventListener("click", saveCatalog);
     el.addCurrent?.addEventListener("click", () => {
@@ -1120,8 +1193,15 @@
       if (item) openPicker(item);
     });
     window.addEventListener("alphy:player-ready", updateAddButton);
-    window.addEventListener("alphy:view", updateAddButton);
+    window.addEventListener("alphy:view", (event) => {
+      updateAddButton();
+      state.homeActive = event.detail?.view === "home";
+      renderQuickListNav(state.quickListItems);
+    });
     window.addEventListener("alphy:foryou", () => render());
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeQuickLists();
+    });
     window.addEventListener("beforeunload", (event) => {
       if (!state.admin || !state.dirty) return;
       event.preventDefault();
@@ -1130,6 +1210,7 @@
   }
 
   async function init() {
+    try { sessionStorage.removeItem("alphy.admin.auth.v1"); } catch { /* old login cleanup */ }
     bind();
     await loadPublicCatalog().catch(() => {
       setStatus("подборки временно недоступны", "error");

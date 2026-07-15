@@ -14,9 +14,23 @@
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <title>alphy</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260713-fastpath">
+  <link rel="stylesheet" href="/styles.css?v=20260715-ux">
 </head>
 <body>
+  <div id="bookmarkBanner" class="bookmark-banner hidden">Добавьте сайт в закладки</div>
+
+  <button id="quickListsToggle" class="quick-lists-toggle hidden" type="button"
+          aria-controls="quickListsDrawer" aria-expanded="false">Списки</button>
+  <button id="quickListsBackdrop" class="quick-lists-backdrop" type="button"
+          aria-label="Закрыть списки" tabindex="-1"></button>
+  <aside id="quickListsDrawer" class="quick-lists-drawer" aria-hidden="true">
+    <div class="quick-lists-head">
+      <strong>Списки</strong>
+      <button id="quickListsClose" type="button">закрыть</button>
+    </div>
+    <nav id="quickListsNav" class="quick-lists-nav" aria-label="Подборки"></nav>
+  </aside>
+
   <div class="container">
     <header>
       <div class="brand">
@@ -61,6 +75,10 @@
         <div class="curated-toolbar">
           <span id="catalogState" class="catalog-state"></span>
           <div id="adminCatalogActions" class="admin-catalog-actions hidden">
+            <label class="banner-admin-toggle">
+              <input id="bookmarkBannerToggle" type="checkbox">
+              <span>баннер</span>
+            </label>
             <button id="createListBtn" type="button">+ список</button>
             <button id="soapBrowseBtn" type="button">🎬 soap</button>
             <button id="saveCatalogBtn" type="button">Сохранить</button>
@@ -68,10 +86,6 @@
         </div>
         <div id="curatedLists" class="curated-lists"></div>
       </section>
-      <div id="homeEmpty" class="home-empty hidden">
-        <strong>Тут появится история просмотра</strong>
-        <span>Найди фильм или сериал в поиске — и продолжай с того места, где остановился.</span>
-      </div>
     </section>
 
     <!-- LOCAL BOOKMARKS -->
@@ -129,22 +143,10 @@
     <div id="error" class="error hidden"></div>
 
     <footer class="site-footer">
-      <button id="adminEntry" class="admin-entry" type="button">admin entry</button>
+      <div class="footer-contact">По всем вопросам: <a href="mailto:info@alphy.tv">info@alphy.tv</a></div>
+      <button id="adminEntry" class="admin-entry" type="button">admin</button>
     </footer>
   </div>
-
-  <dialog id="adminDialog" class="compact-dialog">
-    <form id="adminLoginForm" method="dialog">
-      <div class="dialog-head">
-        <strong>admin</strong>
-        <button class="dialog-close" type="button" data-close-dialog aria-label="Закрыть">×</button>
-      </div>
-      <label>Логин<input id="adminUserInput" autocomplete="username"></label>
-      <label>Пароль<input id="adminPasswordInput" type="password" autocomplete="current-password"></label>
-      <div id="adminLoginError" class="dialog-error hidden"></div>
-      <button id="adminLoginBtn" class="dialog-primary" type="submit" value="default">Войти</button>
-    </form>
-  </dialog>
 
   <dialog id="listPickerDialog" class="compact-dialog">
     <form method="dialog">
@@ -157,8 +159,8 @@
   </dialog>
 
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
-  <script src="/app.js?v=20260713-rezka"></script>
-  <script src="/foryou.js?v=20260713-fastpath"></script>
-  <script src="/catalog.js?v=20260713-fastpath2"></script>
+  <script src="/app.js?v=20260715-ux"></script>
+  <script src="/foryou.js?v=20260715-ux"></script>
+  <script src="/catalog.js?v=20260715-ux"></script>
 </body>
 </html>

@@ -86,7 +86,6 @@
     bookmarksCount: document.getElementById("bookmarksCount"),
     bookmarksGrid: document.getElementById("bookmarksGrid"),
     bookmarksEmpty: document.getElementById("bookmarksEmpty"),
-    homeEmpty: document.getElementById("homeEmpty"),
     searchView: document.getElementById("searchView"),
     resultsTitle: document.getElementById("resultsTitle"),
     resultsGrid: document.getElementById("resultsGrid"),
@@ -1209,7 +1208,6 @@
       store: STORE_HISTORY,
       featureLatest: true,
     });
-    el.homeEmpty.classList.toggle("hidden", hist.length > 0);
   }
 
   function showBookmarks() {
@@ -1272,12 +1270,13 @@
   function layoutMobileGrid(grid) {
     if (!grid) return;
     const cards = [...grid.children].filter((child) => child.classList.contains("card"));
-    grid.classList.toggle("mobile-two-row", cards.length > 5);
+    const twoRows = cards.length > 4;
+    const topCount = twoRows ? Math.ceil(cards.length / 2) : cards.length;
+    grid.classList.toggle("mobile-two-row", twoRows);
     cards.forEach((card, index) => {
-      const page = Math.floor(index / 10);
-      const pageIndex = index % 10;
-      card.style.setProperty("--mobile-row", pageIndex < 5 ? "1" : "2");
-      card.style.setProperty("--mobile-column", String(page * 5 + (pageIndex % 5) + 1));
+      const top = !twoRows || index < topCount;
+      card.style.setProperty("--mobile-row", top ? "1" : "2");
+      card.style.setProperty("--mobile-column", String(top ? index + 1 : index - topCount + 1));
     });
   }
 
