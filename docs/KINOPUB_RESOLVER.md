@@ -26,8 +26,8 @@ previous access token returns `401` and the previous refresh token returns
 variable therefore works once.
 
 The resolver stores the current token pair in Deno KV. An atomic short lease
-ensures that only one isolate refreshes the pair when concurrent requests see
-an expired access token. Environment variables are used only to seed an empty
+ensures that only one isolate refreshes the pair when concurrent requests see an
+expired access token. Environment variables are used only to seed an empty
 database.
 
 `GET /health` exposes `persistentTokenStore`. It must be `true` before treating
@@ -73,6 +73,20 @@ Health is public but contains no credentials:
 GET /health
 ```
 
+Search the catalog:
+
+```http
+GET /v1/kinopub/search?q=Avatar&type=movie&page=1
+Authorization: Bearer <KINOPUB_RESOLVER_KEY>
+```
+
+`type` defaults to `all`. Supported exact KinoPub types are `movie`, `serial`,
+`docuserial`, `tvshow`, `concert`, `3d`, and `documovie`. Search results contain
+only card metadata such as id, title, type, year, quality, artwork, genres,
+countries, and ratings. Upstream media URLs and other unneeded fields are not
+returned. KinoPub's catalog does not accept `quality=2160` as a useful search
+filter; use the returned numeric `quality` field for a client-side 4K filter.
+
 Resolve a movie:
 
 ```http
@@ -111,8 +125,8 @@ an HttpOnly first-party session.
 1. Call `/v1/kinopub/resolve` from the viewer network.
 2. Confirm that the decoded signed URL contains the Deno egress IP, not the
    viewer IP.
-3. From the viewer device, request the returned master with no cookies,
-   Referer, or bearer header.
+3. From the viewer device, request the returned master with no cookies, Referer,
+   or bearer header.
 4. Request one child playlist and a 4 KiB range of the first media segment.
 5. Require statuses `200`, `200`, and `206` respectively.
 
