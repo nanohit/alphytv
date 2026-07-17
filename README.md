@@ -25,6 +25,9 @@ metadata and IDs; it does not proxy video bytes.
   run `npm run check:soap` before relying on the shipped catalog.
 - `worker/` - resolver source for PoiskKino, `kpId -> Zenith`, and Opravar
   control-plane resolution.
+- `resolver-deno/kinopub-main.js` - isolated premium KinoPub control-plane
+  resolver intended for a separate Deno app. It returns a short-lived signed
+  CDN URL to an authenticated client and never proxies manifests or media.
 
 ## SOAP Movie Catalog
 
@@ -119,6 +122,17 @@ POISKKINO_BASE_URL = "https://api.poiskkino.dev"
 ```
 
 If the Vercel domain changes, update `ALLOWED_ORIGIN` and redeploy the Worker.
+
+## KinoPub Direct Resolver
+
+The KinoPub integration is deliberately not mounted into the production
+`alphytv` resolver. Deploy `resolver-deno/kinopub-main.js` as a separate Deno
+app with its own bearer key, OAuth device, secrets, and Deno KV database. The
+browser receives a 24-hour signed HLS URL and streams directly from the media
+CDN; Deno handles control-plane JSON only.
+
+See [docs/KINOPUB_RESOLVER.md](docs/KINOPUB_RESOLVER.md) for setup, token
+rotation, API usage, and the cross-egress validation procedure.
 
 ## Curated Lists
 
