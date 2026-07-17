@@ -122,6 +122,11 @@
     zenithEmbedUrl: "",
     playerReady: false,
     lastSnapshotAt: 0,
+    // Ortified progress is reported from the srcdoc player every ~4s. We coalesce
+    // the localStorage write (see onOrtProgress) so weak TV browsers don't stall
+    // the shared event loop on every tick; the newest tick lives here until flush.
+    pendingOrtEntry: null,
+    lastOrtWriteAt: 0,
     trackInterval: null,
     playbackRate: 1,
     subtitleRequest: {
@@ -3014,6 +3019,18 @@
     recordHistory(entry);
   }
 
+  // Smart-TV / projector browsers (Samsung Tizen, WebOS, generic SMART-TV, etc.)
+  // composite an iframe-embedded <video> without the hardware overlay a top-level
+  // player gets, so it micro-stutters whenever the shared main thread is busy.
+  // We use this to shed the periodic work we inject into the Ortified srcdoc
+  // (see progressHook) on exactly those devices.
+  function weakVideoDevice() {
+    const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+    if (/\bTizen\b|SMART-?TV|SmartTV|\bWebOS\b|Web0S|\bNetCast\b|\bBRAVIA\b|CrKey|AFT[A-Z]|\bHbbTV\b|\bVIDAA\b/i.test(ua)) return true;
+    const cores = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 0;
+    return cores > 0 && cores <= 2;
+  }
+
   async function playNd(pageUrl, token) {
     setWatchHead("Newdeaf…", { kind: "nd", pageUrl });
     const parsed = await resolveNewdeafPage(pageUrl);
@@ -3500,7 +3517,18 @@
   async function playOrtifiedCleanroom(embedUrl, target, token) {
     if (isStale(token)) return;
     showPlayerLoading();
-    const html = await fetchCachedEmbedText(embedUrl, { preferSandbox: true, label: "ortified" });
+    let html;
+    try {
+      html = await fetchCachedEmbedText(embedUrl, { preferSandbox: true, label: "ortified" });
+    } catch (error) {
+      // api.ortified.ws answers 422 to any request from a non-Russian IP — for a
+      // user who normally streams from RU that means a VPN was left on. Surface the
+      // actionable hint instead of the raw "XHR 422".
+      if (/\b422\b/.test(String(error?.message || error))) {
+        throw new Error("Попробуйте выключить VPN");
+      }
+      throw error;
+    }
     if (isStale(token)) return;
     const sanitized = sanitizeOrtifiedHtml(html, embedUrl, "cleanroom-block");
     if (!sanitized.stats.ok) throw new Error("В Ortified HTML нет makePlayer");
@@ -3829,7 +3857,8 @@
     if (!target || target.kind !== "ort") return;
     const { position, duration, snapshot } = data;
     if (!duration || !isFinite(duration) || duration <= 0) return;
-    recordHistory({
+    const hasSnapshot = typeof snapshot === "string" && snapshot.startsWith("data:image/jpeg");
+    state.pendingOrtEntry = {
       key: keyFor(target),
       kind: "ort",
       target: cleanTarget(target),
@@ -3842,12 +3871,28 @@
       position,
       duration,
       progress: position / duration,
-      ...(typeof snapshot === "string" && snapshot.startsWith("data:image/jpeg") ? { snapshot } : {}),
-    });
+      ...(hasSnapshot ? { snapshot } : {}),
+    };
+    // recordHistory is a synchronous parse+stringify+localStorage write of the
+    // whole list. The srcdoc player shares this event loop, so doing it on every
+    // ~4s report visibly freezes the video on weak TV browsers. Coalesce to ~15s
+    // (snapshot-bearing ticks always land so the continue-card thumbnail refreshes)
+    // and flush the newest on teardown so the last position still persists.
+    if (!hasSnapshot && Date.now() - state.lastOrtWriteAt < 15000) return;
+    flushOrtProgress();
+  }
+
+  function flushOrtProgress() {
+    const entry = state.pendingOrtEntry;
+    if (!entry) return;
+    state.pendingOrtEntry = null;
+    state.lastOrtWriteAt = Date.now();
+    recordHistory(entry);
   }
 
   async function teardownPlayer() {
     stopTracking();
+    flushOrtProgress();
     teardownCollapsPlayer();
     if (state.player) {
       await state.player.destroy().catch(() => {});
@@ -4702,18 +4747,29 @@ LIMIT 1`;
     // though the parent page can't reach a cross-origin iframe. We can't stop the
     // player resetting on reload, but we can report where the viewer stopped so the
     // homepage shows progress. Posts {alphyOrtProgress, position, duration} out.
+    //
+    // On smart-TV/projector browsers the iframe <video> has no hardware overlay, so
+    // it micro-stutters whenever this shared main thread is busy. There we drop the
+    // canvas snapshot entirely (drawImage+toDataURL forces a synchronous GPU frame
+    // readback — the single most expensive thing we run) and report position less
+    // often. The continue-card just loses its thumbnail on those devices.
+    const weak = weakVideoDevice();
+    const snapshotEnabled = weak ? "false" : "true";
+    const sendMs = weak ? 10000 : 4000;
     return `<script data-cleanroom="progress-hook">
 (() => {
+  const SNAPSHOT = ${snapshotEnabled};
+  const SEND_MS = ${sendMs};
   const hooked = new WeakSet();
   let lastSent = 0;
   let lastShot = 0;
   const send = (v) => {
     const now = Date.now();
-    if (now - lastSent < 4000) return;
+    if (now - lastSent < SEND_MS) return;
     if (!v.duration || !isFinite(v.duration) || v.duration <= 0) return;
     lastSent = now;
     let snapshot = '';
-    if (now - lastShot > 20000 && v.videoWidth && v.videoHeight) {
+    if (SNAPSHOT && now - lastShot > 20000 && v.videoWidth && v.videoHeight) {
       lastShot = now;
       try {
         const width = Math.min(480, v.videoWidth), height = Math.max(1, Math.round(width * 9 / 16));
