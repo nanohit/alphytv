@@ -149,8 +149,14 @@ export default async function handler(req, res) {
 
   try {
     if (req.method === "GET") {
-      const pool = await ensureKeyPool();
+      let pool = await ensureKeyPool();
       const deno = await denoControl(pool);
+      // The first successful Deno link imports legacy env keys while this
+      // request is in flight. If that advanced the registry revision, return
+      // the freshly imported pool instead of making the admin reopen the dialog.
+      if (Number(deno?.revision) > Number(pool.revision)) {
+        pool = (await readKeyPool()).pool;
+      }
       send(res, { ok: true, pool, deno, setup: setupInfo(pool) });
       return;
     }
