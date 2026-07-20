@@ -20,10 +20,14 @@
   // =====================================================================
 
   const API_BASE = "https://kinopoiskapiunofficial.tech";
+  // Free accounts, ~500 calls/day each. They get DEACTIVATED in batches (a 403
+  // "User <mail> is inactive or deleted"), so apiGet treats 403 as a rotate
+  // condition and the pool is sized for attrition rather than for throughput.
   const API_KEYS = [
     "19a609a9-5189-48b0-b63f-9c47e497b1a9",
     "da5f42e9-abf3-453b-b9f5-19a4bf1b976c",
     "b9c5caf4-7081-49ac-9e9e-cca2bc86a6fc",
+    "8767da3b-0432-4fa8-871f-4f029fb6643d",
   ];
 
   const SIM_PREFIX = "alphy.foryou.sim.";
@@ -44,7 +48,7 @@
   const MAX_SIM_FETCH_PER_RUN = 10;
   const MAX_META_FETCH_PER_RUN = 8;
   const MAX_LOOKUP_PER_RUN = 5;
-  // Three keys × ~500/day is ~1500 calls of real capacity. The cap is the safety
+  // The pool is ~500 calls/day per key of real capacity. The cap is the safety
   // rail, not the target: the pipeline is cache-first, so a normal day spends a
   // handful. It now also covers «Похожее» (≤1 call per newly opened title) and
   // watch-page credits backfill, which is exactly why it is no longer 60 — a few
