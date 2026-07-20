@@ -834,13 +834,80 @@
   // =====================================================================
   // Cached resolution layer (the request-minimization core)
   // =====================================================================
+  function normalizeUnofficialClientMovie(item, { search = false } = {}) {
+    const number = (value) => {
+      if (value === null || value === undefined || value === "") return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    };
+    const year = String(item?.year ?? "").match(/\d{4}/)?.[0] || null;
+    const isSeries = !!item?.serial || /SERIES|TV_SHOW|MINI/i.test(String(item?.type || ""));
+    return {
+      kpId: item?.kinopoiskId ?? item?.filmId ?? null,
+      name: item?.nameRu || item?.nameOriginal || item?.nameEn || null,
+      alternativeName: item?.nameOriginal || item?.nameEn || null,
+      enName: item?.nameEn || null,
+      type: item?.type || null,
+      year: year ? Number(year) : null,
+      isSeries,
+      movieLength: typeof item?.filmLength === "number" ? item.filmLength : null,
+      description: item?.description || null,
+      shortDescription: item?.shortDescription || null,
+      slogan: item?.slogan || null,
+      poster: item?.posterUrl || item?.posterUrlPreview || null,
+      ageRating: Number(String(item?.ratingAgeLimits || "").match(/\d+/)?.[0]) || null,
+      ratingMpaa: item?.ratingMpaa || null,
+      genres: (item?.genres || []).map((entry) => entry?.genre).filter(Boolean),
+      countries: (item?.countries || []).map((entry) => entry?.country).filter(Boolean),
+      directors: [],
+      cast: [],
+      people: { directors: [], cast: [] },
+      externalId: { imdb: item?.imdbId || null, tmdb: item?.tmdbId || null },
+      rating: {
+        kp: number(search ? item?.rating : item?.ratingKinopoisk),
+        imdb: search ? null : number(item?.ratingImdb),
+      },
+      votes: {
+        kp: search ? null : number(item?.ratingKinopoiskVoteCount),
+        imdb: search ? null : number(item?.ratingImdbVoteCount),
+      },
+    };
+  }
+
+  async function directUnofficialJson(path) {
+    const request = window.alphyForYou?.unofficialGet;
+    if (typeof request !== "function") throw new Error("Browser Unofficial pool unavailable");
+    return request(path);
+  }
+
   async function searchPoiskkino(query, year) {
     const ckey = `${query}|${year || ""}`;
     const cached = cacheGet("search", ckey);
     if (cached) return cached;
-    const path = `/search?q=${encodeURIComponent(query)}&limit=12${year ? `&year=${encodeURIComponent(year)}` : ""}`;
-    const data = await resolverJson(path);
-    const results = data.results || [];
+    const path = `/search?q=${encodeURIComponent(query)}&limit=12${year ? `&year=${encodeURIComponent(year)}` : ""}&primaryOnly=1`;
+    let results = [];
+    try {
+      const data = await resolverJson(path, { retries: 1 });
+      results = data.results || [];
+    } catch (primaryError) {
+      try {
+        const data = await directUnofficialJson(
+          `/api/v2.1/films/search-by-keyword?keyword=${encodeURIComponent(query)}&page=1`,
+        );
+        results = (Array.isArray(data?.films) ? data.films : [])
+          .slice(0, 12)
+          .map((item) => normalizeUnofficialClientMovie(item, { search: true }));
+        const wantedYear = Number.parseInt(year, 10);
+        if (Number.isFinite(wantedYear)) {
+          const near = results.filter((item) => (
+            Number.isFinite(Number(item.year)) && Math.abs(Number(item.year) - wantedYear) <= 1
+          ));
+          if (near.length) results = near;
+        }
+      } catch {
+        throw primaryError;
+      }
+    }
     cacheSet("search", ckey, results, TTL.search);
     results.forEach((m) => m.kpId != null && cacheSet("meta", m.kpId, m, TTL.meta));
     return results;
@@ -850,13 +917,20 @@
     const cached = cacheGet("meta", kpId);
     if (cached) return cached;
     try {
-      const data = await resolverJson(`/movie?id=${encodeURIComponent(kpId)}`);
+      const data = await resolverJson(`/movie?id=${encodeURIComponent(kpId)}&primaryOnly=1`, { retries: 1 });
       if (data.movie) {
         cacheSet("meta", kpId, data.movie, TTL.meta);
         return data.movie;
       }
-    } catch (error) {
-      log("meta-warn", error.message);
+    } catch (primaryError) {
+      try {
+        const raw = await directUnofficialJson(`/api/v2.2/films/${encodeURIComponent(kpId)}`);
+        const movie = normalizeUnofficialClientMovie(raw);
+        cacheSet("meta", kpId, movie, TTL.meta);
+        return movie;
+      } catch {
+        log("meta-warn", primaryError.message);
+      }
     }
     return null;
   }

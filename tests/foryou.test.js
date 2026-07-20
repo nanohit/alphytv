@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 // foryou.js is a browser IIFE; evaluate it in a sandbox with stubbed
 // window/localStorage/resolver bridge and drive the pure pipeline via exports.
-async function loadForYou(storage = new Map()) {
+async function loadForYou(storage = new Map(), fetchImpl = null) {
   const code = await readFile(new URL("../foryou.js", import.meta.url), "utf8");
   const localStorage = {
     getItem: (key) => (storage.has(key) ? storage.get(key) : null),
@@ -22,8 +22,10 @@ async function loadForYou(storage = new Map()) {
     Promise,
     URL,
     setTimeout,
+    clearTimeout,
     localStorage,
-    fetch: async () => { throw new Error("network disabled in tests"); },
+    fetch: fetchImpl || (async () => { throw new Error("network disabled in tests"); }),
+    AbortController,
     CustomEvent: class CustomEvent {
       constructor(type, options) {
         this.type = type;
@@ -41,6 +43,45 @@ async function loadForYou(storage = new Map()) {
   vm.runInContext(code, sandbox);
   return { api: sandbox.window.alphyForYou, storage, sandbox };
 }
+
+test("browser Unofficial pool rotates quota keys and bypasses Deno", async () => {
+  const storage = new Map([["alphy.foryou.clientSlot.v1", "0"]]);
+  const providerCalls = [];
+  const fetchImpl = async (url, options = {}) => {
+    if (String(url) === "/api/client-key-pool") {
+      return new Response(JSON.stringify({
+        ok: true,
+        pool: {
+          keys: [
+            { id: "spent", value: "spent-key" },
+            { id: "ready", value: "ready-key" },
+          ],
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    providerCalls.push({ url: String(url), key: options.headers?.["X-API-KEY"], referrerPolicy: options.referrerPolicy });
+    if (options.headers?.["X-API-KEY"] === "spent-key") {
+      return new Response(JSON.stringify({ message: "quota" }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ total: 1, items: [{ filmId: 309, nameRu: "Эквилибриум" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const { api, sandbox } = await loadForYou(storage, fetchImpl);
+  let resolverCalls = 0;
+  sandbox.window.alphyBridge.resolverJson = async () => { resolverCalls += 1; throw new Error("must stay direct"); };
+
+  const result = await api._test.directUnofficialGet("/api/v2.2/films/301/similars");
+  assert.equal(result.items[0].filmId, 309);
+  assert.deepEqual(providerCalls.map((call) => call.key), ["spent-key", "ready-key"]);
+  assert.ok(providerCalls.every((call) => call.url.startsWith("https://kinopoiskapiunofficial.tech/api/")));
+  assert.ok(providerCalls.every((call) => call.referrerPolicy === "no-referrer"));
+  assert.equal(resolverCalls, 0);
+});
 
 function historyEntry(overrides = {}) {
   return {

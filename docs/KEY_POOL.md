@@ -15,8 +15,10 @@
 - Deno caches the registry for five minutes and keeps the last known good copy
   when Vercel or Blob is temporarily unavailable. Admin saves request an
   immediate reload, so this polling is only a recovery path.
-- `foryou.js` contains no API keys. Recommendation metadata and similars use the
-  resolver's `/recommendations/*` endpoints.
+- PoiskKino keys never leave the encrypted registry/Deno runtime. Enabled
+  Unofficial keys with the `browser` scope are intentionally returned by the
+  CDN-cached `/api/client-key-pool` view; the provider supports browser CORS and
+  these requests then carry the viewer's real egress IP.
 
 ## One-time Deno link
 
@@ -35,6 +37,9 @@ first successful link, so legacy keys are not silently dropped.
   Kinopoisk Unofficial is fallback.
 - `для вас`: `/recommendations/*` traffic. Only Kinopoisk Unofficial supports
   the endpoints currently used by the local recommendation engine.
+- `браузер (public)`: publishes an Unofficial key to the client-side pool. It is
+  never available for PoiskKino. Browser calls are not present in Deno metrics;
+  use `Проверить` for the provider's authoritative quota totals.
 - A key with both scopes off is retained in encrypted storage but never sent to
   Deno. Turning `включён` off has the same runtime effect while preserving its
   scope choices.
@@ -49,17 +54,19 @@ are useful for rotation diagnostics, not billing reconciliation.
 
 ## Runtime load
 
-- Search, title metadata, credits and recommendations are small JSON requests to
-  Deno. Player manifests and media segments still go directly from the viewer to
-  their source CDN and never pass through Deno or Vercel.
+- PoiskKino search, title metadata and batch enrichment are small JSON requests
+  to Deno. Unofficial similars, credits and title lookup go directly from the
+  browser; Deno remains their fallback. Player manifests and media segments go
+  directly from the viewer to their source CDN.
 - A cold Similar shelf uses one Unofficial similars request and one PoiskKino
   batch request for the entire row. Metadata is cached in the browser for 30
   days; it never fans out into one request per card.
 - Deno reads the encrypted registry through Vercel at most once every five
   minutes per warm isolate. An admin save asks Deno to reload immediately, so
   edits do not wait for the poll.
-- Vercel is otherwise used only for the admin control plane and encrypted Blob
-  storage. Recommendation and search traffic does not proxy through Vercel.
+- Vercel is otherwise used for the admin control plane, encrypted Blob storage
+  and a five-minute CDN-cached client-key response. Recommendation/provider
+  traffic does not proxy through Vercel.
 
 Do not rotate `ALPHY_KEY_POOL_MASTER_KEY` by simply replacing it: re-encrypt the
 existing registry with `rewriteKeyPoolCiphertext()` in `api/_key-pool-store.js`

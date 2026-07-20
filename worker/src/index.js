@@ -70,7 +70,10 @@ async function handleSearch(request, env, url) {
     return json(request, env, { ok: false, error: "missing_q" }, 400);
   }
 
-  const { results, source } = await searchWithFallback(env, query, limit);
+  const primaryOnly = url.searchParams.get("primaryOnly") === "1";
+  const { results, source } = primaryOnly
+    ? { results: await poiskkinoSearch(env, query, limit), source: "poiskkino" }
+    : await searchWithFallback(env, query, limit);
   // Year is a soft hint: providers (e.g. Newdeaf) and PoiskKino often disagree
   // by a year on the same title, so match within +/-1 and never let the year
   // filter zero out an otherwise-valid result.
@@ -100,7 +103,10 @@ async function handleMovie(request, env, url) {
     return json(request, env, { ok: false, error: "missing_or_invalid_id" }, 400);
   }
 
-  const { movie, source } = await movieWithFallback(env, id);
+  const primaryOnly = url.searchParams.get("primaryOnly") === "1";
+  const { movie, source } = primaryOnly
+    ? { movie: await poiskkinoMovie(env, id), source: "poiskkino" }
+    : await movieWithFallback(env, id);
   return json(request, env, { ok: true, source, movie });
 }
 

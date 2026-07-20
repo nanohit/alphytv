@@ -4,10 +4,10 @@
   // =====================================================================
   // «Для вас» — personalized ranking and storage stay client-side.
   //
-  // Engine: Kinopoisk Unofficial similars through the same Deno resolver used by
-  // search. Seeds, blending, scoring and filtering remain fully client-side;
-  // only numeric film ids leave the device. API keys never reach the browser and
-  // are managed from the site's authenticated admin key-pool dialog.
+  // Engine: free Kinopoisk Unofficial calls run directly from the viewer's
+  // browser, preserving their real egress IP. Keys are intentionally public and
+  // selected from the admin-managed pool; private PoiskKino metadata stays on
+  // Deno. Seeds, blending, scoring and filtering remain fully client-side.
   //
   // Modes (admin-controlled via the curated catalog envelope, see catalog.js):
   //   on     — full pipeline, budgeted network fetches allowed
@@ -21,7 +21,12 @@
   const QUOTA_PREFIX = "alphy.foryou.quota.";
   const LAST_KEY = "alphy.foryou.last.v1";
   const HIDDEN_KEY = "alphy.foryou.hidden.v1";
+  const CLIENT_SLOT_KEY = "alphy.foryou.clientSlot.v1";
   const HIDDEN_CAP = 400;
+  const CLIENT_KEY_POOL_URL = "/api/client-key-pool";
+  const UNOFFICIAL_BASE_URL = "https://kinopoiskapiunofficial.tech";
+  const CLIENT_POOL_TTL = 5 * 60e3;
+  const CLIENT_POOL_RETRY_TTL = 60e3;
 
   const SIM_TTL = 30 * 24 * 3600e3;
   const META_TTL = 30 * 24 * 3600e3;
@@ -60,6 +65,9 @@
     lastFingerprint: "",
     lastComputeAt: 0,
   };
+  let clientPoolCache = { keys: [], expiresAt: 0 };
+  let clientPoolInflight = null;
+  let clientKeyCursor = null;
 
   function log(...args) {
     try {
@@ -186,7 +194,122 @@
     return DAILY_FETCH_CAP - fetchesToday();
   }
 
-  // --- API access through the resolver ------------------------------------
+  // --- API access: browser-first Unofficial, private PoiskKino on Deno -----
+
+  function clientSlot() {
+    try {
+      const stored = Number(localStorage.getItem(CLIENT_SLOT_KEY));
+      if (Number.isInteger(stored) && stored >= 0) return stored;
+      const value = Math.floor(Math.random() * 0x7fffffff);
+      localStorage.setItem(CLIENT_SLOT_KEY, String(value));
+      return value;
+    } catch {
+      return Math.floor(Math.random() * 0x7fffffff);
+    }
+  }
+
+  async function browserUnofficialKeys() {
+    if (Date.now() < clientPoolCache.expiresAt) return clientPoolCache.keys;
+    if (clientPoolInflight) return clientPoolInflight;
+    clientPoolInflight = (async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 6000);
+      try {
+        const response = await fetch(CLIENT_KEY_POOL_URL, {
+          headers: { Accept: "application/json" },
+          credentials: "omit",
+          cache: "default",
+          signal: controller.signal,
+        });
+        const data = await response.json();
+        if (!response.ok || data?.ok === false) throw new Error(data?.error || `client pool ${response.status}`);
+        const seen = new Set();
+        const keys = [];
+        for (const entry of Array.isArray(data?.pool?.keys) ? data.pool.keys : []) {
+          const value = String(entry?.value || "").trim();
+          if (!value || seen.has(value)) continue;
+          seen.add(value);
+          keys.push({ id: String(entry?.id || ""), value });
+        }
+        clientPoolCache = { keys, expiresAt: Date.now() + CLIENT_POOL_TTL };
+        if (clientKeyCursor == null && keys.length) clientKeyCursor = clientSlot() % keys.length;
+        return keys;
+      } catch (error) {
+        log("client key pool failed", error.message);
+        clientPoolCache = { keys: [], expiresAt: Date.now() + CLIENT_POOL_RETRY_TTL };
+        return [];
+      } finally {
+        clearTimeout(timer);
+        clientPoolInflight = null;
+      }
+    })();
+    return clientPoolInflight;
+  }
+
+  function directUnofficialUrl(path) {
+    const url = new URL(path, UNOFFICIAL_BASE_URL);
+    if (url.origin !== UNOFFICIAL_BASE_URL) return "";
+    const allowed = [
+      /^\/api\/v2\.1\/films\/search-by-keyword$/,
+      /^\/api\/v2\.2\/films\/\d+$/,
+      /^\/api\/v2\.2\/films\/\d+\/similars$/,
+      /^\/api\/v1\/staff$/,
+    ];
+    return allowed.some((pattern) => pattern.test(url.pathname)) ? url.href : "";
+  }
+
+  function budgetError() {
+    const error = new Error("foryou daily budget exhausted");
+    error.code = "budget";
+    return error;
+  }
+
+  async function directUnofficialGet(path) {
+    const url = directUnofficialUrl(path);
+    if (!url) throw new Error("unsupported direct unofficial path");
+    const keys = await browserUnofficialKeys();
+    if (!keys.length) {
+      const error = new Error("browser unofficial keys unavailable");
+      error.code = "client_keys_unavailable";
+      throw error;
+    }
+    const start = clientKeyCursor == null ? clientSlot() % keys.length : clientKeyCursor;
+    let lastError = null;
+    for (let offset = 0; offset < keys.length; offset += 1) {
+      if (budgetLeft() <= 0) throw budgetError();
+      const index = (start + offset) % keys.length;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12_000);
+      countFetch();
+      try {
+        const response = await fetch(url, {
+          headers: { Accept: "application/json", "X-API-KEY": keys[index].value },
+          credentials: "omit",
+          mode: "cors",
+          cache: "no-store",
+          referrerPolicy: "no-referrer",
+          signal: controller.signal,
+        });
+        const text = await response.text();
+        let data = null;
+        try { data = JSON.parse(text); } catch { /* surface status below */ }
+        if (!response.ok) {
+          const error = new Error(data?.message || data?.error || `Unofficial ${response.status}`);
+          error.status = response.status;
+          throw error;
+        }
+        clientKeyCursor = (index + 1) % keys.length;
+        return data;
+      } catch (error) {
+        lastError = error;
+        if (![401, 402, 403, 429].includes(Number(error?.status))) throw error;
+        clientKeyCursor = (index + 1) % keys.length;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    throw lastError || new Error("all browser unofficial keys exhausted");
+  }
 
   function recommendationPath(path) {
     const url = new URL(path, "https://kinopoiskapiunofficial.invalid");
@@ -205,13 +328,18 @@
   }
 
   async function apiGet(path) {
-    if (budgetLeft() <= 0) {
-      const error = new Error("foryou daily budget exhausted");
-      error.code = "budget";
-      throw error;
+    if (budgetLeft() <= 0) throw budgetError();
+    if (directUnofficialUrl(path)) {
+      try {
+        return await directUnofficialGet(path);
+      } catch (error) {
+        if (error.code === "budget") throw error;
+        log("direct unofficial failed; using Deno fallback", error.message);
+      }
     }
     const request = window.alphyBridge?.resolverJson;
     if (typeof request !== "function") throw new Error("resolver bridge unavailable");
+    if (budgetLeft() <= 0) throw budgetError();
     try {
       const data = await request(recommendationPath(path), {
         retries: 1,
@@ -821,6 +949,7 @@
     similarRow,
     enrichSimilarRow,
     filmExtras,
+    unofficialGet: directUnofficialGet,
     // Title -> kpId, verified by normalized title + year and cached for 30 days.
     // Curated zen:/ort: targets carry no Kinopoisk id, and without one there are
     // no similars and no credits for them. One lookup unlocks both, and the same
@@ -834,6 +963,7 @@
     _test: {
       buildSeeds, scoreCandidates, normTitle, recencyWeight, engagementWeight,
       toCuratedItem, hiddenIds, rankSimilars, affinityIndex, personNames, personRefs,
+      browserUnofficialKeys, directUnofficialUrl, directUnofficialGet,
     },
   };
 })();

@@ -46,6 +46,10 @@ function normalizeScopes(provider, value) {
   return {
     resolver: value?.resolver === true,
     recommendations: provider === "unofficial" && value?.recommendations === true,
+    // Unofficial keys are intentionally distributable: they are free, CORS is
+    // public, and direct requests preserve the viewer's egress IP. Existing
+    // entries default on during this migration; PoiskKino can never opt in.
+    browser: provider === "unofficial" && value?.browser !== false,
   };
 }
 
@@ -240,7 +244,26 @@ export function runtimePool(pool) {
         provider: entry.provider,
         label: entry.label,
         value: entry.value,
-        scopes: entry.scopes,
+        scopes: {
+          resolver: entry.scopes.resolver,
+          recommendations: entry.scopes.recommendations,
+        },
+      })),
+  };
+}
+
+export function clientPool(pool) {
+  return {
+    schema: 1,
+    revision: Number(pool?.revision) || 0,
+    updatedAt: pool?.updatedAt || null,
+    keys: (Array.isArray(pool?.keys) ? pool.keys : [])
+      .filter((entry) => (
+        entry.enabled && entry.provider === "unofficial" && entry.scopes?.browser === true
+      ))
+      .map((entry) => ({
+        id: entry.id,
+        value: entry.value,
       })),
   };
 }

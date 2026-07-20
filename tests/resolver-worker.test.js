@@ -109,6 +109,52 @@ test("movie metadata keeps Kinopoisk person ids without extra upstream calls", a
   }
 });
 
+test("primaryOnly search never spends an Unofficial key on Deno", async () => {
+  const originalFetch = globalThis.fetch;
+  const hosts = [];
+  globalThis.fetch = async (request) => {
+    const url = new URL(String(request));
+    hosts.push(url.hostname);
+    if (url.hostname === "api.poiskkino.dev") {
+      return new Response(JSON.stringify({ message: "daily quota" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ films: [{ filmId: 301, nameRu: "Матрица" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("http://local/search?q=matrix&primaryOnly=1"),
+      {
+        ALLOWED_ORIGIN: "http://127.0.0.1:5177",
+        __KEY_POOL_MANAGED: true,
+        __KEY_POOL_KEYS: [
+          {
+            id: "pk-private",
+            provider: "poiskkino",
+            value: "paid-key",
+            scopes: { resolver: true, recommendations: false },
+          },
+          {
+            id: "ku-fallback",
+            provider: "unofficial",
+            value: "free-key",
+            scopes: { resolver: true, recommendations: true },
+          },
+        ],
+      },
+    );
+    assert.equal(response.status, 500);
+    assert.deepEqual(hosts, ["api.poiskkino.dev"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("batch recommendation metadata resolves a whole row with one PoiskKino request", async () => {
   const originalFetch = globalThis.fetch;
   const upstream = [];

@@ -77,6 +77,7 @@
         scopes: {
           resolver: key.scopes?.resolver === true,
           recommendations: key.provider !== "poiskkino" && key.scopes?.recommendations === true,
+          browser: key.provider !== "poiskkino" && key.scopes?.browser !== false,
         },
         createdAt: key.createdAt || null,
         updatedAt: key.updatedAt || null,
@@ -108,9 +109,9 @@
     const totals = state.deno?.totals || {};
     el.summary.replaceChildren(
       summaryStat("ключей", number(state.pool?.keys?.length)),
-      summaryStat("запросов", number(totals.requests)),
-      summaryStat("ошибок", number(totals.errors)),
-      summaryStat("среднее", totals.requests ? `${number(totals.averageLatencyMs)} мс` : "—"),
+      summaryStat("Deno запросов", number(totals.requests)),
+      summaryStat("Deno ошибок", number(totals.errors)),
+      summaryStat("Deno среднее", totals.requests ? `${number(totals.averageLatencyMs)} мс` : "—"),
     );
   }
 
@@ -181,7 +182,11 @@
       return { text: `${test.result.status || "ERR"} · ${test.result.error || "ошибка"}`, mode: "error" };
     }
     if (!key.enabled) return { text: "отключён", mode: "off" };
-    if (!key.scopes.resolver && !key.scopes.recommendations) return { text: "только хранение", mode: "off" };
+    const denoActive = key.scopes.resolver || key.scopes.recommendations;
+    if (!denoActive && !key.scopes.browser) return { text: "только хранение", mode: "off" };
+    if (!denoActive && key.scopes.browser) {
+      return { text: "браузер · квота через «Проверить»", mode: "idle" };
+    }
     if (!metric?.requests) return { text: "ещё не использовался", mode: "idle" };
     const average = metric.averageLatencyMs || Math.round((metric.totalLatencyMs || 0) / metric.requests);
     const suffix = `${number(metric.requests)} запр. · ${number(average)} мс`;
@@ -229,7 +234,12 @@
       }
       provider.addEventListener("change", () => {
         key.provider = provider.value;
-        if (key.provider === "poiskkino") key.scopes.recommendations = false;
+        if (key.provider === "poiskkino") {
+          key.scopes.recommendations = false;
+          key.scopes.browser = false;
+        } else {
+          key.scopes.browser = true;
+        }
         markDirty();
         renderRows();
       });
@@ -264,9 +274,13 @@
       scopes.className = "key-pool-scopes";
       scopes.append(
         checkbox("включён", key.enabled, (checked) => { key.enabled = checked; markDirty(); }),
-        checkbox("поиск / мета", key.scopes.resolver, (checked) => { key.scopes.resolver = checked; markDirty(); }),
-        checkbox("для вас", key.scopes.recommendations, (checked) => {
+        checkbox("Deno: поиск / мета", key.scopes.resolver, (checked) => { key.scopes.resolver = checked; markDirty(); }),
+        checkbox("Deno: для вас", key.scopes.recommendations, (checked) => {
           key.scopes.recommendations = checked;
+          markDirty();
+        }, { disabled: key.provider === "poiskkino" }),
+        checkbox("браузер (public)", key.scopes.browser, (checked) => {
+          key.scopes.browser = checked;
           markDirty();
         }, { disabled: key.provider === "poiskkino" }),
       );
@@ -400,7 +414,7 @@
       label: "Kinopoisk Unofficial",
       value: "",
       enabled: true,
-      scopes: { resolver: false, recommendations: true },
+      scopes: { resolver: false, recommendations: false, browser: true },
     });
     markDirty();
     render();
