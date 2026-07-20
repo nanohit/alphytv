@@ -42,6 +42,21 @@ function positiveIntegerText(value) {
   return /^\d+$/.test(textValue) ? textValue : "";
 }
 
+function normalizePersonRefs(value, limit) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const person of value) {
+    const id = positiveIntegerText(person?.id || person?.staffId);
+    const name = text(person?.name || person?.nameRu || person?.nameEn, 160);
+    if (!id || !name || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, name });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 function normalizeExternalId(value) {
   const imdb = text(value?.imdb || value?.imdbId, 40);
   const tmdb = positiveIntegerText(value?.tmdb || value?.tmdbId);
@@ -110,6 +125,10 @@ function normalizeItem(value) {
   const backdrop = publicHttpsUrl(value?.backdrop);
   const label = text(value?.label, ITEM_LABEL_MAX).replace(/\s+/g, " ");
   const externalId = normalizeExternalId(value?.externalId || value?.externalIds);
+  const people = {
+    directors: normalizePersonRefs(value?.people?.directors, 3),
+    cast: normalizePersonRefs(value?.people?.cast, 8),
+  };
   const item = {
     id: text(value?.id, 80) || crypto.randomUUID(),
     key,
@@ -126,6 +145,7 @@ function normalizeItem(value) {
       imdb: positiveNumber(value?.rating?.imdb),
     },
     ...(externalId ? { externalId } : {}),
+    ...((people.directors.length || people.cast.length) ? { people } : {}),
     target,
     cachedAt: text(value?.cachedAt, 40) || new Date().toISOString(),
   };

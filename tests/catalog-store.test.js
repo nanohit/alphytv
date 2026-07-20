@@ -17,6 +17,10 @@ test("normalizes direct player targets and metadata", () => {
         label: "  Новый   сезон  ",
         rating: { kp: "8.4", imdb: 8.8 },
         externalId: { imdb: "tt3398228", tmdb: 61222 },
+        people: {
+          directors: [{ id: 123, name: "Рафаэль Боб-Ваксберг" }],
+          cast: [{ id: 456, name: "Уилл Арнетт" }],
+        },
         isSeries: true,
         target: { kind: "zen", zenithId: 2097 },
       }],
@@ -29,6 +33,10 @@ test("normalizes direct player targets and metadata", () => {
   assert.equal(catalog.lists[0].items[0].label, "Новый сезон");
   assert.deepEqual(catalog.lists[0].items[0].rating, { kp: 8.4, imdb: 8.8 });
   assert.deepEqual(catalog.lists[0].items[0].externalId, { imdb: "tt3398228", tmdb: "61222" });
+  assert.deepEqual(catalog.lists[0].items[0].people, {
+    directors: [{ id: "123", name: "Рафаэль Боб-Ваксберг" }],
+    cast: [{ id: "456", name: "Уилл Арнетт" }],
+  });
 });
 
 test("normalizes persistent soap and Collaps targets", () => {

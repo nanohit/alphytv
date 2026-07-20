@@ -14,7 +14,7 @@
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <title>Alphy TV — каталог фильмов и сериалов.</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260720-meta1">
+  <link rel="stylesheet" href="/styles.css?v=20260720-keypool1">
 </head>
 <body>
   <div id="bookmarkBanner" class="bookmark-banner hidden">Добавьте сайт в закладки</div>
@@ -86,6 +86,7 @@
             </label>
             <button id="createListBtn" type="button">+ список</button>
             <button id="soapBrowseBtn" type="button">🎬 soap</button>
+            <button id="keyPoolBtn" type="button">API keys</button>
             <button id="saveCatalogBtn" type="button">Сохранить</button>
           </div>
         </div>
@@ -185,9 +186,32 @@
     </form>
   </dialog>
 
+  <dialog id="keyPoolDialog" class="compact-dialog key-pool-dialog">
+    <form method="dialog">
+      <div class="dialog-head">
+        <strong>Ключи Кинопоиска</strong>
+        <button class="dialog-close" type="button" data-key-pool-close aria-label="Закрыть">×</button>
+      </div>
+      <div id="keyPoolSummary" class="key-pool-summary"></div>
+      <div id="keyPoolSync" class="key-pool-sync"></div>
+      <div class="key-pool-tools">
+        <button id="keyPoolAdd" type="button">+ ключ</button>
+        <button id="keyPoolTestAll" type="button">Проверить все</button>
+        <button id="keyPoolReveal" type="button">Показать все</button>
+      </div>
+      <div id="keyPoolRows" class="key-pool-rows"></div>
+      <div class="key-pool-actions">
+        <span id="keyPoolState" class="catalog-state"></span>
+        <button id="keyPoolReload" type="button">Обновить</button>
+        <button id="keyPoolSave" type="button">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
-  <script src="/app.js?v=20260720-meta1"></script>
-  <script src="/foryou.js?v=20260720-meta1"></script>
-  <script src="/catalog.js?v=20260720-meta1"></script>
+  <script src="/app.js?v=20260720-keypool1"></script>
+  <script src="/foryou.js?v=20260720-keypool1"></script>
+  <script src="/catalog.js?v=20260720-keypool1"></script>
+  <script src="/keypool.js?v=20260720-keypool1"></script>
 </body>
 </html>

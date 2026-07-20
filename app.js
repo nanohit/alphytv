@@ -580,6 +580,7 @@
       countries: item.countries || [],
       directors: item.directors || [],
       cast: item.cast || [],
+      people: item.people || { directors: [], cast: [] },
     };
   }
   // Fire-and-forget heal for a watch page that opened with rotted/partial meta.
@@ -3520,6 +3521,27 @@
     return a.length ? a : b;
   }
 
+  function personRefList(value, limit = 12) {
+    if (!Array.isArray(value)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const person of value) {
+      const id = String(person?.id || person?.staffId || "");
+      const name = String(person?.name || person?.nameRu || person?.nameEn || "").trim();
+      if (!/^\d+$/.test(id) || !name || seen.has(id)) continue;
+      seen.add(id);
+      out.push({ id, name });
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  function pickPeople(left, right, field, limit) {
+    const a = personRefList(left?.people?.[field], limit);
+    const b = personRefList(right?.people?.[field], limit);
+    return a.length ? a : b;
+  }
+
   function mergeMetadata(base, enriched) {
     const left = base && typeof base === "object" ? base : {};
     const right = enriched && typeof enriched === "object" ? enriched : {};
@@ -3538,6 +3560,10 @@
       rating: {
         ...(right.rating || {}),
         ...(left.rating || {}),
+      },
+      people: {
+        directors: pickPeople(left, right, "directors", 3),
+        cast: pickPeople(left, right, "cast", 8),
       },
     };
     for (const field of META_LIST_FIELDS) merged[field] = pickList(left, right, field);
@@ -3589,6 +3615,32 @@
     return `<div class="mf-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`;
   }
 
+  function kinopoiskFilmUrl(kpId) {
+    return /^\d+$/.test(String(kpId || ""))
+      ? `https://www.kinopoisk.ru/film/${encodeURIComponent(kpId)}/`
+      : "";
+  }
+
+  function kinopoiskPersonUrl(personId) {
+    return /^\d+$/.test(String(personId || ""))
+      ? `https://www.kinopoisk.ru/name/${encodeURIComponent(personId)}/`
+      : "";
+  }
+
+  function metaPeopleRow(label, names, refs) {
+    const visible = (Array.isArray(names) ? names : []).filter(Boolean);
+    if (!visible.length) return "";
+    const byName = new Map(personRefList(refs).map((person) => [person.name.toLocaleLowerCase("ru-RU"), person]));
+    const html = visible.map((name) => {
+      const person = byName.get(String(name).toLocaleLowerCase("ru-RU"));
+      const href = kinopoiskPersonUrl(person?.id);
+      return href
+        ? `<a class="kp-meta-link" href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(name)}</a>`
+        : escapeHtml(name);
+    }).join(", ");
+    return `<div class="mf-row"><dt>${escapeHtml(label)}</dt><dd>${html}</dd></div>`;
+  }
+
   function renderMeta(meta, target) {
     if (!meta) {
       el.metaPanel.classList.add("hidden");
@@ -3599,8 +3651,10 @@
     const year = meta.year || target.year || "";
     const poster = meta.poster || target.poster || "";
     const desc = meta.description || meta.shortDescription || "";
+    const targetKpId = (target?.kind === "kp" || target?.kind === "clps") ? target.kpId : "";
     state.currentMeta = mergeMetadata(state.currentMeta || {}, {
       ...meta,
+      kpId: meta.kpId || targetKpId || state.currentMeta?.kpId || "",
       title,
       year,
       poster,
@@ -3627,13 +3681,18 @@
     // and a fixed pair survives the fact that ratings/description/credits are each
     // individually optional (a grid row-span over a variable number of implicit
     // rows does not, which is how the two columns used to overlap on phones).
+    const kpUrl = kinopoiskFilmUrl(view.kpId);
     let body = `<div class="meta-headline">`;
-    body += `<div class="mp-title">${escapeHtml(title)}</div>`;
+    body += kpUrl
+      ? `<a class="mp-title kp-meta-link" href="${escapeAttr(kpUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(title)}</a>`
+      : `<div class="mp-title">${escapeHtml(title)}</div>`;
     body += `<div class="mp-sub">${escapeHtml(sub)}${age ? `<span class="mp-age">${escapeHtml(age)}</span>` : ""}</div>`;
     body += `</div>`;
     if (kp || imdb) {
       body += `<div class="meta-ratings">`;
-      if (kp) body += `<div class="rt"><b>${escapeHtml(Number(kp).toFixed(1))}</b><span>Кинопоиск</span></div>`;
+      if (kp) body += kpUrl
+        ? `<a class="rt kp-rating-link" href="${escapeAttr(kpUrl)}" target="_blank" rel="noopener noreferrer"><b>${escapeHtml(Number(kp).toFixed(1))}</b><span>Кинопоиск</span></a>`
+        : `<div class="rt"><b>${escapeHtml(Number(kp).toFixed(1))}</b><span>Кинопоиск</span></div>`;
       if (imdb) body += `<div class="rt"><b>${escapeHtml(Number(imdb).toFixed(1))}</b><span>IMDb</span></div>`;
       body += `</div>`;
     }
@@ -3645,11 +3704,12 @@
     const facts =
       metaFactRow("Жанр", (view.genres || []).slice(0, 3).join(", ")) +
       metaFactRow("Страна", (view.countries || []).slice(0, 2).join(", ")) +
-      metaFactRow(
+      metaPeopleRow(
         (view.directors || []).length > 1 ? "Режиссёры" : "Режиссёр",
-        (view.directors || []).slice(0, 2).join(", "),
+        (view.directors || []).slice(0, 2),
+        view.people?.directors,
       ) +
-      metaFactRow("В ролях", (view.cast || []).slice(0, 5).join(", "));
+      metaPeopleRow("В ролях", (view.cast || []).slice(0, 5), view.people?.cast);
     if (facts) body += `<dl class="meta-facts">${facts}</dl>`;
 
     const posterHtml = poster
@@ -3728,7 +3788,7 @@
   async function backfillCredits(target, kpId, token) {
     if (!/^\d+$/.test(kpId)) return;
     const current = state.currentMeta || {};
-    if ((current.genres || []).length && (current.directors || []).length) return;
+    if ((current.genres || []).length && (current.directors || []).length && current.people?.directors?.length) return;
     const extras = await window.alphyForYou?.filmExtras?.(kpId);
     if (!extras || isStale(token) || !state.currentTarget) return;
     if (keyFor(state.currentTarget) !== keyFor(target)) return;
@@ -6247,6 +6307,10 @@ addEventListener('message', async (event) => {
       countries: Array.isArray(meta.countries) ? meta.countries : [],
       directors: Array.isArray(meta.directors) ? meta.directors : [],
       cast: Array.isArray(meta.cast) ? meta.cast : [],
+      people: {
+        directors: personRefList(meta.people?.directors, 3),
+        cast: personRefList(meta.people?.cast, 8),
+      },
       target,
       cachedAt: new Date().toISOString(),
     };
@@ -6274,6 +6338,7 @@ addEventListener('message', async (event) => {
       countries: item.countries,
       directors: item.directors,
       cast: item.cast,
+      people: item.people,
     };
     cacheSet("curatedmeta", keyFor(target), meta, TTL.enriched);
     if (target.kind === "ort") cacheSet("ortmeta", canonicalOrtEmbedUrl(target.embedUrl), meta, TTL.enriched);
@@ -6448,6 +6513,10 @@ addEventListener('message', async (event) => {
         countries: list(m.countries),
         directors: list(m.directors),
         cast: list(m.cast),
+        people: {
+          directors: personRefList(m.people?.directors, 3),
+          cast: personRefList(m.people?.cast, 8),
+        },
       };
     } catch {
       return { ok: false };
@@ -6465,6 +6534,7 @@ addEventListener('message', async (event) => {
     layoutMobileGrid,
     resolvePosterByTitle,
     resolveCardMeta,
+    resolverJson,
   };
 
   boot();

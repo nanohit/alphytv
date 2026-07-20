@@ -2,16 +2,12 @@
   "use strict";
 
   // =====================================================================
-  // «Для вас» — personalized recommendations, fully client-side.
+  // «Для вас» — personalized ranking and storage stay client-side.
   //
-  // Engine: kinopoiskapiunofficial.tech /films/{id}/similars called straight
-  // from the browser (the API sends Access-Control-Allow-Origin: * and its
-  // preflight allows X-API-KEY). Seeds come from alphy.history/alphy.bookmarks
-  // in localStorage; blending, scoring and filtering all happen locally, so
-  // the only thing that ever leaves the device is "what is similar to film N".
-  //
-  // The key pool below is DEDICATED to recommendations — never add the
-  // resolver's search keys here, budgets must stay independent.
+  // Engine: Kinopoisk Unofficial similars through the same Deno resolver used by
+  // search. Seeds, blending, scoring and filtering remain fully client-side;
+  // only numeric film ids leave the device. API keys never reach the browser and
+  // are managed from the site's authenticated admin key-pool dialog.
   //
   // Modes (admin-controlled via the curated catalog envelope, see catalog.js):
   //   on     — full pipeline, budgeted network fetches allowed
@@ -19,23 +15,11 @@
   //   off    — feature disabled for everyone, no computation at all
   // =====================================================================
 
-  const API_BASE = "https://kinopoiskapiunofficial.tech";
-  // Free accounts, ~500 calls/day each. They get DEACTIVATED in batches (a 403
-  // "User <mail> is inactive or deleted"), so apiGet treats 403 as a rotate
-  // condition and the pool is sized for attrition rather than for throughput.
-  const API_KEYS = [
-    "19a609a9-5189-48b0-b63f-9c47e497b1a9",
-    "da5f42e9-abf3-453b-b9f5-19a4bf1b976c",
-    "b9c5caf4-7081-49ac-9e9e-cca2bc86a6fc",
-    "8767da3b-0432-4fa8-871f-4f029fb6643d",
-  ];
-
   const SIM_PREFIX = "alphy.foryou.sim.";
   const META_PREFIX = "alphy.foryou.meta.";
   const LOOKUP_PREFIX = "alphy.foryou.lookup.";
   const QUOTA_PREFIX = "alphy.foryou.quota.";
   const LAST_KEY = "alphy.foryou.last.v1";
-  const KEY_CURSOR_KEY = "alphy.foryou.keycursor";
   const HIDDEN_KEY = "alphy.foryou.hidden.v1";
   const HIDDEN_CAP = 400;
 
@@ -202,14 +186,21 @@
     return DAILY_FETCH_CAP - fetchesToday();
   }
 
-  // --- API access with key rotation ---------------------------------------
+  // --- API access through the resolver ------------------------------------
 
-  function keyCursor() {
-    try { return Number(localStorage.getItem(KEY_CURSOR_KEY)) || 0; } catch { return 0; }
-  }
-
-  function setKeyCursor(index) {
-    try { localStorage.setItem(KEY_CURSOR_KEY, String(index)); } catch { /* ignore */ }
+  function recommendationPath(path) {
+    const url = new URL(path, "https://kinopoiskapiunofficial.invalid");
+    if (url.pathname === "/api/v2.1/films/search-by-keyword") {
+      return `/recommendations/search?q=${encodeURIComponent(url.searchParams.get("keyword") || "")}`;
+    }
+    const film = url.pathname.match(/^\/api\/v2\.2\/films\/(\d+)$/)?.[1];
+    if (film) return `/recommendations/film?id=${encodeURIComponent(film)}`;
+    const similars = url.pathname.match(/^\/api\/v2\.2\/films\/(\d+)\/similars$/)?.[1];
+    if (similars) return `/recommendations/similars?id=${encodeURIComponent(similars)}`;
+    if (url.pathname === "/api/v1/staff") {
+      return `/recommendations/staff?id=${encodeURIComponent(url.searchParams.get("filmId") || "")}`;
+    }
+    throw new Error("unsupported recommendation API path");
   }
 
   async function apiGet(path) {
@@ -218,36 +209,20 @@
       error.code = "budget";
       throw error;
     }
-    const start = keyCursor();
-    let lastError = null;
-    for (let i = 0; i < API_KEYS.length; i += 1) {
-      const index = (start + i) % API_KEYS.length;
-      let response;
-      try {
-        response = await fetch(`${API_BASE}${path}`, {
-          headers: { "X-API-KEY": API_KEYS[index], Accept: "application/json" },
-          referrerPolicy: "no-referrer",
-        });
-      } catch (error) {
-        lastError = error;
-        continue;
-      }
+    const request = window.alphyBridge?.resolverJson;
+    if (typeof request !== "function") throw new Error("resolver bridge unavailable");
+    try {
+      const data = await request(recommendationPath(path), {
+        retries: 1,
+        timeoutMs: 12_000,
+        fetchCache: "no-store",
+      });
       countFetch();
-      // 403 is how kinopoiskapiunofficial reports a DEACTIVATED account
-      // ("User <mail> is inactive or deleted") — not a malformed request. It was
-      // missing here, so one dead key threw instead of rotating and took the
-      // whole feature down while the other keys were fine. These are free
-      // accounts; they do get purged, so rotation has to cover it.
-      if ([401, 402, 403, 429].includes(response.status)) {
-        lastError = new Error(`foryou key ${index} rejected: ${response.status}`);
-        continue; // rotate to the next key
-      }
-      if (response.status === 404) return null;
-      if (!response.ok) throw new Error(`foryou API ${response.status}`);
-      setKeyCursor(index);
-      return response.json();
+      return data;
+    } catch (error) {
+      countFetch();
+      throw error;
     }
-    throw lastError || new Error("foryou: all keys exhausted");
   }
 
   // --- seeds ---------------------------------------------------------------
@@ -630,7 +605,7 @@
   // (zen:, ort:, nd: …). Cached for 30 days: a film's director does not change.
   // Two calls at most, once per title, ever.
 
-  const EXTRAS_PREFIX = "alphy.foryou.extras.";
+  const EXTRAS_PREFIX = "alphy.foryou.extras.v2.";
 
   function personNames(staff, professionKey, limit) {
     const out = [];
@@ -638,6 +613,21 @@
       if (String(person?.professionKey || "") !== professionKey) continue;
       const name = String(person?.nameRu || person?.nameEn || "").trim();
       if (name && !out.includes(name)) out.push(name);
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  function personRefs(staff, professionKey, limit) {
+    const out = [];
+    const seen = new Set();
+    for (const person of Array.isArray(staff) ? staff : []) {
+      if (String(person?.professionKey || "") !== professionKey) continue;
+      const id = String(person?.staffId || person?.personId || "");
+      const name = String(person?.nameRu || person?.nameEn || "").trim();
+      if (!/^\d+$/.test(id) || !name || seen.has(id)) continue;
+      seen.add(id);
+      out.push({ id, name });
       if (out.length >= limit) break;
     }
     return out;
@@ -665,6 +655,10 @@
         slogan: film?.slogan || null,
         directors: personNames(staff, "DIRECTOR", 3),
         cast: personNames(staff, "ACTOR", 8),
+        people: {
+          directors: personRefs(staff, "DIRECTOR", 3),
+          cast: personRefs(staff, "ACTOR", 8),
+        },
       };
       lsSet(cacheKey, extras, META_TTL);
       return extras;
@@ -811,7 +805,7 @@
     budgetLeft,
     _test: {
       buildSeeds, scoreCandidates, normTitle, recencyWeight, engagementWeight,
-      toCuratedItem, hiddenIds, rankSimilars, affinityIndex, personNames,
+      toCuratedItem, hiddenIds, rankSimilars, affinityIndex, personNames, personRefs,
     },
   };
 })();

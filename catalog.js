@@ -121,6 +121,21 @@
     return out;
   }
 
+  function personRefArray(value, limit) {
+    if (!Array.isArray(value)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const person of value) {
+      const id = String(person?.id || person?.staffId || "");
+      const name = String(person?.name || person?.nameRu || person?.nameEn || "").trim();
+      if (!/^\d+$/.test(id) || !name || seen.has(id)) continue;
+      seen.add(id);
+      out.push({ id, name });
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
   function normalizeItem(value) {
     const target = normalizeTarget(value?.target);
     const title = String(value?.title || "").trim();
@@ -158,6 +173,11 @@
     if (directors.length) item.directors = directors;
     const cast = nameArray(value?.cast, 8);
     if (cast.length) item.cast = cast;
+    const people = {
+      directors: personRefArray(value?.people?.directors, 3),
+      cast: personRefArray(value?.people?.cast, 8),
+    };
+    if (people.directors.length || people.cast.length) item.people = people;
     return item;
   }
 
@@ -618,6 +638,9 @@
     if (meta?.countries?.length) item.countries = nameArray(meta.countries, 4);
     if (meta?.directors?.length) item.directors = nameArray(meta.directors, 3);
     if (meta?.cast?.length) item.cast = nameArray(meta.cast, 8);
+    const directors = personRefArray(meta?.people?.directors, 3);
+    const cast = personRefArray(meta?.people?.cast, 8);
+    if (directors.length || cast.length) item.people = { directors, cast };
     if (meta?.description && !item.description) item.description = String(meta.description);
     if (Number.isFinite(Number(meta?.movieLength)) && !item.movieLength) {
       item.movieLength = Number(meta.movieLength);

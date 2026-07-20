@@ -26,6 +26,10 @@ export default {
         return await handleMovie(request, env, url);
       }
 
+      if (url.pathname.startsWith("/recommendations/")) {
+        return await handleRecommendationApi(request, env, url);
+      }
+
       if (url.pathname === "/resolve-zona") {
         return await handleZonaResolve(request, env, url);
       }
@@ -101,19 +105,69 @@ async function handleMovie(request, env, url) {
 }
 
 // Metadata sources, used in order of remaining daily budget:
-//   1) api.poiskkino.dev — primary, ~200 req/day on one shared key.
-//   2) kinopoiskapiunofficial.tech — a POOL of keys, ~500 req/day each.
-// When a source 4xxs (esp. 402/429 = quota spent) we rotate to the next. The
-// unofficial cursor sticks to the current working key (drain it first) and only
-// advances past a key once its quota is spent, so N keys ≈ N*500/day on top of the
-// primary's 200 (5 keys -> ~2700/day). All sources speak Kinopoisk IDs, so kpId
-// stays compatible with /resolve-zona regardless of which one answered.
-let unofficialCursor = 0;
+//   1) api.poiskkino.dev — primary, ~200 req/day per key.
+//   2) kinopoiskapiunofficial.tech — fallback, ~500 req/day per key.
+//
+// Deno can inject the admin-managed registry as `__KEY_POOL_KEYS`. Until the
+// one-time runtime link is configured, the old env variables remain a safe
+// fallback. Every attempt is reported through `__recordKeyAttempt`, keeping the
+// actual secrets out of logs and out of the browser.
+const unofficialCursors = new Map();
+const poiskkinoCursors = new Map();
 
-function unofficialKeys(env) {
-  const list = String(env.KINOPOISK_UNOFFICIAL_TOKENS || "").split(",").map((s) => s.trim());
-  if (env.KINOPOISK_UNOFFICIAL_TOKEN) list.push(String(env.KINOPOISK_UNOFFICIAL_TOKEN).trim());
-  return [...new Set(list.filter(Boolean))];
+function legacyEntries(env, provider) {
+  const plural = provider === "poiskkino" ? env.POISKKINO_TOKENS : env.KINOPOISK_UNOFFICIAL_TOKENS;
+  const singular = provider === "poiskkino" ? env.POISKKINO_TOKEN : env.KINOPOISK_UNOFFICIAL_TOKEN;
+  const values = String(plural || "").split(",").map((value) => value.trim());
+  if (singular) values.push(String(singular).trim());
+  return [...new Set(values.filter(Boolean))].map((value, index) => ({
+    id: `legacy-${provider}-${index + 1}`,
+    provider,
+    label: `legacy ${provider} ${index + 1}`,
+    value,
+    scopes: { resolver: true, recommendations: provider === "unofficial" },
+  }));
+}
+
+function providerKeys(env, provider, scope = "resolver") {
+  if (env.__KEY_POOL_MANAGED) {
+    return (Array.isArray(env.__KEY_POOL_KEYS) ? env.__KEY_POOL_KEYS : [])
+      .filter((entry) => entry?.provider === provider && entry?.scopes?.[scope] === true);
+  }
+  return legacyEntries(env, provider).filter((entry) => entry.scopes[scope]);
+}
+
+function errorStatus(error) {
+  return Number(String(error?.message || "").match(/\b([1-5]\d\d)\b/)?.[1]) || 0;
+}
+
+async function observedKeyCall(env, entry, operation, run) {
+  const started = Date.now();
+  try {
+    const value = await run(entry.value);
+    env.__recordKeyAttempt?.({
+      id: entry.id,
+      provider: entry.provider,
+      label: entry.label,
+      operation,
+      ok: true,
+      status: 200,
+      latencyMs: Date.now() - started,
+    });
+    return value;
+  } catch (error) {
+    env.__recordKeyAttempt?.({
+      id: entry.id,
+      provider: entry.provider,
+      label: entry.label,
+      operation,
+      ok: false,
+      status: errorStatus(error),
+      latencyMs: Date.now() - started,
+      error: String(error?.message || error).slice(0, 180),
+    });
+    throw error;
+  }
 }
 
 // A key that must not be tried first again. 402/429 = spent for today, 403 =
@@ -124,18 +178,19 @@ function isQuotaError(error) {
   return /\b(40[23]|429)\b/.test(String(error?.message || ""));
 }
 
-async function unofficialRotate(keys, run) {
-  const start = unofficialCursor; // capture once; the loop must not skip keys as the cursor moves
+async function unofficialRotate(entries, env, scope, operation, run) {
+  const start = unofficialCursors.get(scope) || 0;
   let lastError;
-  for (let i = 0; i < keys.length; i += 1) {
-    const idx = (start + i) % keys.length;
+  for (let i = 0; i < entries.length; i += 1) {
+    const idx = (start + i) % entries.length;
+    const entry = entries[idx];
     try {
-      const value = await run(keys[idx]);
-      unofficialCursor = idx; // stick with this working key next time
-      return { value, index: idx };
+      const value = await observedKeyCall(env, entry, operation, (key) => run(key));
+      unofficialCursors.set(scope, idx);
+      return { value, index: idx, entry };
     } catch (error) {
       lastError = error;
-      if (isQuotaError(error)) unofficialCursor = (idx + 1) % keys.length; // this key is spent for today
+      if (isQuotaError(error)) unofficialCursors.set(scope, (idx + 1) % entries.length);
     }
   }
   throw lastError || new Error("all unofficial keys exhausted");
@@ -145,10 +200,12 @@ async function searchWithFallback(env, query, limit) {
   try {
     return { results: await poiskkinoSearch(env, query, limit), source: "poiskkino" };
   } catch (primaryError) {
-    const keys = unofficialKeys(env);
+    const keys = providerKeys(env, "unofficial", "resolver");
     if (!keys.length) throw primaryError;
     try {
-      const { value, index } = await unofficialRotate(keys, (key) => unofficialSearch(env, key, query, limit));
+      const { value, index } = await unofficialRotate(
+        keys, env, "resolver", "search", (key) => unofficialSearch(env, key, query, limit),
+      );
       return { results: value, source: `kinopoiskunofficial#${index + 1}` };
     } catch {
       throw primaryError; // everything down -> surface the primary error
@@ -160,10 +217,12 @@ async function movieWithFallback(env, id) {
   try {
     return { movie: await poiskkinoMovie(env, id), source: "poiskkino" };
   } catch (primaryError) {
-    const keys = unofficialKeys(env);
+    const keys = providerKeys(env, "unofficial", "resolver");
     if (!keys.length) throw primaryError;
     try {
-      const { value, index } = await unofficialRotate(keys, (key) => unofficialMovie(env, key, id));
+      const { value, index } = await unofficialRotate(
+        keys, env, "resolver", "movie", (key) => unofficialMovie(env, key, id),
+      );
       return { movie: value, source: `kinopoiskunofficial#${index + 1}` };
     } catch {
       throw primaryError;
@@ -171,53 +230,49 @@ async function movieWithFallback(env, id) {
   }
 }
 
-// The primary (kinopoisk.dev / poiskkino) source also supports a POOL of keys,
-// comma-separated in POISKKINO_TOKENS (the singular POISKKINO_TOKEN is still
-// honoured). Each free key is ~200 req/day; the cursor drains the current key and
-// only advances past it once its quota is spent (403/402/429), so N keys ≈ N*200/day
-// on the IMDb-capable primary before falling through to the unofficial pool.
-let poiskkinoCursor = 0;
-
-function poiskkinoKeys(env) {
-  const list = String(env.POISKKINO_TOKENS || "").split(",").map((s) => s.trim());
-  if (env.POISKKINO_TOKEN) list.push(String(env.POISKKINO_TOKEN).trim());
-  return [...new Set(list.filter(Boolean))];
-}
-
-async function poiskkinoRotate(keys, run) {
-  const start = poiskkinoCursor; // capture once; the loop must not skip keys as the cursor moves
+async function poiskkinoRotate(entries, env, operation, run) {
+  const scope = "resolver";
+  const start = poiskkinoCursors.get(scope) || 0;
   let lastError;
-  for (let i = 0; i < keys.length; i += 1) {
-    const idx = (start + i) % keys.length;
+  for (let i = 0; i < entries.length; i += 1) {
+    const idx = (start + i) % entries.length;
+    const entry = entries[idx];
     try {
-      const value = await run(keys[idx]);
-      poiskkinoCursor = idx; // stick with this working key next time
-      return value;
+      const value = await observedKeyCall(env, entry, operation, (key) => run(key));
+      poiskkinoCursors.set(scope, idx);
+      return { value, entry };
     } catch (error) {
       lastError = error;
       // kinopoisk.dev answers 403 ("Превышен дневной лимит") when a key is spent.
-      if (/\b(40[23]|429)\b/.test(String(error?.message || ""))) poiskkinoCursor = (idx + 1) % keys.length;
+      if (/\b(40[23]|429)\b/.test(String(error?.message || ""))) {
+        poiskkinoCursors.set(scope, (idx + 1) % entries.length);
+      }
     }
   }
   throw lastError || new Error("POISKKINO_TOKEN secret is not configured");
 }
 
 async function poiskkinoSearch(env, query, limit) {
-  const keys = poiskkinoKeys(env);
+  const keys = providerKeys(env, "poiskkino", "resolver");
   if (!keys.length) throw new Error("POISKKINO_TOKEN secret is not configured");
   const apiUrl = new URL("/v1.4/movie/search", poiskkinoBase(env));
   apiUrl.searchParams.set("query", query);
   apiUrl.searchParams.set("limit", String(limit));
-  const raw = await poiskkinoRotate(keys, (key) => poiskkinoFetch(key, apiUrl));
+  const { value: raw } = await poiskkinoRotate(
+    keys, env, "search", (key) => poiskkinoFetch(key, apiUrl),
+  );
   const docs = Array.isArray(raw.docs) ? raw.docs : [];
   return docs.map(normalizeMovie);
 }
 
 async function poiskkinoMovie(env, id) {
-  const keys = poiskkinoKeys(env);
+  const keys = providerKeys(env, "poiskkino", "resolver");
   if (!keys.length) throw new Error("POISKKINO_TOKEN secret is not configured");
   const apiUrl = new URL(`/v1.4/movie/${id}`, poiskkinoBase(env));
-  return normalizeMovie(await poiskkinoRotate(keys, (key) => poiskkinoFetch(key, apiUrl)));
+  const { value } = await poiskkinoRotate(
+    keys, env, "movie", (key) => poiskkinoFetch(key, apiUrl),
+  );
+  return normalizeMovie(value);
 }
 
 async function unofficialSearch(env, key, query, limit) {
@@ -232,6 +287,45 @@ async function unofficialSearch(env, key, query, limit) {
 async function unofficialMovie(env, key, id) {
   const apiUrl = new URL(`/api/v2.2/films/${id}`, unofficialBase(env));
   return normalizeUnofficialFilm(await unofficialFetch(key, apiUrl));
+}
+
+async function handleRecommendationApi(request, env, url) {
+  const operation = url.pathname.slice("/recommendations/".length);
+  const keys = providerKeys(env, "unofficial", "recommendations");
+  if (!keys.length) {
+    return json(request, env, { ok: false, error: "recommendation_keys_not_configured" }, 503);
+  }
+
+  let apiUrl;
+  if (operation === "search") {
+    const query = (url.searchParams.get("q") || "").trim();
+    if (!query) return json(request, env, { ok: false, error: "missing_q" }, 400);
+    apiUrl = new URL("/api/v2.1/films/search-by-keyword", unofficialBase(env));
+    apiUrl.searchParams.set("keyword", query);
+    apiUrl.searchParams.set("page", "1");
+  } else {
+    const id = (url.searchParams.get("id") || "").trim();
+    if (!/^\d+$/.test(id)) return json(request, env, { ok: false, error: "missing_or_invalid_id" }, 400);
+    if (operation === "similars") {
+      apiUrl = new URL(`/api/v2.2/films/${id}/similars`, unofficialBase(env));
+    } else if (operation === "film") {
+      apiUrl = new URL(`/api/v2.2/films/${id}`, unofficialBase(env));
+    } else if (operation === "staff") {
+      apiUrl = new URL("/api/v1/staff", unofficialBase(env));
+      apiUrl.searchParams.set("filmId", id);
+    } else {
+      return json(request, env, { ok: false, error: "recommendation_endpoint_not_found" }, 404);
+    }
+  }
+
+  const { value } = await unofficialRotate(
+    keys,
+    env,
+    "recommendations",
+    `recommendations:${operation}`,
+    (key) => unofficialFetch(key, apiUrl),
+  );
+  return json(request, env, value);
 }
 
 async function unofficialFetch(key, apiUrl) {
@@ -838,6 +932,24 @@ function personsByProfession(value, enProfession, ruProfession, limit) {
   return out;
 }
 
+function personRefsByProfession(value, enProfession, ruProfession, limit) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const person of value) {
+    const en = String(person?.enProfession || "").toLowerCase();
+    const ru = String(person?.profession || "").toLowerCase();
+    if (en ? en !== enProfession : !ru.startsWith(ruProfession)) continue;
+    const id = String(person?.id || person?.staffId || "");
+    const name = String(person?.name || person?.nameRu || person?.enName || person?.nameEn || "").trim();
+    if (!/^\d+$/.test(id) || !name || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, name });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 function normalizeMovie(item) {
   return {
     kpId: item.id ?? null,
@@ -859,6 +971,10 @@ function normalizeMovie(item) {
     countries: nameList(item.countries),
     directors: personsByProfession(item.persons, "director", "режисс", 3),
     cast: personsByProfession(item.persons, "actor", "актер", 8),
+    people: {
+      directors: personRefsByProfession(item.persons, "director", "режисс", 3),
+      cast: personRefsByProfession(item.persons, "actor", "актер", 8),
+    },
     externalId: {
       imdb: item.externalId?.imdb || item.imdbId || null,
       tmdb: item.externalId?.tmdb || item.tmdbId || null,
@@ -898,6 +1014,7 @@ function normalizeUnofficialFilm(item) {
     countries: nameList((item.countries || []).map((c) => c?.country)),
     directors: [],
     cast: [],
+    people: { directors: [], cast: [] },
     externalId: {
       imdb: item.imdbId || null,
       tmdb: item.tmdbId || null,

@@ -13,8 +13,9 @@
 // means a popular title hits mzona ONCE, then serves from KV instantly — far
 // fewer upstream calls, far less chance of tripping the rate limit.
 //
-// Deploy: Deno Deploy app, entrypoint `resolver-deno/main.js`. Set POISKKINO_TOKEN
-// env var (needed for /search; /resolve-zona and /health do not need it).
+// Deploy: Deno Deploy app, entrypoint `resolver-deno/main.js`. Link the unified
+// registry once with ALPHY_KEY_POOL_TOKEN; legacy provider env keys remain the
+// bootstrap fallback until that link succeeds.
 
 import worker, { pickAllowOrigin } from "../worker/src/index.js";
 
@@ -36,7 +37,116 @@ const env = {
   ALLOWED_ORIGIN:
     Deno.env.get("ALLOWED_ORIGIN") ||
     "https://alphytv.vercel.app,https://alphy.tv,https://www.alphy.tv,http://127.0.0.1:5177,http://localhost:5177",
+  __KEY_POOL_MANAGED: false,
+  __KEY_POOL_KEYS: [],
+  __recordKeyAttempt: null,
 };
+
+const KEY_POOL_RUNTIME_TOKEN = Deno.env.get("ALPHY_KEY_POOL_TOKEN") || "";
+const KEY_POOL_RUNTIME_URL =
+  Deno.env.get("ALPHY_KEY_POOL_URL") || "https://alphy.tv/api/key-pool/runtime";
+const KEY_POOL_REFRESH_MS = 60_000;
+
+const keyPoolState = {
+  revision: 0,
+  updatedAt: null,
+  fetchedAt: 0,
+  lastError: "",
+  inflight: null,
+  importedLegacy: false,
+};
+
+function splitTokens(plural, singular) {
+  const values = String(plural || "").split(",").map((value) => value.trim());
+  if (singular) values.push(String(singular).trim());
+  return [...new Set(values.filter(Boolean))];
+}
+
+function legacyKeyPayload() {
+  return [
+    ...splitTokens(env.POISKKINO_TOKENS, env.POISKKINO_TOKEN).map((value, index) => ({
+      provider: "poiskkino",
+      value,
+      label: `Deno legacy PoiskKino ${index + 1}`,
+    })),
+    ...splitTokens(env.KINOPOISK_UNOFFICIAL_TOKENS, env.KINOPOISK_UNOFFICIAL_TOKEN).map((value, index) => ({
+      provider: "unofficial",
+      value,
+      label: `Deno legacy Unofficial ${index + 1}`,
+    })),
+  ];
+}
+
+function normalizeRuntimeKeys(value) {
+  const keys = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(value) ? value : []) {
+    const id = String(raw?.id || "").trim();
+    const provider = String(raw?.provider || "").trim();
+    const key = String(raw?.value || "").trim();
+    if (!id || !key || !["poiskkino", "unofficial"].includes(provider)) continue;
+    const dedupe = `${provider}\0${key}`;
+    if (seen.has(dedupe)) continue;
+    seen.add(dedupe);
+    keys.push({
+      id,
+      provider,
+      label: String(raw?.label || provider).trim().slice(0, 80),
+      value: key,
+      scopes: {
+        resolver: raw?.scopes?.resolver === true,
+        recommendations: provider === "unofficial" && raw?.scopes?.recommendations === true,
+      },
+    });
+  }
+  return keys;
+}
+
+async function refreshKeyPool(force = false) {
+  if (!KEY_POOL_RUNTIME_TOKEN) return false;
+  if (!force && keyPoolState.fetchedAt && Date.now() - keyPoolState.fetchedAt < KEY_POOL_REFRESH_MS) {
+    return env.__KEY_POOL_MANAGED;
+  }
+  if (keyPoolState.inflight) return keyPoolState.inflight;
+
+  keyPoolState.inflight = (async () => {
+    try {
+      const shouldImport = !keyPoolState.importedLegacy;
+      const response = await fetch(KEY_POOL_RUNTIME_URL, {
+        method: shouldImport ? "POST" : "GET",
+        headers: {
+          "Authorization": `Bearer ${KEY_POOL_RUNTIME_TOKEN}`,
+          "Accept": "application/json",
+          ...(shouldImport ? { "Content-Type": "application/json" } : {}),
+        },
+        body: shouldImport ? JSON.stringify({ legacyKeys: legacyKeyPayload() }) : undefined,
+        cache: "no-store",
+      });
+      const text = await response.text();
+      let payload = null;
+      try { payload = JSON.parse(text); } catch { /* surface the HTTP body below */ }
+      if (!response.ok || payload?.ok === false || !payload?.pool) {
+        throw new Error(payload?.error || text.slice(0, 160) || `runtime pool HTTP ${response.status}`);
+      }
+      env.__KEY_POOL_KEYS = normalizeRuntimeKeys(payload.pool.keys);
+      env.__KEY_POOL_MANAGED = true;
+      keyPoolState.revision = Number(payload.pool.revision) || 0;
+      keyPoolState.updatedAt = payload.pool.updatedAt || null;
+      keyPoolState.fetchedAt = Date.now();
+      keyPoolState.lastError = "";
+      keyPoolState.importedLegacy = true;
+      return true;
+    } catch (error) {
+      keyPoolState.lastError = String(error?.message || error).slice(0, 240);
+      // A previously loaded registry is safer than falling back to env after an
+      // admin explicitly disabled a key. Only a never-linked instance uses env.
+      return env.__KEY_POOL_MANAGED;
+    } finally {
+      keyPoolState.inflight = null;
+    }
+  })();
+  return keyPoolState.inflight;
+}
 
 // Persistent kpId -> Zenith cache. Deno KV is optional and is not automatically
 // attached to every Deploy project. The edge Cache API needs no database setup,
@@ -55,6 +165,133 @@ try {
 } catch {
   edgeCache = null;
 }
+
+// Approximate persistent usage counters. Cache API is already available on this
+// deployment and avoids a database or a write per request. Warm isolates update
+// memory synchronously; snapshots flush every few calls and whenever admin opens
+// the key manager. Concurrent cold isolates can race, so the UI labels these as
+// operational counters rather than billing-authoritative quota numbers.
+const KEY_METRICS_CACHE_URL = "https://alphy-key-metrics.invalid/v1";
+const keyMetrics = new Map();
+let keyMetricsLoaded = false;
+let keyMetricsLoadPromise = null;
+let keyMetricsDirty = 0;
+let keyMetricsFlushTimer = null;
+let keyMetricsFlushPromise = null;
+
+async function loadKeyMetrics() {
+  if (keyMetricsLoaded) return;
+  if (keyMetricsLoadPromise) return keyMetricsLoadPromise;
+  keyMetricsLoadPromise = (async () => {
+    if (!edgeCache) return;
+    try {
+      const response = await edgeCache.match(new Request(KEY_METRICS_CACHE_URL));
+      if (!response) return;
+      const payload = await response.json();
+      for (const entry of Array.isArray(payload?.keys) ? payload.keys : []) {
+        if (!entry?.id) continue;
+        keyMetrics.set(String(entry.id), {
+          id: String(entry.id),
+          provider: String(entry.provider || ""),
+          label: String(entry.label || ""),
+          requests: Math.max(0, Number(entry.requests) || 0),
+          successes: Math.max(0, Number(entry.successes) || 0),
+          errors: Math.max(0, Number(entry.errors) || 0),
+          totalLatencyMs: Math.max(0, Number(entry.totalLatencyMs) || 0),
+          lastStatus: Number(entry.lastStatus) || 0,
+          lastUsedAt: entry.lastUsedAt || null,
+          lastError: String(entry.lastError || "").slice(0, 180),
+          operations: entry.operations && typeof entry.operations === "object" ? entry.operations : {},
+        });
+      }
+    } catch {
+      // Counters are observability only; API traffic must never depend on them.
+    }
+  })().finally(() => {
+    keyMetricsLoaded = true;
+    keyMetricsLoadPromise = null;
+  });
+  return keyMetricsLoadPromise;
+}
+
+function metricsSnapshot() {
+  return [...keyMetrics.values()].map((entry) => ({
+    ...entry,
+    averageLatencyMs: entry.requests ? Math.round(entry.totalLatencyMs / entry.requests) : 0,
+  }));
+}
+
+async function flushKeyMetrics() {
+  if (!edgeCache || !keyMetricsDirty) return;
+  if (keyMetricsFlushPromise) return keyMetricsFlushPromise;
+  if (keyMetricsFlushTimer) {
+    clearTimeout(keyMetricsFlushTimer);
+    keyMetricsFlushTimer = null;
+  }
+  const dirtyAtStart = keyMetricsDirty;
+  keyMetricsFlushPromise = edgeCache.put(
+    new Request(KEY_METRICS_CACHE_URL),
+    new Response(JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), keys: metricsSnapshot() }), {
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "public, max-age=31536000",
+      },
+    }),
+  ).then(() => {
+    keyMetricsDirty = Math.max(0, keyMetricsDirty - dirtyAtStart);
+  }).catch(() => {}).finally(() => {
+    keyMetricsFlushPromise = null;
+  });
+  return keyMetricsFlushPromise;
+}
+
+function scheduleMetricsFlush() {
+  if (keyMetricsDirty >= 8) {
+    flushKeyMetrics();
+    return;
+  }
+  if (!keyMetricsFlushTimer) {
+    keyMetricsFlushTimer = setTimeout(() => {
+      keyMetricsFlushTimer = null;
+      flushKeyMetrics();
+    }, 15_000);
+  }
+}
+
+function recordKeyAttempt(event) {
+  const id = String(event?.id || "");
+  if (!id) return;
+  const current = keyMetrics.get(id) || {
+    id,
+    provider: String(event.provider || ""),
+    label: String(event.label || ""),
+    requests: 0,
+    successes: 0,
+    errors: 0,
+    totalLatencyMs: 0,
+    lastStatus: 0,
+    lastUsedAt: null,
+    lastError: "",
+    operations: {},
+  };
+  current.provider = String(event.provider || current.provider);
+  current.label = String(event.label || current.label);
+  current.requests += 1;
+  current.successes += event.ok ? 1 : 0;
+  current.errors += event.ok ? 0 : 1;
+  current.totalLatencyMs += Math.max(0, Number(event.latencyMs) || 0);
+  current.lastStatus = Number(event.status) || 0;
+  current.lastUsedAt = new Date().toISOString();
+  current.lastError = event.ok ? "" : String(event.error || "").slice(0, 180);
+  const operation = String(event.operation || "other").slice(0, 60);
+  current.operations[operation] = (Number(current.operations[operation]) || 0) + 1;
+  keyMetrics.set(id, current);
+  keyMetricsDirty += 1;
+  scheduleMetricsFlush();
+}
+
+env.__recordKeyAttempt = recordKeyAttempt;
+
 const zonaMemoryCache = new Map();
 const zonaInflight = new Map();
 const zenithMemoryCache = new Map();
@@ -67,7 +304,7 @@ function corsHeadersFor(request) {
   const requestOrigin = request.headers.get("origin") || "";
   return {
     "access-control-allow-origin": pickAllowOrigin(requestOrigin, env.ALLOWED_ORIGIN),
-    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
     "access-control-allow-headers": "content-type, authorization",
     "vary": "Origin",
   };
@@ -81,6 +318,77 @@ function jsonResponse(request, body, status = 200, cacheControl = "no-store") {
       "content-type": "application/json; charset=utf-8",
       "cache-control": cacheControl,
     },
+  });
+}
+
+function safeTokenEqual(left, right) {
+  const a = new TextEncoder().encode(String(left || ""));
+  const b = new TextEncoder().encode(String(right || ""));
+  if (!a.length || a.length !== b.length) return false;
+  let diff = 0;
+  for (let index = 0; index < a.length; index += 1) diff |= a[index] ^ b[index];
+  return diff === 0;
+}
+
+function keyPoolAuthorized(request) {
+  const supplied = String(request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
+  return safeTokenEqual(KEY_POOL_RUNTIME_TOKEN, supplied);
+}
+
+function managedKeySummary() {
+  const providerIndexes = new Map();
+  const configured = env.__KEY_POOL_MANAGED ? env.__KEY_POOL_KEYS : legacyKeyPayload().map((entry) => {
+    const index = (providerIndexes.get(entry.provider) || 0) + 1;
+    providerIndexes.set(entry.provider, index);
+    return {
+      id: `legacy-${entry.provider}-${index}`,
+      provider: entry.provider,
+      label: entry.label,
+      scopes: { resolver: true, recommendations: entry.provider === "unofficial" },
+    };
+  });
+  return configured.map((entry) => ({
+    id: entry.id,
+    provider: entry.provider,
+    label: entry.label,
+    scopes: entry.scopes,
+  }));
+}
+
+async function keyPoolStatusResponse(request, { reload = false } = {}) {
+  if (!KEY_POOL_RUNTIME_TOKEN) {
+    return jsonResponse(request, {
+      ok: false,
+      error: "key_pool_runtime_token_not_configured",
+    }, 503);
+  }
+  if (!keyPoolAuthorized(request)) {
+    return jsonResponse(request, { ok: false, error: "key_pool_runtime_auth_required" }, 401);
+  }
+  await Promise.all([refreshKeyPool(reload), loadKeyMetrics()]);
+  await flushKeyMetrics();
+  const metrics = metricsSnapshot();
+  const totals = metrics.reduce((sum, entry) => {
+    sum.requests += entry.requests;
+    sum.successes += entry.successes;
+    sum.errors += entry.errors;
+    sum.totalLatencyMs += entry.totalLatencyMs;
+    return sum;
+  }, { requests: 0, successes: 0, errors: 0, totalLatencyMs: 0 });
+  return jsonResponse(request, {
+    ok: true,
+    managed: env.__KEY_POOL_MANAGED,
+    revision: keyPoolState.revision,
+    updatedAt: keyPoolState.updatedAt,
+    fetchedAt: keyPoolState.fetchedAt ? new Date(keyPoolState.fetchedAt).toISOString() : null,
+    lastError: keyPoolState.lastError || null,
+    keys: managedKeySummary(),
+    metrics,
+    totals: {
+      ...totals,
+      averageLatencyMs: totals.requests ? Math.round(totals.totalLatencyMs / totals.requests) : 0,
+    },
+    metricsNote: "approximate_edge_cache_counters",
   });
 }
 
@@ -266,8 +574,16 @@ async function handleZenithCached(request, url) {
   }, 200, "public, max-age=60");
 }
 
-Deno.serve((request) => {
+Deno.serve(async (request) => {
   const url = new URL(request.url);
+  if (url.pathname === "/key-pool/status" && request.method === "GET") {
+    return keyPoolStatusResponse(request);
+  }
+  if (url.pathname === "/key-pool/reload" && request.method === "POST") {
+    return keyPoolStatusResponse(request, { reload: true });
+  }
+
+  await Promise.all([refreshKeyPool(false), loadKeyMetrics()]);
   if (request.method === "GET" && url.pathname === "/resolve-zona") {
     return handleResolveZonaCached(request, url);
   }
@@ -286,6 +602,12 @@ Deno.serve((request) => {
       zenithCache: {
         edge: !!edgeCache,
         memoryEntries: zenithMemoryCache.size,
+      },
+      keyPool: {
+        linked: !!KEY_POOL_RUNTIME_TOKEN,
+        managed: env.__KEY_POOL_MANAGED,
+        revision: keyPoolState.revision,
+        keys: managedKeySummary().length,
       },
     });
   }

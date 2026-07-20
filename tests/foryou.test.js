@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 // foryou.js is a browser IIFE; evaluate it in a sandbox with stubbed
-// window/localStorage/fetch and drive the pure pipeline via _test exports.
+// window/localStorage/resolver bridge and drive the pure pipeline via exports.
 async function loadForYou(storage = new Map()) {
   const code = await readFile(new URL("../foryou.js", import.meta.url), "utf8");
   const localStorage = {
@@ -20,6 +20,7 @@ async function loadForYou(storage = new Map()) {
     JSON,
     Math,
     Promise,
+    URL,
     setTimeout,
     localStorage,
     fetch: async () => { throw new Error("network disabled in tests"); },
@@ -29,13 +30,15 @@ async function loadForYou(storage = new Map()) {
         this.detail = options?.detail;
       }
     },
-    window: { addEventListener: () => {}, dispatchEvent: () => {} },
+    window: {
+      addEventListener: () => {},
+      dispatchEvent: () => {},
+      alphyBridge: { resolverJson: async () => { throw new Error("network disabled in tests"); } },
+    },
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox);
-  // The IIFE resolves bare `fetch` off the sandbox global on every call, so a
-  // test can swap it in after load to drive the key-rotation paths.
   return { api: sandbox.window.alphyForYou, storage, sandbox };
 }
 
@@ -278,59 +281,51 @@ test("personNames pulls directors and cast out of the staff payload in order", a
 // "User <mail> is inactive or deleted" — verified live against ten such keys.
 // That is a rotate-and-continue condition, not a fatal error.
 
-// Dead-ness is a property of the KEY, not of the call: a deactivated account
-// answers 403 on every endpoint. filmExtras fires two calls in parallel, so a
-// stub keyed off call order would not model this correctly.
-function keyRotationFetch({ deadKeyCount }) {
+test("film extras use resolver routes and preserve Kinopoisk person ids", async () => {
+  const { api, sandbox } = await loadForYou();
   const seen = [];
-  const order = [];
-  const isDead = (key) => {
-    if (!order.includes(key)) order.push(key);
-    return order.indexOf(key) < deadKeyCount;
-  };
-  const fetchStub = async (url, init) => {
-    const key = init?.headers?.["X-API-KEY"];
-    seen.push(key);
-    if (isDead(key)) {
+  sandbox.window.alphyBridge.resolverJson = async (path) => {
+    seen.push(path);
+    if (path === "/recommendations/film?id=326") {
       return {
-        ok: false,
-        status: 403,
-        json: async () => ({ message: "User someone@example.invalid is inactive or deleted." }),
-      };
-    }
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
         genres: [{ genre: "\u0434\u0440\u0430\u043c\u0430" }],
         countries: [{ country: "\u0421\u0428\u0410" }],
         ratingAgeLimits: "age16",
-      }),
-    };
+      };
+    }
+    if (path === "/recommendations/staff?id=326") {
+      return [
+        { staffId: 42, nameRu: "\u0420\u0435\u0436\u0438\u0441\u0441\u0451\u0440", professionKey: "DIRECTOR" },
+        { staffId: 77, nameRu: "\u0410\u043a\u0442\u0451\u0440", professionKey: "ACTOR" },
+      ];
+    }
+    throw new Error(`unexpected path ${path}`);
   };
-  return { fetchStub, seen };
-}
-
-test("a deactivated key (403) rotates to the next key instead of failing", async () => {
-  const { api, sandbox } = await loadForYou();
-  const { fetchStub, seen } = keyRotationFetch({ deadKeyCount: 1 });
-  sandbox.fetch = fetchStub;
   api.setMode("on");
 
   const extras = await api.filmExtras("326");
-  assert.ok(extras, "a live key still answers when an earlier key is deactivated");
+  assert.ok(extras);
   assert.equal(JSON.parse(JSON.stringify(extras.genres))[0], "\u0434\u0440\u0430\u043c\u0430");
   assert.equal(extras.ageRating, 16);
-  assert.ok(new Set(seen).size >= 2, "rotation actually reached a different key");
+  assert.deepEqual(JSON.parse(JSON.stringify(extras.people.directors)), [
+    { id: "42", name: "\u0420\u0435\u0436\u0438\u0441\u0441\u0451\u0440" },
+  ]);
+  assert.deepEqual(new Set(seen), new Set([
+    "/recommendations/film?id=326",
+    "/recommendations/staff?id=326",
+  ]));
 });
 
-test("every key deactivated fails softly, without throwing at the caller", async () => {
+test("resolver failure fails extras softly without breaking the watch page", async () => {
   const { api, sandbox } = await loadForYou();
-  const { fetchStub, seen } = keyRotationFetch({ deadKeyCount: 99 });
-  sandbox.fetch = fetchStub;
+  let calls = 0;
+  sandbox.window.alphyBridge.resolverJson = async () => {
+    calls += 1;
+    throw new Error("recommendation pool exhausted");
+  };
   api.setMode("on");
 
   const extras = await api.filmExtras("326");
-  assert.equal(extras, null, "a fully dead pool must not break the watch page");
-  assert.ok(new Set(seen).size >= 3, "all keys were tried before giving up");
+  assert.equal(extras, null);
+  assert.equal(calls, 2, "film and staff fail independently but softly");
 });
