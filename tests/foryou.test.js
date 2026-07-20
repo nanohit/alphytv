@@ -34,7 +34,9 @@ async function loadForYou(storage = new Map()) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox);
-  return { api: sandbox.window.alphyForYou, storage };
+  // The IIFE resolves bare `fetch` off the sandbox global on every call, so a
+  // test can swap it in after load to drive the key-rotation paths.
+  return { api: sandbox.window.alphyForYou, storage, sandbox };
 }
 
 function historyEntry(overrides = {}) {
@@ -268,4 +270,67 @@ test("personNames pulls directors and cast out of the staff payload in order", a
   assert.deepEqual(names(staff, "ACTOR", 2), ["Первый", "Второй"], "deduped and capped");
   assert.deepEqual(names(staff, "ACTOR", 9), ["Первый", "Второй", "Third"]);
   assert.deepEqual(names(null, "ACTOR", 3), []);
+});
+
+// --- key rotation ----------------------------------------------------------
+// The key pool is made of free kinopoiskapiunofficial accounts, and those get
+// deactivated in batches. A deactivated key answers 403 with
+// "User <mail> is inactive or deleted" — verified live against ten such keys.
+// That is a rotate-and-continue condition, not a fatal error.
+
+// Dead-ness is a property of the KEY, not of the call: a deactivated account
+// answers 403 on every endpoint. filmExtras fires two calls in parallel, so a
+// stub keyed off call order would not model this correctly.
+function keyRotationFetch({ deadKeyCount }) {
+  const seen = [];
+  const order = [];
+  const isDead = (key) => {
+    if (!order.includes(key)) order.push(key);
+    return order.indexOf(key) < deadKeyCount;
+  };
+  const fetchStub = async (url, init) => {
+    const key = init?.headers?.["X-API-KEY"];
+    seen.push(key);
+    if (isDead(key)) {
+      return {
+        ok: false,
+        status: 403,
+        json: async () => ({ message: "User someone@example.invalid is inactive or deleted." }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        genres: [{ genre: "\u0434\u0440\u0430\u043c\u0430" }],
+        countries: [{ country: "\u0421\u0428\u0410" }],
+        ratingAgeLimits: "age16",
+      }),
+    };
+  };
+  return { fetchStub, seen };
+}
+
+test("a deactivated key (403) rotates to the next key instead of failing", async () => {
+  const { api, sandbox } = await loadForYou();
+  const { fetchStub, seen } = keyRotationFetch({ deadKeyCount: 1 });
+  sandbox.fetch = fetchStub;
+  api.setMode("on");
+
+  const extras = await api.filmExtras("326");
+  assert.ok(extras, "a live key still answers when an earlier key is deactivated");
+  assert.equal(JSON.parse(JSON.stringify(extras.genres))[0], "\u0434\u0440\u0430\u043c\u0430");
+  assert.equal(extras.ageRating, 16);
+  assert.ok(new Set(seen).size >= 2, "rotation actually reached a different key");
+});
+
+test("every key deactivated fails softly, without throwing at the caller", async () => {
+  const { api, sandbox } = await loadForYou();
+  const { fetchStub, seen } = keyRotationFetch({ deadKeyCount: 99 });
+  sandbox.fetch = fetchStub;
+  api.setMode("on");
+
+  const extras = await api.filmExtras("326");
+  assert.equal(extras, null, "a fully dead pool must not break the watch page");
+  assert.ok(new Set(seen).size >= 3, "all keys were tried before giving up");
 });

@@ -229,7 +229,12 @@
         continue;
       }
       countFetch();
-      if (response.status === 401 || response.status === 402 || response.status === 429) {
+      // 403 is how kinopoiskapiunofficial reports a DEACTIVATED account
+      // ("User <mail> is inactive or deleted") — not a malformed request. It was
+      // missing here, so one dead key threw instead of rotating and took the
+      // whole feature down while the other keys were fine. These are free
+      // accounts; they do get purged, so rotation has to cover it.
+      if ([401, 402, 403, 429].includes(response.status)) {
         lastError = new Error(`foryou key ${index} rejected: ${response.status}`);
         continue; // rotate to the next key
       }

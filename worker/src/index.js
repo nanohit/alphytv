@@ -116,8 +116,12 @@ function unofficialKeys(env) {
   return [...new Set(list.filter(Boolean))];
 }
 
+// A key that must not be tried first again. 402/429 = spent for today, 403 =
+// the account was deactivated ("User <mail> is inactive or deleted"). Without
+// 403 the cursor stayed parked on a dead key forever, so every request paid a
+// wasted round trip to it before rotating. Matches poiskkinoRotate's predicate.
 function isQuotaError(error) {
-  return /\b(402|429)\b/.test(String(error?.message || ""));
+  return /\b(40[23]|429)\b/.test(String(error?.message || ""));
 }
 
 async function unofficialRotate(keys, run) {
