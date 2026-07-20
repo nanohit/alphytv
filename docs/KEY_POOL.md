@@ -47,6 +47,20 @@ average upstream latency per registry key. Those operational counters are batche
 into the Deno Cache API and are approximate under concurrent cold isolates; they
 are useful for rotation diagnostics, not billing reconciliation.
 
+## Runtime load
+
+- Search, title metadata, credits and recommendations are small JSON requests to
+  Deno. Player manifests and media segments still go directly from the viewer to
+  their source CDN and never pass through Deno or Vercel.
+- A cold Similar shelf uses one Unofficial similars request and one PoiskKino
+  batch request for the entire row. Metadata is cached in the browser for 30
+  days; it never fans out into one request per card.
+- Deno reads the encrypted registry through Vercel at most once every five
+  minutes per warm isolate. An admin save asks Deno to reload immediately, so
+  edits do not wait for the poll.
+- Vercel is otherwise used only for the admin control plane and encrypted Blob
+  storage. Recommendation and search traffic does not proxy through Vercel.
+
 Do not rotate `ALPHY_KEY_POOL_MASTER_KEY` by simply replacing it: re-encrypt the
 existing registry with `rewriteKeyPoolCiphertext()` in `api/_key-pool-store.js`
 first. Rotating `ALPHY_KEY_POOL_TOKEN` is safe from the admin registry side, but
