@@ -45,7 +45,9 @@ const env = {
 const KEY_POOL_RUNTIME_TOKEN = Deno.env.get("ALPHY_KEY_POOL_TOKEN") || "";
 const KEY_POOL_RUNTIME_URL =
   Deno.env.get("ALPHY_KEY_POOL_URL") || "https://alphy.tv/api/key-pool/runtime";
-const KEY_POOL_REFRESH_MS = 60_000;
+// Admin saves trigger /key-pool/reload immediately. Five-minute polling is only
+// a recovery path for missed reloads and keeps Vercel Function/Blob traffic tiny.
+const KEY_POOL_REFRESH_MS = 5 * 60_000;
 
 const keyPoolState = {
   revision: 0,

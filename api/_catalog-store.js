@@ -33,6 +33,7 @@ function text(value, max = 500) {
 }
 
 function positiveNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
@@ -125,6 +126,8 @@ function normalizeItem(value) {
   const backdrop = publicHttpsUrl(value?.backdrop);
   const label = text(value?.label, ITEM_LABEL_MAX).replace(/\s+/g, " ");
   const externalId = normalizeExternalId(value?.externalId || value?.externalIds);
+  const ageRating = positiveNumber(value?.ageRating);
+  const ratingMpaa = text(value?.ratingMpaa, 16);
   const people = {
     directors: normalizePersonRefs(value?.people?.directors, 3),
     cast: normalizePersonRefs(value?.people?.cast, 8),
@@ -145,6 +148,8 @@ function normalizeItem(value) {
       imdb: positiveNumber(value?.rating?.imdb),
     },
     ...(externalId ? { externalId } : {}),
+    ...(ageRating != null ? { ageRating } : {}),
+    ...(ratingMpaa ? { ratingMpaa } : {}),
     ...((people.directors.length || people.cast.length) ? { people } : {}),
     target,
     cachedAt: text(value?.cachedAt, 40) || new Date().toISOString(),

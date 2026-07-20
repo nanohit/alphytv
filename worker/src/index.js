@@ -275,6 +275,24 @@ async function poiskkinoMovie(env, id) {
   return normalizeMovie(value);
 }
 
+async function poiskkinoMovies(env, ids) {
+  const keys = providerKeys(env, "poiskkino", "resolver");
+  if (!keys.length) throw new Error("POISKKINO_TOKEN secret is not configured");
+  const apiUrl = new URL("/v1.4/movie", poiskkinoBase(env));
+  for (const id of ids) apiUrl.searchParams.append("id", id);
+  for (const field of [
+    "id", "name", "alternativeName", "enName", "type", "year", "isSeries",
+    "movieLength", "seriesLength", "rating", "poster",
+  ]) {
+    apiUrl.searchParams.append("selectFields", field);
+  }
+  apiUrl.searchParams.set("limit", String(ids.length));
+  const { value: raw } = await poiskkinoRotate(
+    keys, env, "recommendations:batch-meta", (key) => poiskkinoFetch(key, apiUrl),
+  );
+  return (Array.isArray(raw?.docs) ? raw.docs : []).map(normalizeMovie);
+}
+
 async function unofficialSearch(env, key, query, limit) {
   const apiUrl = new URL("/api/v2.1/films/search-by-keyword", unofficialBase(env));
   apiUrl.searchParams.set("keyword", query);
@@ -291,6 +309,13 @@ async function unofficialMovie(env, key, id) {
 
 async function handleRecommendationApi(request, env, url) {
   const operation = url.pathname.slice("/recommendations/".length);
+  if (operation === "meta") {
+    const ids = [...new Set(String(url.searchParams.get("ids") || "")
+      .split(",").map((id) => id.trim()).filter((id) => /^\d+$/.test(id)))].slice(0, 24);
+    if (!ids.length) return json(request, env, { ok: false, error: "missing_or_invalid_ids" }, 400);
+    return json(request, env, { ok: true, movies: await poiskkinoMovies(env, ids) });
+  }
+
   const keys = providerKeys(env, "unofficial", "recommendations");
   if (!keys.length) {
     return json(request, env, { ok: false, error: "recommendation_keys_not_configured" }, 503);
@@ -965,7 +990,11 @@ function normalizeMovie(item) {
     shortDescription: item.shortDescription ?? null,
     slogan: item.slogan ?? null,
     poster: item.poster?.url || item.poster?.previewUrl || null,
-    ageRating: Number.isFinite(Number(item.ageRating)) ? Number(item.ageRating) : null,
+    ageRating:
+      item.ageRating !== null && item.ageRating !== undefined && item.ageRating !== "" &&
+      Number.isFinite(Number(item.ageRating))
+        ? Number(item.ageRating)
+        : null,
     ratingMpaa: item.ratingMpaa || null,
     genres: nameList(item.genres),
     countries: nameList(item.countries),

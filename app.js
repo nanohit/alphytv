@@ -19,6 +19,7 @@
   const STORE_RESOLVER = "alphy.resolverBaseUrl";
   const STORE_BOOKMARKS = "alphy.bookmarks";
   const STORE_HISTORY = "alphy.history";
+  const STORE_SIMILAR_COLLAPSED = "alphy.similarCollapsed";
   const CACHE_PREFIX = "alphy.cache.";
   // Older builds cached a transient empty Newdeaf result for six hours. Keep
   // this namespace versioned so those false misses cannot survive an upgrade.
@@ -121,6 +122,7 @@
     metaPanel: document.getElementById("metaPanel"),
     similarSection: document.getElementById("similarSection"),
     similarRow: document.getElementById("similarRow"),
+    similarToggle: document.getElementById("similarToggle"),
     loading: document.getElementById("loading"),
     error: document.getElementById("error"),
   };
@@ -1800,6 +1802,7 @@
       const x = document.createElement("button");
       x.className = "card-remove";
       x.type = "button";
+      x.setAttribute("aria-label", "Скрыть рекомендацию");
       x.innerHTML = `<span class="card-remove-glyph" aria-hidden="true">×</span>`;
       x.addEventListener("click", (event) => { event.stopPropagation(); onRemove(); });
       media.appendChild(x);
@@ -3604,8 +3607,11 @@
   // MPAA is stored as a bare code ("r", "pg13"); Kinopoisk's own age limit is the
   // number Russian viewers actually recognise, so it leads and MPAA follows.
   function ageBadge(meta) {
-    const age = Number(meta?.ageRating);
-    if (Number.isFinite(age) && age >= 0) return `${age}+`;
+    const rawAge = meta?.ageRating;
+    if (rawAge !== null && rawAge !== undefined && rawAge !== "") {
+      const age = Number(rawAge);
+      if (Number.isFinite(age) && age >= 0) return `${age}+`;
+    }
     const mpaa = String(meta?.ratingMpaa || "").trim();
     return mpaa ? mpaa.toUpperCase().replace(/^NC17$/, "NC-17").replace(/^PG13$/, "PG-13") : "";
   }
@@ -3804,13 +3810,25 @@
     if (!/^\d+$/.test(kpId)) return;
     const items = await window.alphyForYou?.similarRow?.(kpId);
     if (!items?.length || isStale(token)) return;
+    paintSimilarRow(items, token);
+
+    // Paint immediately from the similars payload, then fill year/type/ratings
+    // with one optional batch request for the whole strip. There is no per-card
+    // request fanout and a warm row does not touch the network at all.
+    const enriched = await window.alphyForYou?.enrichSimilarRow?.(kpId);
+    if (enriched?.length && !isStale(token)) paintSimilarRow(enriched, token);
+  }
+
+  function paintSimilarRow(items, token) {
+    if (isStale(token)) return;
     const frag = document.createDocumentFragment();
     for (const item of items) {
       // A recommendation that is already curated opens through its resolved
       // target — instant playback instead of a fresh kp resolve.
       const ready = window.alphyCatalog?.findReady?.(item.title, item.year, item.isSeries);
       const entry = ready ? { ...ready, kpId: ready.kpId || String(item.target?.kpId || "") } : item;
-      frag.appendChild(makeCard({
+      let card = null;
+      card = makeCard({
         title: entry.title,
         sub: [entry.year, entry.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · "),
         poster: entry.poster,
@@ -3819,10 +3837,31 @@
         isSeries: entry.isSeries,
         bookmark: { target: entry.target, details: entry },
         onClick: () => openCuratedItem(entry),
-      }));
+        onRemove: () => {
+          window.alphyForYou?.hide?.(item.target?.kpId);
+          card?.remove();
+          if (!el.similarRow?.children.length) hideSimilarRow();
+        },
+      });
+      frag.appendChild(card);
     }
     el.similarRow.replaceChildren(frag);
     el.similarSection.classList.remove("hidden");
+    setSimilarCollapsed(readSimilarCollapsed(), { persist: false });
+  }
+
+  function readSimilarCollapsed() {
+    try { return localStorage.getItem(STORE_SIMILAR_COLLAPSED) === "1"; }
+    catch { return false; }
+  }
+
+  function setSimilarCollapsed(collapsed, { persist = true } = {}) {
+    el.similarSection?.classList.toggle("collapsed", collapsed);
+    el.similarToggle?.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    if (el.similarToggle) el.similarToggle.textContent = collapsed ? "Показать" : "Скрыть";
+    if (persist) {
+      try { localStorage.setItem(STORE_SIMILAR_COLLAPSED, collapsed ? "1" : "0"); } catch { /* ignore */ }
+    }
   }
 
   function hideSimilarRow() {
@@ -6301,7 +6340,11 @@ addEventListener('message', async (event) => {
       externalId: {
         ...(meta.externalId || meta.externalIds || {}),
       },
-      ageRating: Number.isFinite(Number(meta.ageRating)) ? Number(meta.ageRating) : null,
+      ageRating:
+        meta.ageRating !== null && meta.ageRating !== undefined && meta.ageRating !== "" &&
+        Number.isFinite(Number(meta.ageRating))
+          ? Number(meta.ageRating)
+          : null,
       ratingMpaa: meta.ratingMpaa || "",
       genres: Array.isArray(meta.genres) ? meta.genres : [],
       countries: Array.isArray(meta.countries) ? meta.countries : [],
@@ -6403,6 +6446,9 @@ addEventListener('message', async (event) => {
     });
     el.searchInput.addEventListener("keydown", (e) => { if (e.key === "Enter") onSearchSubmit(); });
     el.bookmarksToggle.addEventListener("click", () => go("/bookmarks"));
+    el.similarToggle?.addEventListener("click", () => {
+      setSimilarCollapsed(!el.similarSection?.classList.contains("collapsed"));
+    });
     el.soapBrowseBtn?.addEventListener("click", showSoapBrowser);
     el.soapFilter?.addEventListener("input", renderSoapBrowser);
     el.soapToggle?.addEventListener("click", () => {
@@ -6490,7 +6536,11 @@ addEventListener('message', async (event) => {
       if (!hit?.kpId) return { ok: false };
       const detail = await fetchMovieMeta(hit.kpId);
       const m = detail || hit;
-      const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+      const num = (v) => (
+        v !== null && v !== undefined && v !== "" && Number.isFinite(Number(v))
+          ? Number(v)
+          : null
+      );
       const list = (v) => (Array.isArray(v) ? v.filter(Boolean).map(String) : []);
       return {
         ok: true,
@@ -6535,6 +6585,7 @@ addEventListener('message', async (event) => {
     resolvePosterByTitle,
     resolveCardMeta,
     resolverJson,
+    _test: { ageBadge },
   };
 
   boot();

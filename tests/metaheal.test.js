@@ -140,3 +140,13 @@ test("curated click meta handoff survives quota exhaustion", async () => {
   const hist = JSON.parse(ctx.storage.get("alphy.history") || "[]");
   assert.equal(hist.find((h) => h.key === ORT_KEY)?.title, "Обсессия", "history entry carries the curated title");
 });
+
+test("age badge distinguishes missing age from a real 0+ and falls back to MPAA", () => {
+  const ctx = makeSandbox();
+  ctx.run();
+  const ageBadge = ctx.sandbox.window.alphyBridge._test.ageBadge;
+  assert.equal(ageBadge({ ageRating: null }), "");
+  assert.equal(ageBadge({ ageRating: null, ratingMpaa: "pg13" }), "PG-13");
+  assert.equal(ageBadge({ ageRating: 0 }), "0+");
+  assert.equal(ageBadge({ ageRating: 12, ratingMpaa: "r" }), "12+");
+});

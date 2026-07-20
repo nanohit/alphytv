@@ -140,7 +140,7 @@
       const revision = Number(state.deno.revision) || 0;
       text.textContent = `Deno подключён · ревизия ${revision}`;
     } else {
-      text.textContent = `Deno не подключён${state.deno?.error ? ` · ${state.deno.error}` : ""}`;
+      text.textContent = "Deno не подключён · старые env-ключи работают, но появятся здесь только после привязки";
     }
     line.append(dot, text);
     el.sync.appendChild(line);

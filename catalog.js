@@ -161,8 +161,11 @@
     };
     const kpId = String(value?.kpId || "");
     if (/^\d+$/.test(kpId)) item.kpId = kpId;
-    const age = Number(value?.ageRating);
-    if (Number.isFinite(age) && age >= 0) item.ageRating = age;
+    const rawAge = value?.ageRating;
+    const age = Number(rawAge);
+    if (rawAge !== null && rawAge !== undefined && rawAge !== "" && Number.isFinite(age) && age >= 0) {
+      item.ageRating = age;
+    }
     const mpaa = String(value?.ratingMpaa || "").trim();
     if (mpaa) item.ratingMpaa = mpaa;
     const genres = nameArray(value?.genres, 6);
@@ -632,7 +635,12 @@
   // field that a previous, better answer already filled in.
   function applyItemMetadata(item, meta) {
     if (/^\d+$/.test(String(meta?.kpId || ""))) item.kpId = String(meta.kpId);
-    if (Number.isFinite(Number(meta?.ageRating))) item.ageRating = Number(meta.ageRating);
+    if (
+      meta?.ageRating !== null && meta?.ageRating !== undefined && meta?.ageRating !== "" &&
+      Number.isFinite(Number(meta.ageRating))
+    ) {
+      item.ageRating = Number(meta.ageRating);
+    }
     if (meta?.ratingMpaa) item.ratingMpaa = String(meta.ratingMpaa);
     if (meta?.genres?.length) item.genres = nameArray(meta.genres, 6);
     if (meta?.countries?.length) item.countries = nameArray(meta.countries, 4);

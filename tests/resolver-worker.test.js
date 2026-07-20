@@ -108,3 +108,45 @@ test("movie metadata keeps Kinopoisk person ids without extra upstream calls", a
     globalThis.fetch = originalFetch;
   }
 });
+
+test("batch recommendation metadata resolves a whole row with one PoiskKino request", async () => {
+  const originalFetch = globalThis.fetch;
+  const upstream = [];
+  const attempts = [];
+  globalThis.fetch = async (request, init = {}) => {
+    upstream.push({ url: String(request), key: init.headers?.["X-API-KEY"] });
+    return new Response(JSON.stringify({ docs: [
+      { id: 301, name: "Матрица", year: 1999, rating: { kp: 8.5, imdb: 8.7 }, ageRating: null },
+      { id: 309, name: "Эквилибриум", year: 2002, rating: { kp: 7.9, imdb: 7.3 }, ageRating: 16 },
+    ] }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("http://local/recommendations/meta?ids=301,309,301,bad"),
+      {
+        ALLOWED_ORIGIN: "http://127.0.0.1:5177",
+        __KEY_POOL_MANAGED: true,
+        __KEY_POOL_KEYS: [{
+          id: "pk-batch",
+          provider: "poiskkino",
+          label: "batch",
+          value: "secret-key",
+          scopes: { resolver: true, recommendations: false },
+        }],
+        __recordKeyAttempt: (event) => attempts.push(event),
+      },
+    );
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(upstream.length, 1, "the row is one upstream request");
+    const target = new URL(upstream[0].url);
+    assert.deepEqual(target.searchParams.getAll("id"), ["301", "309"]);
+    assert.equal(upstream[0].key, "secret-key");
+    assert.equal(body.movies.length, 2);
+    assert.equal(body.movies[0].ageRating, null, "missing age stays missing, not 0+");
+    assert.deepEqual(body.movies[0].rating, { kp: 8.5, imdb: 8.7 });
+    assert.equal(attempts[0].operation, "recommendations:batch-meta");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

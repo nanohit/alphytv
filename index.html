@@ -14,7 +14,7 @@
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <title>Alphy TV — каталог фильмов и сериалов.</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260720-keypool1">
+  <link rel="stylesheet" href="/styles.css?v=20260720-watch1">
 </head>
 <body>
   <div id="bookmarkBanner" class="bookmark-banner hidden">Добавьте сайт в закладки</div>
@@ -140,18 +140,16 @@
             <div class="placeholder"><div class="spinner"></div><span>Загрузка плеера…</span></div>
           </div>
           <div id="trackPanel" class="track-panel hidden"></div>
+          <section id="similarSection" class="similar-section hidden" aria-label="Похожее">
+            <div class="similar-head">
+              <h3>Похожее</h3>
+              <button id="similarToggle" class="similar-toggle" type="button" aria-expanded="true">Скрыть</button>
+            </div>
+            <div id="similarRow" class="similar-row"></div>
+          </section>
         </div>
         <aside id="metaPanel" class="meta-panel hidden"></aside>
       </div>
-      <!-- Deliberately outside .watch-layout: a full-width shelf below the player
-           reads as its own section rather than as an ad stapled to the title. -->
-      <section id="similarSection" class="similar-section hidden" aria-label="Похожее">
-        <div class="similar-head">
-          <h3>Похожее</h3>
-          <span class="similar-note">подобрано под ваши просмотры</span>
-        </div>
-        <div id="similarRow" class="similar-row"></div>
-      </section>
     </section>
 
     <div id="loading" class="loading hidden"><div class="spinner"></div><div>Загрузка…</div></div>
@@ -209,9 +207,9 @@
   </dialog>
 
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
-  <script src="/app.js?v=20260720-keypool1"></script>
-  <script src="/foryou.js?v=20260720-keypool1"></script>
-  <script src="/catalog.js?v=20260720-keypool1"></script>
-  <script src="/keypool.js?v=20260720-keypool1"></script>
+  <script src="/app.js?v=20260720-watch1"></script>
+  <script src="/foryou.js?v=20260720-watch1"></script>
+  <script src="/catalog.js?v=20260720-watch1"></script>
+  <script src="/keypool.js?v=20260720-watch1"></script>
 </body>
 </html>

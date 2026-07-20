@@ -12,8 +12,9 @@
   session is verified.
 - `/api/key-pool/runtime` returns enabled runtime entries only when Deno presents
   `ALPHY_KEY_POOL_TOKEN`.
-- Deno caches the registry for 60 seconds and keeps the last known good copy when
-  Vercel or Blob is temporarily unavailable.
+- Deno caches the registry for five minutes and keeps the last known good copy
+  when Vercel or Blob is temporarily unavailable. Admin saves request an
+  immediate reload, so this polling is only a recovery path.
 - `foryou.js` contains no API keys. Recommendation metadata and similars use the
   resolver's `/recommendations/*` endpoints.
 

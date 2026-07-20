@@ -366,6 +366,7 @@ header {
   transform: translateY(-1px);
 }
 .card:hover .card-remove { opacity: 1; }
+.card-remove:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 2px; }
 .card-remove:hover { background: #1b1b1b; border-color: #5b5b5b; color: #dedede; }
 .continue-card .card-remove { left: 5px; right: auto; }
 
@@ -745,7 +746,10 @@ body.admin-mode .meta-info { display: flex; }
 }
 .admin-entry:hover { color: #555; }
 
-.watch-layout { display: grid; grid-template-columns: minmax(0,1fr) 260px; gap: 20px; align-items: start; }
+.watch-layout {
+  display: grid; grid-template-columns: minmax(0, 2fr) minmax(360px, .95fr);
+  gap: 18px; align-items: start;
+}
 .watch-main { min-width: 0; }
 .player-host {
   width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 12px; overflow: hidden;
@@ -756,9 +760,10 @@ body.admin-mode .meta-info { display: flex; }
 
 .meta-panel {
   background: var(--panel); border: 1px solid var(--stroke); border-radius: 12px;
-  padding: 13px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px;
+  padding: 13px; display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 13px;
   align-content: start;
 }
+.meta-poster { width: 112px; align-self: start; }
 .meta-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .meta-poster { position: relative; overflow: hidden; border-radius: 9px; }
 .meta-panel img { width: 100%; display: block; border-radius: 9px; border: 1px solid var(--stroke); object-fit: cover; }
@@ -784,7 +789,7 @@ body.admin-mode .meta-info { display: flex; }
 .meta-ratings .rt span { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
 .meta-desc {
   font-size: 11px; line-height: 1.45; color: #cfcfcf;
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 9; overflow: hidden;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden;
 }
 .meta-desc.open { -webkit-line-clamp: unset; overflow: visible; }
 .meta-desc-toggle {
@@ -806,14 +811,20 @@ body.admin-mode .meta-info { display: flex; }
 }
 .meta-facts dd { margin: 0; font-size: 11px; line-height: 1.45; color: #cfcfcf; }
 
-/* ---------- «Похожее» shelf under the player ----------
-   A single free-scrolling row, deliberately NOT a `.curated-row`: the homepage
-   shelves are laid out by catalog.js (row splitting, arrows, custom scrollbar)
-   and this one has no such controller behind it. */
-.similar-section { margin-top: 32px; }
-.similar-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+/* ---------- «Похожее» shelf directly under the player ---------- */
+.similar-section { margin-top: 17px; }
+.similar-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
 .similar-head h3 { margin: 0; font-size: 16px; font-weight: 600; }
-.similar-note { font-size: 10px; color: var(--muted); }
+.similar-toggle {
+  min-height: 28px; padding: 0 8px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--muted-strong); cursor: pointer;
+  font: inherit; font-size: 10px;
+}
+.similar-toggle:hover,
+.similar-toggle:focus-visible { color: var(--accent); outline: 0; }
+.similar-section.collapsed { margin-top: 12px; }
+.similar-section.collapsed .similar-head { margin-bottom: 0; }
+.similar-section.collapsed .similar-row { display: none; }
 .similar-row {
   display: grid;
   grid-auto-flow: column;
@@ -831,6 +842,7 @@ body.admin-mode .meta-info { display: flex; }
 }
 .similar-row::-webkit-scrollbar { width: 0; height: 0; display: none; }
 .similar-row > .card { width: 100%; }
+.similar-row .card-remove { left: 7px; right: auto; }
 
 /* ---------- track / quality controls (Shaka) ---------- */
 .serial-panel {
@@ -888,7 +900,6 @@ body.admin-mode .meta-info { display: flex; }
   .meta-panel { grid-template-columns: 110px minmax(0, 1fr); column-gap: 14px; }
   .meta-poster { width: 110px; align-self: start; }
   .meta-panel img { width: 100%; }
-  .meta-desc { -webkit-line-clamp: 6; }
   .watch-head { align-items: flex-start; flex-wrap: wrap; }
   .watch-title { white-space: normal; }
   .watch-actions { margin-left: auto; }
@@ -1036,10 +1047,11 @@ body.admin-mode .meta-info { display: flex; }
   .meta-poster { width: 92px; }
   .meta-panel img { width: 100%; }
   .meta-facts .mf-row { grid-template-columns: 56px minmax(0, 1fr); }
-  .similar-section { margin-top: 24px; }
+  .similar-section { margin-top: 16px; }
   .similar-head h3 { font-size: 15px; }
   .similar-row { grid-auto-columns: var(--mobile-card-width); gap: 6px; }
   .similar-row > .card { width: var(--mobile-card-width); }
+  .similar-row .card-remove { opacity: .82; }
   .meta-poster .card-bookmark {
     right: 5px; width: 30px; height: 39px;
   }

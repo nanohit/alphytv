@@ -257,6 +257,42 @@ test("affinityIndex reads only cached similars and ignores the current title's o
   assert.equal(excluded.affinity.size, 0, "the title being watched does not vote for its own similars");
 });
 
+test("similar metadata enriches the whole row in one request and then stays local", async () => {
+  const now = Date.now();
+  const storage = new Map();
+  storage.set("alphy.foryou.sim.900", JSON.stringify({
+    v: ["10", "20", "30", "40"].map((id) => ({ id, ru: `Фильм ${id}`, poster: `https://p/${id}.jpg` })),
+    exp: now + 86400e3,
+  }));
+  const { api, sandbox } = await loadForYou(storage);
+  const calls = [];
+  sandbox.window.alphyBridge.resolverJson = async (path) => {
+    calls.push(path);
+    return {
+      movies: ["10", "20", "30", "40"].map((id, index) => ({
+        kpId: id,
+        year: 2000 + index,
+        isSeries: false,
+        movieLength: 100 + index,
+        rating: { kp: 7 + index / 10, imdb: 6 + index / 10 },
+        poster: `https://resolved/${id}.jpg`,
+      })),
+    };
+  };
+  api.setMode("on");
+
+  const initial = await api.similarRow("900");
+  assert.equal(initial[0].year, "", "similars paint before enrichment");
+  const enriched = await api.enrichSimilarRow("900");
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /^\/recommendations\/meta\?ids=/);
+  assert.equal(enriched[0].year, "2000");
+  assert.ok(enriched[0].rating.kp > 0);
+
+  await api.enrichSimilarRow("900");
+  assert.equal(calls.length, 1, "the second render is cache-only");
+});
+
 test("personNames pulls directors and cast out of the staff payload in order", async () => {
   const { api } = await loadForYou();
   const staff = [

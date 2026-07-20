@@ -30,7 +30,7 @@
 
   const MAX_SEEDS = 12;
   const MAX_SIM_FETCH_PER_RUN = 10;
-  const MAX_META_FETCH_PER_RUN = 8;
+  const MAX_META_BATCH_SIZE = 18;
   const MAX_LOOKUP_PER_RUN = 5;
   // The pool is ~500 calls/day per key of real capacity. The cap is the safety
   // rail, not the target: the pipeline is cache-first, so a normal day spends a
@@ -190,6 +190,7 @@
 
   function recommendationPath(path) {
     const url = new URL(path, "https://kinopoiskapiunofficial.invalid");
+    if (url.pathname.startsWith("/recommendations/")) return `${url.pathname}${url.search}`;
     if (url.pathname === "/api/v2.1/films/search-by-keyword") {
       return `/recommendations/search?q=${encodeURIComponent(url.searchParams.get("keyword") || "")}`;
     }
@@ -390,31 +391,48 @@
   function normalizeFilmMeta(film) {
     const year = Number(String(film?.year ?? "").match(/\d{4}/)?.[0]) || null;
     const rating = {};
-    if (Number.isFinite(Number(film?.ratingKinopoisk))) rating.kp = Number(film.ratingKinopoisk);
-    if (Number.isFinite(Number(film?.ratingImdb))) rating.imdb = Number(film.ratingImdb);
+    const kp = film?.rating?.kp ?? film?.ratingKinopoisk;
+    const imdb = film?.rating?.imdb ?? film?.ratingImdb;
+    if (Number.isFinite(Number(kp)) && Number(kp) > 0) rating.kp = Number(kp);
+    if (Number.isFinite(Number(imdb)) && Number(imdb) > 0) rating.imdb = Number(imdb);
     return {
       year: year ? String(year) : "",
-      isSeries: !!film?.serial || /SERIES|TV_SHOW|MINI/i.test(String(film?.type || "")),
-      movieLength: typeof film?.filmLength === "number" ? film.filmLength : null,
+      isSeries: film?.isSeries ?? (
+        !!film?.serial || /SERIES|TV_SHOW|MINI|tv-series|animated-series/i.test(String(film?.type || ""))
+      ),
+      movieLength: Number.isFinite(Number(film?.movieLength ?? film?.filmLength))
+        ? Number(film.movieLength ?? film.filmLength)
+        : null,
       rating,
-      poster: film?.posterUrl || film?.posterUrlPreview || "",
+      poster: film?.poster || film?.posterUrl || film?.posterUrlPreview || "",
     };
   }
 
-  async function fetchMeta(kpId) {
-    const own = lsGet(`${META_PREFIX}${kpId}`);
-    if (own) return own;
+  async function fetchMetaBatch(kpIds) {
+    const ids = [...new Set((Array.isArray(kpIds) ? kpIds : [])
+      .map(String).filter((id) => /^\d+$/.test(id)))].slice(0, MAX_META_BATCH_SIZE);
+    const result = new Map();
+    const missing = [];
+    for (const id of ids) {
+      const cached = lsGet(`${META_PREFIX}${id}`) || appMetaFor(id);
+      if (cached) result.set(id, cached);
+      else missing.push(id);
+    }
+    if (!missing.length) return result;
     try {
-      const film = await apiGet(`/api/v2.2/films/${encodeURIComponent(kpId)}`);
-      if (!film) return null;
-      const meta = normalizeFilmMeta(film);
-      lsSet(`${META_PREFIX}${kpId}`, meta, META_TTL);
-      return meta;
+      const data = await apiGet(`/recommendations/meta?ids=${encodeURIComponent(missing.join(","))}`);
+      for (const film of Array.isArray(data?.movies) ? data.movies : []) {
+        const id = String(film?.kpId || film?.id || "");
+        if (!/^\d+$/.test(id)) continue;
+        const meta = normalizeFilmMeta(film);
+        lsSet(`${META_PREFIX}${id}`, meta, META_TTL);
+        result.set(id, meta);
+      }
     } catch (error) {
       if (error.code === "budget") throw error;
-      log("meta failed", kpId, error.message);
-      return null;
+      log("meta batch failed", error.message);
     }
+    return result;
   }
 
   async function promisePool(jobs, size) {
@@ -565,15 +583,13 @@
       }
       publish(picked.map((candidate) => toCuratedItem(candidate, metaFor.get(candidate.id))));
 
-      // Then enrich the gaps (year/type/ratings) within budget and re-publish.
+      // Then enrich all gaps in ONE PoiskKino request and re-publish. The API
+      // accepts an id array, so this replaces the former per-card fanout.
       if (network) {
-        const gaps = picked.filter((candidate) => !metaFor.has(candidate.id)).slice(0, MAX_META_FETCH_PER_RUN);
+        const gaps = picked.filter((candidate) => !metaFor.has(candidate.id)).slice(0, MAX_META_BATCH_SIZE);
         if (gaps.length) {
-          const jobs = gaps.map((candidate) => async () => {
-            const meta = await fetchMeta(candidate.id).catch(() => null);
-            if (meta) metaFor.set(candidate.id, meta);
-          });
-          await promisePool(jobs, FETCH_CONCURRENCY);
+          const fetched = await fetchMetaBatch(gaps.map((candidate) => candidate.id)).catch(() => new Map());
+          for (const [id, meta] of fetched) metaFor.set(id, meta);
           publish(picked.map((candidate) => toCuratedItem(candidate, metaFor.get(candidate.id))));
         }
       }
@@ -681,10 +697,9 @@
   //     or costs one call that also improves the homepage row later;
   //   • the affinity signal reads only ALREADY-CACHED seed similars, never
   //     fetches;
-  //   • posters/titles come from the similars payload itself, so there is no
-  //     per-candidate metadata fan-out. Year/rating are filled in from caches the
-  //     app already has, and simply left out when unknown.
-  // A cold title costs exactly one request. Nothing here fans out.
+  //   • posters/titles come from the similars payload itself; year/rating paint
+  //     from caches first, then one optional PoiskKino id-array request fills the
+  //     entire row. A cold title costs at most two requests, never N cards.
 
   // Affinity = "how connected is this candidate to what the viewer already
   // likes", computed purely from cached seed→similars edges. Zero network.
@@ -754,6 +769,18 @@
       toCuratedItem(candidate, lsGet(`${META_PREFIX}${candidate.id}`) || appMetaFor(candidate.id)));
   }
 
+  async function enrichSimilarRow(kpId) {
+    const id = String(kpId || "");
+    if (!/^\d+$/.test(id) || await whenModeReady() !== "on") return similarRow(id, { network: false });
+    const base = lsGet(`${SIM_PREFIX}${id}`);
+    if (!Array.isArray(base) || !base.length) return [];
+    const picked = rankSimilars(base, id);
+    if (picked.length < SIMILAR_MIN_ROW) return [];
+    const meta = await fetchMetaBatch(picked.map((candidate) => candidate.id)).catch(() => new Map());
+    return picked.map((candidate) =>
+      toCuratedItem(candidate, meta.get(candidate.id) || lsGet(`${META_PREFIX}${candidate.id}`) || appMetaFor(candidate.id)));
+  }
+
   // --- public surface -----------------------------------------------------
 
   function setMode(mode) {
@@ -792,6 +819,7 @@
     hide,
     refresh: () => compute(),
     similarRow,
+    enrichSimilarRow,
     filmExtras,
     // Title -> kpId, verified by normalized title + year and cached for 30 days.
     // Curated zen:/ort: targets carry no Kinopoisk id, and without one there are
