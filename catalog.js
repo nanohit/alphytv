@@ -26,6 +26,8 @@
     queued: false,
     saveTimer: null,
     pendingItem: null,
+    metaItem: null,
+    bulkMeta: false,
     homeActive: !document.getElementById("homeView")?.classList.contains("hidden"),
     quickListItems: [],
   };
@@ -49,6 +51,9 @@
     quickNav: document.getElementById("quickListsNav"),
     picker: document.getElementById("listPickerDialog"),
     pickerOptions: document.getElementById("listPickerOptions"),
+    metaDialog: document.getElementById("itemMetaDialog"),
+    metaBody: document.getElementById("itemMetaBody"),
+    metaRefresh: document.getElementById("itemMetaRefresh"),
   };
 
   function uid() {
@@ -101,6 +106,21 @@
     return null;
   }
 
+  // Descriptive metadata is stored on the item itself, so a curated title opens
+  // with жанр/страна/возраст/режиссёр/актёры already known — no per-view API call.
+  // Absent fields are simply omitted so the published snapshot never grows empty
+  // arrays for the hundreds of items that have not been filled in yet.
+  function nameArray(value, limit) {
+    if (!Array.isArray(value)) return [];
+    const out = [];
+    for (const entry of value) {
+      const name = String(entry || "").trim();
+      if (name && !out.includes(name)) out.push(name);
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
   function normalizeItem(value) {
     const target = normalizeTarget(value?.target);
     const title = String(value?.title || "").trim();
@@ -109,7 +129,7 @@
     const rating = {};
     if (Number.isFinite(Number(value?.rating?.kp))) rating.kp = Number(value.rating.kp);
     if (Number.isFinite(Number(value?.rating?.imdb))) rating.imdb = Number(value.rating.imdb);
-    return {
+    const item = {
       id: String(value?.id || uid()),
       key: String(value?.key || JSON.stringify(target)),
       title,
@@ -124,6 +144,27 @@
       target,
       cachedAt: String(value?.cachedAt || new Date().toISOString()),
     };
+    const kpId = String(value?.kpId || "");
+    if (/^\d+$/.test(kpId)) item.kpId = kpId;
+    const age = Number(value?.ageRating);
+    if (Number.isFinite(age) && age >= 0) item.ageRating = age;
+    const mpaa = String(value?.ratingMpaa || "").trim();
+    if (mpaa) item.ratingMpaa = mpaa;
+    const genres = nameArray(value?.genres, 6);
+    if (genres.length) item.genres = genres;
+    const countries = nameArray(value?.countries, 4);
+    if (countries.length) item.countries = countries;
+    const directors = nameArray(value?.directors, 3);
+    if (directors.length) item.directors = directors;
+    const cast = nameArray(value?.cast, 8);
+    if (cast.length) item.cast = cast;
+    return item;
+  }
+
+  // "Does this item still need a metadata pass?" — drives both the per-card hint
+  // and which items a bulk fill actually touches.
+  function itemNeedsMeta(item) {
+    return !(item?.genres?.length) || !(item?.directors?.length);
   }
 
   function normalizeItemLabel(value) {
@@ -566,6 +607,41 @@
   // resolver, WITHOUT touching its target (player/links). Useful when an item was
   // added from newdeaf (cdnlbox cover, blocked in RU) or when search fell back to
   // the unofficial API (no IMDb). Only an exact-title match is applied.
+  // Copies the descriptive metadata from a resolveCardMeta result onto an item.
+  // Only non-empty values are written, so a partial answer can never erase a
+  // field that a previous, better answer already filled in.
+  function applyItemMetadata(item, meta) {
+    if (/^\d+$/.test(String(meta?.kpId || ""))) item.kpId = String(meta.kpId);
+    if (Number.isFinite(Number(meta?.ageRating))) item.ageRating = Number(meta.ageRating);
+    if (meta?.ratingMpaa) item.ratingMpaa = String(meta.ratingMpaa);
+    if (meta?.genres?.length) item.genres = nameArray(meta.genres, 6);
+    if (meta?.countries?.length) item.countries = nameArray(meta.countries, 4);
+    if (meta?.directors?.length) item.directors = nameArray(meta.directors, 3);
+    if (meta?.cast?.length) item.cast = nameArray(meta.cast, 8);
+    if (meta?.description && !item.description) item.description = String(meta.description);
+    if (Number.isFinite(Number(meta?.movieLength)) && !item.movieLength) {
+      item.movieLength = Number(meta.movieLength);
+    }
+  }
+
+  // Shared by the ⟳ button and the bulk fill. `coverToo: false` keeps an
+  // admin-chosen poster untouched while still refreshing the descriptive fields.
+  async function updateItemFromKinopoisk(item, { coverToo = true } = {}) {
+    const meta = await window.alphyBridge?.resolveCardMeta?.(item.title, item.year);
+    const rating = {};
+    if (Number.isFinite(Number(meta?.rating?.kp))) rating.kp = Number(meta.rating.kp);
+    if (Number.isFinite(Number(meta?.rating?.imdb))) rating.imdb = Number(meta.rating.imdb);
+    if (!meta?.ok) return { ok: false, rating };
+    if (coverToo && meta.poster) {
+      item.poster = meta.poster;
+      item.backdrop = "";
+      posterUrlCacheClear(item.id); // drop any stale RU onerror override
+    }
+    if (Object.keys(rating).length) item.rating = rating;
+    applyItemMetadata(item, meta);
+    return { ok: true, rating, meta };
+  }
+
   async function forceUpdateItem(listIndex, itemIndex, button) {
     if (!state.admin) return;
     const item = state.catalog.lists[listIndex]?.items?.[itemIndex];
@@ -573,27 +649,138 @@
     if (button) { button.disabled = true; button.textContent = "…"; }
     setStatus(`обновляю «${item.title}»…`, "saving");
     try {
-      const meta = await window.alphyBridge?.resolveCardMeta?.(item.title, item.year);
-      const rating = {};
-      if (Number.isFinite(Number(meta?.rating?.kp))) rating.kp = Number(meta.rating.kp);
-      if (Number.isFinite(Number(meta?.rating?.imdb))) rating.imdb = Number(meta.rating.imdb);
-      if (!meta?.ok || (!meta.poster && !Object.keys(rating).length)) {
+      const { ok, rating, meta } = await updateItemFromKinopoisk(item);
+      if (!ok) {
         setStatus(`не найдено на Кинопоиске: «${item.title}»`, "error");
         if (button) { button.disabled = false; button.textContent = "⟳"; }
         return;
       }
-      if (meta.poster) {
-        item.poster = meta.poster;
-        item.backdrop = "";
-        posterUrlCacheClear(item.id); // drop any stale RU onerror override
-      }
-      if (Object.keys(rating).length) item.rating = rating;
       markDirty(); // queues the autosave PUT; target/key/links untouched
       render();    // rebuilds the card (this button element is replaced)
       setStatus(`обновлено: «${meta.name || item.title}» · IMDb ${rating.imdb ?? "—"} · КП ${rating.kp ?? "—"}`, "ok");
     } catch {
       setStatus(`ошибка обновления: «${item.title}»`, "error");
       if (button) { button.disabled = false; button.textContent = "⟳"; }
+    }
+  }
+
+  // Bulk metadata fill for one list. Only touches items that are actually missing
+  // metadata and stops at a hard cap: the resolver's Kinopoisk keys are ~200
+  // calls/day each, so a 300-title list must not be a single click away from
+  // spending the whole budget. Re-running it continues where it stopped, because
+  // filled items are skipped.
+  const BULK_META_LIMIT = 40;
+
+  async function fillListMetadata(listIndex, button) {
+    if (!state.admin || state.bulkMeta) return;
+    const list = state.catalog.lists[listIndex];
+    if (!list) return;
+    const pending = list.items.filter(itemNeedsMeta);
+    if (!pending.length) {
+      setStatus(`в «${list.title}» метаданные уже заполнены`, "ok");
+      return;
+    }
+    const batch = pending.slice(0, BULK_META_LIMIT);
+    state.bulkMeta = true;
+    if (button) button.disabled = true;
+    let filled = 0;
+    let missed = 0;
+    try {
+      for (const [index, item] of batch.entries()) {
+        setStatus(`метаданные: ${index + 1}/${batch.length} — «${item.title}»…`, "saving");
+        try {
+          const { ok } = await updateItemFromKinopoisk(item, { coverToo: false });
+          if (ok) filled += 1;
+          else missed += 1;
+        } catch {
+          missed += 1;
+        }
+      }
+      if (filled) markDirty();
+      const left = pending.length - batch.length;
+      setStatus(
+        `метаданные: заполнено ${filled}, не найдено ${missed}` +
+        (left ? `, осталось ${left} — запустите ещё раз` : ""),
+        missed && !filled ? "error" : "ok",
+      );
+    } finally {
+      state.bulkMeta = false;
+      render();
+    }
+  }
+
+  // --- per-item metadata inspector ---------------------------------------
+  // A dialog rather than an inline expander: curated shelves are horizontal
+  // scrollers, and growing a card in place would shove the whole row around.
+
+  function metaRow(label, value) {
+    const row = document.createElement("div");
+    row.className = "im-row";
+    const dt = document.createElement("span");
+    dt.className = "im-label";
+    dt.textContent = label;
+    const dd = document.createElement("span");
+    dd.className = "im-value";
+    dd.textContent = value || "—";
+    if (!value) dd.classList.add("im-missing");
+    row.append(dt, dd);
+    return row;
+  }
+
+  function renderItemMeta(item) {
+    if (!el.metaBody) return;
+    const body = document.createDocumentFragment();
+    const head = document.createElement("div");
+    head.className = "im-title";
+    head.textContent = [item.title, item.year].filter(Boolean).join(" · ");
+    body.appendChild(head);
+    body.appendChild(metaRow("Тип", item.isSeries ? "сериал" : "фильм"));
+    body.appendChild(metaRow("Возраст", item.ageRating != null ? `${item.ageRating}+` : ""));
+    body.appendChild(metaRow("MPAA", (item.ratingMpaa || "").toUpperCase()));
+    body.appendChild(metaRow("Жанр", (item.genres || []).join(", ")));
+    body.appendChild(metaRow("Страна", (item.countries || []).join(", ")));
+    body.appendChild(metaRow("Режиссёр", (item.directors || []).join(", ")));
+    body.appendChild(metaRow("В ролях", (item.cast || []).join(", ")));
+    body.appendChild(metaRow("Хронометраж", item.movieLength ? durationLabel(item) : ""));
+    body.appendChild(metaRow("КП / IMDb", `${ratingLabel(item.rating?.kp)} / ${ratingLabel(item.rating?.imdb)}`));
+    body.appendChild(metaRow("kpId", item.kpId || ""));
+    body.appendChild(metaRow("Плеер", item.target?.kind || ""));
+    el.metaBody.replaceChildren(body);
+  }
+
+  function openItemMeta(listIndex, itemIndex) {
+    const item = state.catalog.lists[listIndex]?.items?.[itemIndex];
+    if (!item) return;
+    state.metaItem = { listIndex, itemIndex };
+    renderItemMeta(item);
+    if (el.metaRefresh) {
+      el.metaRefresh.disabled = false;
+      el.metaRefresh.textContent = "Обновить с Кинопоиска";
+    }
+    showDialog(el.metaDialog);
+  }
+
+  async function refreshOpenItemMeta() {
+    const ref = state.metaItem;
+    const item = ref && state.catalog.lists[ref.listIndex]?.items?.[ref.itemIndex];
+    if (!item || !el.metaRefresh) return;
+    el.metaRefresh.disabled = true;
+    el.metaRefresh.textContent = "…";
+    try {
+      const { ok } = await updateItemFromKinopoisk(item, { coverToo: false });
+      renderItemMeta(item);
+      if (ok) {
+        markDirty();
+        render();
+        setStatus(`метаданные обновлены: «${item.title}»`, "ok");
+      } else {
+        setStatus(`не найдено на Кинопоиске: «${item.title}»`, "error");
+      }
+    } catch {
+      setStatus(`ошибка метаданных: «${item.title}»`, "error");
+    } finally {
+      el.metaRefresh.disabled = false;
+      el.metaRefresh.textContent = "Обновить с Кинопоиска";
     }
   }
 
@@ -708,6 +895,22 @@
     });
     controls.append(left, right, select, refresh, remove);
     media.appendChild(controls);
+
+    // Corner badge rather than a sixth column in the strip below: at ~130px card
+    // width that grid is already full, and the move-to-list select is the part
+    // that would lose the space.
+    const details = document.createElement("button");
+    details.type = "button";
+    details.className = "meta-info";
+    details.textContent = "i";
+    details.title = "Метаданные: жанр, страна, возраст, режиссёр, актёры";
+    if (itemNeedsMeta(item)) details.classList.add("needs-meta");
+    details.addEventListener("keydown", (event) => event.stopPropagation());
+    details.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openItemMeta(listIndex, itemIndex);
+    });
+    media.appendChild(details);
   }
 
   function moveList(index, direction) {
@@ -757,6 +960,22 @@
         button.addEventListener("click", action);
         controls.appendChild(button);
       }
+      // Bulk metadata fill. Labelled with the outstanding count so a long list
+      // shows at a glance how much is still missing.
+      const missing = list.items.filter(itemNeedsMeta).length;
+      const fill = document.createElement("button");
+      fill.type = "button";
+      fill.className = "meta-fill";
+      fill.textContent = missing ? `меta ${missing}` : "меta ✓";
+      fill.title = missing
+        ? `Заполнить метаданные (жанр, страна, возраст, режиссёр, актёры) — до ${BULK_META_LIMIT} за раз`
+        : "Метаданные заполнены";
+      fill.disabled = !missing || state.bulkMeta;
+      fill.addEventListener("click", (event) => {
+        event.stopPropagation();
+        fillListMetadata(index, fill);
+      });
+      controls.appendChild(fill);
       header.appendChild(controls);
     } else {
       const title = document.createElement("h3");
@@ -1168,6 +1387,8 @@
     for (const button of document.querySelectorAll("[data-close-dialog]")) {
       button.addEventListener("click", () => closeDialog(button.closest("dialog")));
     }
+    el.metaRefresh?.addEventListener("click", refreshOpenItemMeta);
+    el.metaDialog?.addEventListener("close", () => { state.metaItem = null; });
     el.entry?.addEventListener("click", () => {
       if (state.admin) {
         logout();

@@ -664,6 +664,38 @@ body.admin-mode .card-add-list { display: flex; }
 .admin-item-controls select { padding: 0 3px; }
 .admin-mode .curated-card .poster { filter: brightness(.7); }
 
+/* Metadata inspector badge. Amber while the item still has no genres/credits,
+   so an unfilled title is visible without opening anything. */
+.meta-info {
+  position: absolute; top: 5px; left: 31px; width: 21px; height: 21px; border-radius: 50%;
+  background: rgba(18,18,18,.86); border: 1px solid #454545; color: #cfcfcf; cursor: pointer;
+  display: none; align-items: center; justify-content: center; line-height: 1; z-index: 5; padding: 0;
+  font: 600 12px/1 Georgia, serif;
+  transition: background .15s, color .15s, border-color .15s;
+}
+body.admin-mode .meta-info { display: flex; }
+.meta-info:hover { background: #1b1b1b; border-color: var(--accent); color: #fff; }
+.meta-info.needs-meta { color: #d8a84a; border-color: #6b5424; }
+.meta-fill {
+  width: auto !important; min-width: 58px; padding: 0 8px !important;
+  font-size: 11px !important; white-space: nowrap;
+}
+
+.item-meta-body { display: flex; flex-direction: column; gap: 7px; overflow-y: auto; }
+.item-meta-dialog .im-title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+.item-meta-dialog .im-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.item-meta-dialog .im-label {
+  font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+}
+.item-meta-dialog .im-value { font-size: 12px; line-height: 1.4; color: #d6d6d6; word-break: break-word; }
+.item-meta-dialog .im-value.im-missing { color: #6a6a6a; }
+.item-meta-actions button {
+  width: 100%; min-height: 44px; border: 1px solid var(--stroke-strong); border-radius: 11px;
+  background: #151515; color: #fff; cursor: pointer; font: inherit; font-size: 13px;
+}
+.item-meta-actions button:hover { border-color: var(--accent); }
+.item-meta-actions button:disabled { opacity: .55; cursor: wait; }
+
 /* ---------- login / list picker ---------- */
 .compact-dialog {
   width: min(420px, calc(100vw - 28px)); max-height: min(620px, calc(100dvh - 28px));
@@ -724,8 +756,10 @@ body.admin-mode .card-add-list { display: flex; }
 
 .meta-panel {
   background: var(--panel); border: 1px solid var(--stroke); border-radius: 12px;
-  padding: 13px; display: flex; flex-direction: column; gap: 10px;
+  padding: 13px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px;
+  align-content: start;
 }
+.meta-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .meta-poster { position: relative; overflow: hidden; border-radius: 9px; }
 .meta-panel img { width: 100%; display: block; border-radius: 9px; border: 1px solid var(--stroke); object-fit: cover; }
 .meta-poster .card-bookmark {
@@ -733,13 +767,70 @@ body.admin-mode .card-add-list { display: flex; }
   opacity: 1;
 }
 .meta-poster .card-bookmark svg { width: 39px; height: 52px; stroke-width: 1.8; }
-.meta-panel .mp-title { font-size: 14px; font-weight: 600; }
-.meta-panel .mp-sub { font-size: 10px; color: var(--muted-strong); }
+.meta-headline { display: flex; flex-direction: column; gap: 4px; }
+.meta-panel .mp-title { font-size: 14px; font-weight: 600; line-height: 1.25; }
+.meta-panel .mp-sub {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  font-size: 10px; color: var(--muted-strong);
+}
+.meta-panel .mp-age {
+  border: 1px solid var(--stroke-strong); border-radius: 4px;
+  padding: 1px 4px; font-size: 9px; font-weight: 600; letter-spacing: .04em;
+  color: var(--muted-strong); white-space: nowrap;
+}
 .meta-ratings { display: flex; gap: 16px; }
 .meta-ratings .rt { display: flex; flex-direction: column; gap: 2px; }
 .meta-ratings .rt b { font-size: 18px; color: var(--accent); }
 .meta-ratings .rt span { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
-.meta-desc { font-size: 11px; line-height: 1.45; color: #cfcfcf; max-height: 185px; overflow: auto; }
+.meta-desc {
+  font-size: 11px; line-height: 1.45; color: #cfcfcf;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 9; overflow: hidden;
+}
+.meta-desc.open { -webkit-line-clamp: unset; overflow: visible; }
+.meta-desc-toggle {
+  align-self: flex-start; margin-top: -6px; padding: 0; border: 0; background: none;
+  color: var(--muted-strong); cursor: pointer; font: inherit; font-size: 10px;
+}
+.meta-desc-toggle:hover { color: var(--accent); }
+
+/* Жанр / страна / режиссёр / в ролях. A label column keeps the rows scannable
+   at a glance; values wrap freely because casts are long. */
+.meta-facts {
+  display: flex; flex-direction: column; gap: 6px; margin: 0;
+  padding-top: 11px; border-top: 1px solid var(--stroke);
+}
+.meta-facts .mf-row { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.meta-facts dt {
+  font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); line-height: 1.5;
+}
+.meta-facts dd { margin: 0; font-size: 11px; line-height: 1.45; color: #cfcfcf; }
+
+/* ---------- «Похожее» shelf under the player ----------
+   A single free-scrolling row, deliberately NOT a `.curated-row`: the homepage
+   shelves are laid out by catalog.js (row splitting, arrows, custom scrollbar)
+   and this one has no such controller behind it. */
+.similar-section { margin-top: 32px; }
+.similar-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.similar-head h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.similar-note { font-size: 10px; color: var(--muted); }
+.similar-row {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: max-content;
+  grid-auto-columns: clamp(117px, 11.9vw, 138px);
+  justify-content: start;
+  align-content: start;
+  gap: 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 7px 5px 12px;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.similar-row::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.similar-row > .card { width: 100%; }
 
 /* ---------- track / quality controls (Shaka) ---------- */
 .serial-panel {
@@ -792,9 +883,12 @@ body.admin-mode .card-add-list { display: flex; }
   .brand { min-width: 100px; display: flex; justify-content: flex-start; }
   .logo-image { height: 44px; max-width: 110px; }
   .watch-layout { grid-template-columns: 1fr; }
-  .meta-panel { flex-direction: row; flex-wrap: wrap; }
-  .meta-poster { width: 110px; flex: none; }
+  /* Below the player the panel is wide rather than tall, so the poster moves
+     beside the text instead of on top of it. */
+  .meta-panel { grid-template-columns: 110px minmax(0, 1fr); column-gap: 14px; }
+  .meta-poster { width: 110px; align-self: start; }
   .meta-panel img { width: 100%; }
+  .meta-desc { -webkit-line-clamp: 6; }
   .watch-head { align-items: flex-start; flex-wrap: wrap; }
   .watch-title { white-space: normal; }
   .watch-actions { margin-left: auto; }
@@ -938,9 +1032,14 @@ body.admin-mode .card-add-list { display: flex; }
   .add-list-btn { padding: 9px 12px; font-size: 12px; }
   .track-group { gap: 7px; }
   .track-group > strong { width: 100%; min-width: 0; }
-  .meta-panel { display: grid; grid-template-columns: 92px minmax(0,1fr); }
-  .meta-poster { width: 92px; grid-row: span 4; }
+  .meta-panel { grid-template-columns: 92px minmax(0,1fr); column-gap: 11px; }
+  .meta-poster { width: 92px; }
   .meta-panel img { width: 100%; }
+  .meta-facts .mf-row { grid-template-columns: 56px minmax(0, 1fr); }
+  .similar-section { margin-top: 24px; }
+  .similar-head h3 { font-size: 15px; }
+  .similar-row { grid-auto-columns: var(--mobile-card-width); gap: 6px; }
+  .similar-row > .card { width: var(--mobile-card-width); }
   .meta-poster .card-bookmark {
     right: 5px; width: 30px; height: 39px;
   }

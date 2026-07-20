@@ -11,6 +11,11 @@
   // user re-opening a title hits neither Deno nor newdeaf again.
   // =====================================================================
 
+  // Keep in sync with the <title> in index.html — that one covers the first paint
+  // and anything that reads the page without running JS; this one covers every
+  // client-side route change afterwards.
+  const SITE_TITLE = "Alphy TV — каталог фильмов и сериалов.";
+
   const STORE_RESOLVER = "alphy.resolverBaseUrl";
   const STORE_BOOKMARKS = "alphy.bookmarks";
   const STORE_HISTORY = "alphy.history";
@@ -27,7 +32,18 @@
   const COLLAPS_PREVIEW_COOLDOWN_MS = 20 * 60e3;
   const COLLAPS_FAST_PATH_TIMEOUT_MS = 1400;
   const ZENITH_BROWSER_FAST_WINDOW_MS = 1400;
-  const ZENITH_PARSED_CACHE_MS = 90e3;
+  // The resolver itself hands the SAME payload to every client for a full hour
+  // (ZENITH_FRESH_MS in resolver-deno/main.js) and can serve it stale for a day,
+  // so a 20-minute client copy is strictly more conservative than what the server
+  // already guarantees — and it turns a reopened title into zero network before
+  // Shaka. An expired signature still cannot strand playback: a load failure
+  // re-resolves with forceWorker.
+  const ZENITH_PARSED_CACHE_MS = 20 * 60e3;
+  // Whether THIS browser can reach api.zenithjs.ws directly is a property of the
+  // network, not of the tab. Remembering it only in sessionStorage made the first
+  // click of every new session burn the full fast window on a fetch that was
+  // already known to fail.
+  const ZENITH_DIRECT_BLOCK_MS = 12 * 3600e3;
   const COLLAPS_REFRESH_SEC = 240;
   const COLLAPS_QUALITY_FIELDS = [
     ["mpeg4kUrl", "4K", 2160],
@@ -49,7 +65,9 @@
     clpsmiss: 60 * 60e3,
     clpsvideo: 90e3,
     zona: 30 * 24 * 3600e3,
+    zenith: 20 * 60e3,
     meta: 7 * 24 * 3600e3,
+    credits: 30 * 24 * 3600e3,
     enriched: 30 * 24 * 3600e3,
     subtitles: 24 * 3600e3,
   };
@@ -101,6 +119,8 @@
     serialPanel: document.getElementById("serialPanel"),
     trackPanel: document.getElementById("trackPanel"),
     metaPanel: document.getElementById("metaPanel"),
+    similarSection: document.getElementById("similarSection"),
+    similarRow: document.getElementById("similarRow"),
     loading: document.getElementById("loading"),
     error: document.getElementById("error"),
   };
@@ -162,9 +182,30 @@
   const embedTextCache = new Map();
   const embedTextInflight = new Map();
   const zenithParsedCache = new Map();
+  const zenithParsedInflight = new Map();
   const externalScriptPromises = new Map();
   const preparedTargets = new Set();
-  let speculativeIntentBudget = 4;
+  // Hover prefetch budget. This used to be a plain countdown that, once spent,
+  // disabled hover warming for the REST OF THE SESSION — four hovers on the
+  // homepage and every later click paid full resolve latency again. It is now a
+  // token bucket: a burst of hovers is still capped, but browsing for a while
+  // earns the budget back.
+  const SPECULATIVE_BUDGET_MAX = 6;
+  const SPECULATIVE_REFILL_MS = 15e3;
+  let speculativeIntentBudget = SPECULATIVE_BUDGET_MAX;
+  let speculativeRefillAt = Date.now();
+
+  function claimSpeculativeIntent() {
+    const now = Date.now();
+    const earned = Math.floor((now - speculativeRefillAt) / SPECULATIVE_REFILL_MS);
+    if (earned > 0) {
+      speculativeIntentBudget = Math.min(SPECULATIVE_BUDGET_MAX, speculativeIntentBudget + earned);
+      speculativeRefillAt = now;
+    }
+    if (speculativeIntentBudget <= 0) return false;
+    speculativeIntentBudget -= 1;
+    return true;
+  }
 
   // =====================================================================
   // localStorage: TTL cache + bookmarks + history
@@ -343,7 +384,7 @@
   async function showSoapBrowser() {
     setView("soap");
     warmSoapConnections();
-    document.title = "soap — alphy";
+    document.title = `soap — ${SITE_TITLE}`;
     if (el.soapFilter) el.soapFilter.value = "";
     if (state.soapFourKOnly == null) state.soapFourKOnly = true;
     await loadSoapCatalog();
@@ -660,6 +701,32 @@
     });
     media.appendChild(button);
     return button;
+  }
+
+  // =====================================================================
+  // Autoplay policy
+  //
+  // Opening a title must not start sound on its own. Our own players therefore
+  // mount PAUSED with the stream already buffering (preload="auto"), so the first
+  // press of play is instant but it is the viewer's press. Third-party embeds
+  // (Ortified / Zenith srcdoc iframes) run their own player and cannot be told
+  // this from here.
+  //
+  // Playback that RESUMES after a quality/episode/voice switch is a different
+  // thing: it restores a state the viewer already chose, so those call sites keep
+  // their `wasPlaying`-guarded play() and do not go through here.
+  // =====================================================================
+  const AUTOPLAY_ON_OPEN = false;
+
+  function mountPaused(video) {
+    video.autoplay = AUTOPLAY_ON_OPEN;
+    video.preload = "auto";
+    return video;
+  }
+
+  function startPlaybackIfAllowed(video) {
+    if (!AUTOPLAY_ON_OPEN || !video) return;
+    video.play().catch(() => { /* user gesture may be required */ });
   }
 
   function loadExternalScript(name, src, ready) {
@@ -1200,11 +1267,23 @@
     window.dispatchEvent(new CustomEvent("alphy:view", { detail: { view: name } }));
   }
 
+  // Shaka is ~400KB from jsdelivr and is on the critical path of essentially every
+  // play. Fetching it while the homepage sits idle moves that download out of the
+  // click and into dead time; afterwards it is an HTTP-cache hit forever. Skipped
+  // on metered/slow links, where the spend would not be repaid.
+  function preloadPlayerRuntime() {
+    const connection = navigator.connection || {};
+    if (connection.saveData) return;
+    if (/^(slow-)?2g$/.test(String(connection.effectiveType || ""))) return;
+    scheduleIdle(() => { ensureShaka().catch(() => {}); }, 4000);
+  }
+
   function showHome() {
     setView("home");
     warmNewdeafConnections();
     warmCollapsConnections();
-    document.title = "alphy";
+    preloadPlayerRuntime();
+    document.title = SITE_TITLE;
     el.searchInput.value = "";
     const hist = loadList(STORE_HISTORY);
     renderContinueHeader(hist.length);
@@ -1217,7 +1296,7 @@
 
   function showBookmarks() {
     setView("bookmarks");
-    document.title = "Закладки — alphy";
+    document.title = `Закладки — ${SITE_TITLE}`;
     el.searchInput.value = "";
     const entries = loadList(STORE_BOOKMARKS);
     el.bookmarksGrid.replaceChildren();
@@ -1402,7 +1481,7 @@
     setView("search");
     warmNewdeafConnections();
     warmCollapsConnections();
-    document.title = `${query} — alphy`;
+    document.title = `${query} — ${SITE_TITLE}`;
     el.searchInput.value = query;
     el.resultsTitle.textContent = "Поиск…";
     el.resultsGrid.replaceChildren();
@@ -1776,6 +1855,8 @@
     el.metaPanel.classList.add("hidden");
     el.serialPanel.classList.add("hidden");
     el.trackPanel.classList.add("hidden");
+    watchExtrasKey = "";
+    hideSimilarRow();
     // Show the loading state immediately so the previous title's player is never
     // left on screen while the new one resolves (or fails to resolve).
     showPlayerLoading();
@@ -1924,7 +2005,7 @@
     const video = document.createElement("video");
     video.controls = true;
     video.playsInline = true;
-    video.autoplay = true;
+    mountPaused(video);
     video.crossOrigin = "anonymous";
     video.playbackRate = state.playbackRate;
     if (isStale(token)) return;
@@ -1946,7 +2027,7 @@
       video.addEventListener("pause", snap);
       video.addEventListener("seeked", snap);
       setTimeout(snap, 2200);
-      video.play().catch(() => { /* gesture may be required */ });
+      startPlaybackIfAllowed(video);
     };
 
     const nativeHls = !!video.canPlayType("application/vnd.apple.mpegurl");
@@ -2288,7 +2369,7 @@
       active.addEventListener("canplay", done);
       active.src = url;
       active.load();
-      active.play().catch(() => { /* user gesture may be required */ });
+      startPlaybackIfAllowed(active);
       setTimeout(done, 2500);
     });
     bindCollapsActive();
@@ -2299,8 +2380,7 @@
     const video = document.createElement("video");
     video.controls = true;
     video.playsInline = true;
-    video.autoplay = true;
-    video.preload = "auto";
+    mountPaused(video);
     video.playbackRate = state.playbackRate;
     return video;
   }
@@ -3197,8 +3277,7 @@
     const video = document.createElement("video");
     video.controls = true;
     video.playsInline = true;
-    video.autoplay = true;
-    video.preload = "auto";
+    mountPaused(video);
     video.playbackRate = state.playbackRate;
     // Deliberately NO crossOrigin: the Voidboost MP4 host sends no CORS headers,
     // and native <video> playback of a cross-origin source does not need them.
@@ -3230,7 +3309,7 @@
       video.addEventListener("seeked", snap);
       setTimeout(snap, 2200);
       startTracking(histKey, target);
-      video.play().catch(() => { /* user gesture may be required */ });
+      startPlaybackIfAllowed(video);
     };
     video.addEventListener("canplay", onReady, { once: true });
     video.addEventListener("error", () => {
@@ -3416,10 +3495,22 @@
     }
   }
 
+  // Descriptive list fields (жанры, страны, режиссёры, актёры). An empty array is
+  // truthy, so a plain {...right, ...left} spread would let an empty left-hand
+  // list mask a populated right-hand one — the exact case where a partial cached
+  // entry would wipe out freshly fetched credits.
+  const META_LIST_FIELDS = ["genres", "countries", "directors", "cast"];
+
+  function pickList(left, right, field) {
+    const a = Array.isArray(left?.[field]) ? left[field] : [];
+    const b = Array.isArray(right?.[field]) ? right[field] : [];
+    return a.length ? a : b;
+  }
+
   function mergeMetadata(base, enriched) {
     const left = base && typeof base === "object" ? base : {};
     const right = enriched && typeof enriched === "object" ? enriched : {};
-    return {
+    const merged = {
       ...right,
       ...left,
       title: left.title || movieTitle(left) || right.title || movieTitle(right) || "",
@@ -3429,11 +3520,15 @@
       description: left.description || left.shortDescription || right.description || right.shortDescription || "",
       isSeries: left.isSeries ?? right.isSeries ?? false,
       movieLength: left.movieLength || right.movieLength || null,
+      ageRating: left.ageRating ?? right.ageRating ?? null,
+      ratingMpaa: left.ratingMpaa || right.ratingMpaa || null,
       rating: {
         ...(right.rating || {}),
         ...(left.rating || {}),
       },
     };
+    for (const field of META_LIST_FIELDS) merged[field] = pickList(left, right, field);
+    return merged;
   }
 
   async function enrichNewdeafMetadata(meta, pageUrl, token) {
@@ -3463,17 +3558,33 @@
 
   function setWatchHead(title, target) {
     el.watchTitle.textContent = title;
-    document.title = `${title} — alphy`;
+    document.title = `${title} — ${SITE_TITLE}`;
     updateBookmarkBtn(target);
   }
 
+  // MPAA is stored as a bare code ("r", "pg13"); Kinopoisk's own age limit is the
+  // number Russian viewers actually recognise, so it leads and MPAA follows.
+  function ageBadge(meta) {
+    const age = Number(meta?.ageRating);
+    if (Number.isFinite(age) && age >= 0) return `${age}+`;
+    const mpaa = String(meta?.ratingMpaa || "").trim();
+    return mpaa ? mpaa.toUpperCase().replace(/^NC17$/, "NC-17").replace(/^PG13$/, "PG-13") : "";
+  }
+
+  function metaFactRow(label, value) {
+    if (!value) return "";
+    return `<div class="mf-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`;
+  }
+
   function renderMeta(meta, target) {
-    if (!meta) { el.metaPanel.classList.add("hidden"); el.metaPanel.replaceChildren(); return; }
+    if (!meta) {
+      el.metaPanel.classList.add("hidden");
+      el.metaPanel.replaceChildren();
+      return;
+    }
     const title = movieTitle(meta) || target.title || "";
     const year = meta.year || target.year || "";
     const poster = meta.poster || target.poster || "";
-    const kp = meta.rating?.kp;
-    const imdb = meta.rating?.imdb;
     const desc = meta.description || meta.shortDescription || "";
     state.currentMeta = mergeMetadata(state.currentMeta || {}, {
       ...meta,
@@ -3483,32 +3594,150 @@
       description: desc,
       isSeries: meta.isSeries ?? target?.isSeries,
     });
-    if (state.currentMeta?.kpId && target) attachHistoryKpId(keyFor(target), state.currentMeta.kpId);
-    const sub = [year, meta.movieLength ? `${meta.movieLength} мин` : ""].filter(Boolean).join(" · ");
-    let html = "";
-    if (poster) html += `<div class="meta-poster"><img src="${escapeAttr(poster)}" alt=""></div>`;
-    html += `<div class="mp-title">${escapeHtml(title)}</div>`;
-    if (sub) html += `<div class="mp-sub">${escapeHtml(sub)}</div>`;
+    // Render from the MERGED view, not the incoming fragment: a later partial
+    // update (say a bare title from the resolver) must not blank out credits that
+    // an earlier, richer payload already delivered.
+    const view = state.currentMeta;
+    if (view?.kpId && target) attachHistoryKpId(keyFor(target), view.kpId);
+
+    const kp = view.rating?.kp;
+    const imdb = view.rating?.imdb;
+    const isSeries = view.isSeries ?? target?.isSeries ?? false;
+    const age = ageBadge(view);
+    const sub = [
+      year,
+      isSeries ? "сериал" : "фильм",
+      view.movieLength ? formatDuration(view.movieLength, isSeries) : "",
+    ].filter(Boolean).join(" · ");
+
+    // Two children only — poster and body. Narrow layouts put them side by side,
+    // and a fixed pair survives the fact that ratings/description/credits are each
+    // individually optional (a grid row-span over a variable number of implicit
+    // rows does not, which is how the two columns used to overlap on phones).
+    let body = `<div class="meta-headline">`;
+    body += `<div class="mp-title">${escapeHtml(title)}</div>`;
+    body += `<div class="mp-sub">${escapeHtml(sub)}${age ? `<span class="mp-age">${escapeHtml(age)}</span>` : ""}</div>`;
+    body += `</div>`;
     if (kp || imdb) {
-      html += `<div class="meta-ratings">`;
-      if (kp) html += `<div class="rt"><b>${escapeHtml(Number(kp).toFixed(1))}</b><span>Кинопоиск</span></div>`;
-      if (imdb) html += `<div class="rt"><b>${escapeHtml(Number(imdb).toFixed(1))}</b><span>IMDb</span></div>`;
-      html += `</div>`;
+      body += `<div class="meta-ratings">`;
+      if (kp) body += `<div class="rt"><b>${escapeHtml(Number(kp).toFixed(1))}</b><span>Кинопоиск</span></div>`;
+      if (imdb) body += `<div class="rt"><b>${escapeHtml(Number(imdb).toFixed(1))}</b><span>IMDb</span></div>`;
+      body += `</div>`;
     }
-    if (desc) html += `<div class="meta-desc">${escapeHtml(desc)}</div>`;
-    el.metaPanel.innerHTML = html;
+    if (desc) {
+      body += `<div class="meta-desc">${escapeHtml(desc)}</div>`;
+      body += `<button class="meta-desc-toggle hidden" type="button">ещё</button>`;
+    }
+
+    const facts =
+      metaFactRow("Жанр", (view.genres || []).slice(0, 3).join(", ")) +
+      metaFactRow("Страна", (view.countries || []).slice(0, 2).join(", ")) +
+      metaFactRow(
+        (view.directors || []).length > 1 ? "Режиссёры" : "Режиссёр",
+        (view.directors || []).slice(0, 2).join(", "),
+      ) +
+      metaFactRow("В ролях", (view.cast || []).slice(0, 5).join(", "));
+    if (facts) body += `<dl class="meta-facts">${facts}</dl>`;
+
+    const posterHtml = poster
+      ? `<div class="meta-poster"><img src="${escapeAttr(poster)}" alt=""></div>`
+      : "";
+    el.metaPanel.innerHTML = `${posterHtml}<div class="meta-body">${body}</div>`;
     const posterHost = el.metaPanel.querySelector(".meta-poster");
     if (posterHost) {
       addCardBookmark(posterHost, target, {
         title,
         year,
         poster,
-        rating: meta.rating || {},
-        movieLength: meta.movieLength || null,
-        isSeries: meta.isSeries ?? target?.isSeries ?? false,
+        rating: view.rating || {},
+        movieLength: view.movieLength || null,
+        isSeries,
+      });
+    }
+    // The synopsis is clamped rather than scrolled: a scroll region inside a
+    // sidebar hides that there is more text and clips the last line mid-height.
+    // The toggle only appears when the text is actually longer than the clamp.
+    const descNode = el.metaPanel.querySelector(".meta-desc");
+    const toggle = el.metaPanel.querySelector(".meta-desc-toggle");
+    if (descNode && toggle && descNode.scrollHeight > descNode.clientHeight + 2) {
+      toggle.classList.remove("hidden");
+      toggle.addEventListener("click", () => {
+        const open = descNode.classList.toggle("open");
+        toggle.textContent = open ? "свернуть" : "ещё";
       });
     }
     el.metaPanel.classList.remove("hidden");
+    scheduleWatchExtras(target);
+  }
+
+  // =====================================================================
+  // Watch-page enrichment: credits backfill + «Похожее»
+  //
+  // Both are deliberately post-playback and deduped per navigation. Neither is
+  // allowed to delay the player, and neither re-requests anything the caches
+  // already answer — opening the same title twice costs nothing.
+  // =====================================================================
+  let watchExtrasKey = "";
+
+  function scheduleWatchExtras(target) {
+    const kpId = String(state.currentMeta?.kpId || target?.kpId || "");
+    const key = `${keyFor(target)}|${kpId}`;
+    if (!target || watchExtrasKey === key) return;
+    watchExtrasKey = key;
+    const token = resolveToken;
+    scheduleIdle(() => {
+      if (isStale(token)) return;
+      backfillCredits(target, kpId, token).catch((error) => log("credits-warn", error.message));
+      renderSimilarRow(kpId, token).catch((error) => log("similar-warn", error.message));
+    }, 1200);
+  }
+
+  // Only ever runs for titles the resolver could not describe (zen:/ort:/nd:
+  // targets carry no kinopoisk.dev document). kp: titles already arrived complete
+  // from /movie, so this costs nothing for them.
+  async function backfillCredits(target, kpId, token) {
+    if (!/^\d+$/.test(kpId)) return;
+    const current = state.currentMeta || {};
+    if ((current.genres || []).length && (current.directors || []).length) return;
+    const extras = await window.alphyForYou?.filmExtras?.(kpId);
+    if (!extras || isStale(token) || !state.currentTarget) return;
+    if (keyFor(state.currentTarget) !== keyFor(target)) return;
+    const merged = mergeMetadata(state.currentMeta || {}, extras);
+    state.currentMeta = merged;
+    cacheSet("meta", kpId, mergeMetadata(cacheGet("meta", kpId) || {}, extras), TTL.meta);
+    renderMeta(merged, state.currentTarget);
+  }
+
+  async function renderSimilarRow(kpId, token) {
+    if (!el.similarSection || !el.similarRow) return;
+    hideSimilarRow();
+    if (!/^\d+$/.test(kpId)) return;
+    const items = await window.alphyForYou?.similarRow?.(kpId);
+    if (!items?.length || isStale(token)) return;
+    const frag = document.createDocumentFragment();
+    for (const item of items) {
+      // A recommendation that is already curated opens through its resolved
+      // target — instant playback instead of a fresh kp resolve.
+      const ready = window.alphyCatalog?.findReady?.(item.title, item.year, item.isSeries);
+      const entry = ready ? { ...ready, kpId: ready.kpId || String(item.target?.kpId || "") } : item;
+      frag.appendChild(makeCard({
+        title: entry.title,
+        sub: [entry.year, entry.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · "),
+        poster: entry.poster,
+        rating: entry.rating,
+        movieLength: entry.movieLength,
+        isSeries: entry.isSeries,
+        bookmark: { target: entry.target, details: entry },
+        onClick: () => openCuratedItem(entry),
+      }));
+    }
+    el.similarRow.replaceChildren(frag);
+    el.similarSection.classList.remove("hidden");
+  }
+
+  function hideSimilarRow() {
+    el.similarSection?.classList.add("hidden");
+    el.similarRow?.replaceChildren();
   }
 
   // =====================================================================
@@ -3558,15 +3787,112 @@
   // Playback — Zenith via Shaka
   // =====================================================================
   function zenithBrowserFetchBlocked() {
-    try { return Number(sessionStorage.getItem("alphy.zenithBrowserBlockedUntil") || 0) > Date.now(); }
+    try { return Number(localStorage.getItem("alphy.zenithBrowserBlockedUntil") || 0) > Date.now(); }
     catch { return false; }
   }
 
   function rememberZenithBrowserFetch(blocked) {
     try {
-      if (blocked) sessionStorage.setItem("alphy.zenithBrowserBlockedUntil", String(Date.now() + 30 * 60e3));
-      else sessionStorage.removeItem("alphy.zenithBrowserBlockedUntil");
-    } catch { /* session-only optimization */ }
+      if (blocked) localStorage.setItem("alphy.zenithBrowserBlockedUntil", String(Date.now() + ZENITH_DIRECT_BLOCK_MS));
+      else localStorage.removeItem("alphy.zenithBrowserBlockedUntil");
+    } catch { /* best-effort optimization */ }
+  }
+
+  function zenithIdOf(embedUrl) {
+    return String(embedUrl || "").match(/\/movie\/(\d+)/i)?.[1] || "";
+  }
+
+  // A parse is usable when it can actually start playback. A series additionally
+  // needs its season list, otherwise the episode picker would come up empty and
+  // the cheap cached copy would be worse than a fresh resolve.
+  function zenithParsedUsable(value, wantSeasons) {
+    if (!value) return false;
+    const hasSource = !!(value.sources?.dash || value.sources?.hls || value.sources?.dasha);
+    const hasSeasons = !!value.playlist?.seasons?.length;
+    if (!hasSource && !hasSeasons) return false;
+    return wantSeasons ? hasSeasons : true;
+  }
+
+  function readZenithParsed(id, wantSeasons) {
+    const memo = zenithParsedCache.get(id);
+    if (memo?.expiresAt > Date.now() && zenithParsedUsable(memo.value, wantSeasons)) return memo.value;
+    const stored = cacheGet("zenith", id);
+    if (zenithParsedUsable(stored, wantSeasons)) {
+      zenithParsedCache.set(id, { value: stored, expiresAt: Date.now() + ZENITH_PARSED_CACHE_MS });
+      return stored;
+    }
+    return null;
+  }
+
+  function writeZenithParsed(id, value) {
+    if (!id || !zenithParsedUsable(value, false)) return value;
+    zenithParsedCache.set(id, { value, expiresAt: Date.now() + ZENITH_PARSED_CACHE_MS });
+    if (zenithParsedCache.size > 12) zenithParsedCache.delete(zenithParsedCache.keys().next().value);
+    cacheSet("zenith", id, value, TTL.zenith);
+    return value;
+  }
+
+  function dropZenithParsed(embedUrl) {
+    const id = zenithIdOf(embedUrl);
+    if (!id) return;
+    zenithParsedCache.delete(id);
+    try { localStorage.removeItem(`${CACHE_PREFIX}zenith:${id}`); } catch { /* ignore */ }
+  }
+
+  // Single entry point for "give me this embed's sources": memory -> localStorage
+  // -> one direct browser attempt -> resolver. In-flight requests are shared, so a
+  // hover prefetch that is still running is JOINED by the click instead of being
+  // raced by a second identical resolve.
+  async function resolveZenithParsed(embedUrl, { force = false, wantSeasons = false } = {}) {
+    const id = zenithIdOf(embedUrl);
+    if (!id) throw new Error("Не удалось извлечь Zenith id");
+    if (!force) {
+      const cached = readZenithParsed(id, wantSeasons);
+      if (cached) return cached;
+    }
+    const inflightKey = `${id}|${wantSeasons ? "s" : "-"}|${force ? "f" : "-"}`;
+    const existing = zenithParsedInflight.get(inflightKey);
+    if (existing) return existing;
+    const pending = (async () => {
+      let parsed = null;
+      if (!force && !zenithBrowserFetchBlocked()) {
+        try {
+          // A browser that can reach Zenith directly normally answers quickly. Do
+          // one abortable CORS attempt; XHR/sandbox retries can each hang for tens
+          // of seconds and the resolver is both faster and more reliable here.
+          const html = await fetchThirdPartyText(embedUrl, {
+            directOnly: true,
+            timeoutMs: ZENITH_BROWSER_FAST_WINDOW_MS,
+            label: "zenith",
+          });
+          const value = parseZenithEmbed(html);
+          rememberZenithBrowserFetch(false);
+          if (zenithParsedUsable(value, wantSeasons)) parsed = value;
+        } catch (error) {
+          rememberZenithBrowserFetch(true);
+          log("zenith-browser-fallback", { message: error.message });
+        }
+      }
+      if (!parsed) parsed = await fetchZenithFromResolver(id, force);
+      return writeZenithParsed(id, parsed);
+    })().finally(() => zenithParsedInflight.delete(inflightKey));
+    zenithParsedInflight.set(inflightKey, pending);
+    return pending;
+  }
+
+  async function fetchZenithFromResolver(id, force = false) {
+    // The resolver answers cached hits with `public, max-age=300`; letting the
+    // browser honour that (instead of no-store) makes a re-open free. A forced
+    // refresh exists precisely to defeat every cache, so it reloads.
+    const data = await resolverJson(`/zenith?id=${encodeURIComponent(id)}`, {
+      fetchCache: force ? "reload" : "default",
+    });
+    if (!data.hasSources) throw new Error("Worker Zenith fallback не отдал источники");
+    return {
+      sources: data.sources || {},
+      meta: data.meta || {},
+      playlist: data.playlist || { current: null, seasons: [] },
+    };
   }
 
   async function playZenithEmbed(embedUrl, target, token, opts = {}) {
@@ -3575,32 +3901,11 @@
     state.zenithEmbedUrl = embedUrl;
     const shakaTask = ensureShaka();
     shakaTask.catch(() => {});
-    let parsed = { sources: {}, meta: {}, playlist: { current: null, seasons: [] } };
-    if (!opts.forceWorker && !zenithBrowserFetchBlocked()) {
-      try {
-        // A browser that can reach Zenith directly normally answers quickly. Do
-        // one abortable CORS attempt; XHR/sandbox retries can each hang for tens
-        // of seconds and the resolver is both faster and more reliable here.
-        const html = await fetchThirdPartyText(embedUrl, {
-          directOnly: true,
-          timeoutMs: ZENITH_BROWSER_FAST_WINDOW_MS,
-          label: "zenith",
-        });
-        if (isStale(token)) return;
-        parsed = parseZenithEmbed(html);
-        rememberZenithBrowserFetch(false);
-      } catch (error) {
-        rememberZenithBrowserFetch(true);
-        log("zenith-browser-fallback", { message: error.message });
-      }
-    }
-    const needsWorker =
-      !parsed.sources.dash && !parsed.sources.hls && !parsed.sources.dasha ||
-      ((opts.forceSeries || target?.isSeries || opts.serialSelection) && !parsed.playlist?.seasons?.length);
-    if (opts.forceWorker || needsWorker) {
-      parsed = await resolveZenithThroughWorker(embedUrl, { force: !!opts.forceWorker });
-      if (isStale(token)) return;
-    }
+    const parsed = await resolveZenithParsed(embedUrl, {
+      force: !!opts.forceWorker,
+      wantSeasons: !!(opts.forceSeries || target?.isSeries || opts.serialSelection),
+    });
+    if (isStale(token)) return;
 
     const seasons = normalizeSerialSeasons(parsed.playlist?.seasons);
     const requested = opts.serialSelection || parsed.playlist?.current;
@@ -3625,30 +3930,23 @@
     if (selection) persistSerialSelection(target, selection);
     await shakaTask;
     if (isStale(token)) return;
-    await playShaka(media.url, media.kind, token, {
-      resume: opts.resume || 0,
-      audioLang: opts.audioLang,
-      serial,
-    });
+    try {
+      await playShaka(media.url, media.kind, token, {
+        resume: opts.resume || 0,
+        audioLang: opts.audioLang,
+        serial,
+      });
+    } catch (error) {
+      // The only way a cached parse can hurt is a signature that expired between
+      // the resolve and the click. Re-mint once, then let the error stand.
+      if (opts.forceWorker || isStale(token)) throw error;
+      log("zenith-source-refresh", { message: error.message });
+      dropZenithParsed(embedUrl);
+      await playZenithEmbed(embedUrl, target, token, { ...opts, forceWorker: true });
+      return;
+    }
     if (isStale(token)) return;
     if (opts.histKey) startTracking(opts.histKey, target);
-  }
-
-  async function resolveZenithThroughWorker(embedUrl, { force = false } = {}) {
-    const id = embedUrl.match(/\/movie\/(\d+)/i)?.[1] || "";
-    if (!id) throw new Error("Не удалось извлечь Zenith id");
-    const cached = zenithParsedCache.get(id);
-    if (!force && cached?.expiresAt > Date.now()) return cached.value;
-    const data = await resolverJson(`/zenith?id=${encodeURIComponent(id)}`);
-    if (!data.hasSources) throw new Error("Worker Zenith fallback не отдал источники");
-    const value = {
-      sources: data.sources || {},
-      meta: data.meta || {},
-      playlist: data.playlist || { current: null, seasons: [] },
-    };
-    zenithParsedCache.set(id, { value, expiresAt: Date.now() + ZENITH_PARSED_CACHE_MS });
-    if (zenithParsedCache.size > 12) zenithParsedCache.delete(zenithParsedCache.keys().next().value);
-    return value;
   }
 
   async function playShaka(url, kind, token, opts = {}) {
@@ -3662,7 +3960,7 @@
     const video = document.createElement("video");
     video.controls = true;
     video.playsInline = true;
-    video.autoplay = true;
+    mountPaused(video);
     video.crossOrigin = "anonymous";
     video.playbackRate = state.playbackRate;
     if (isStale(token)) return;
@@ -3724,7 +4022,7 @@
     video.addEventListener("pause", snapshotCurrentFrame);
     video.addEventListener("seeked", snapshotCurrentFrame);
     setTimeout(snapshotCurrentFrame, 2200);
-    try { await video.play(); } catch { /* user gesture may be required */ }
+    startPlaybackIfAllowed(video);
   }
 
   function selectHighestShakaVariant(player, preferredLanguage = "") {
@@ -5011,6 +5309,14 @@ addEventListener('message', async (event) => {
     }, 1800);
   }
 
+  // Intent-time Zenith warm. Cheap by construction: a cached parse short-circuits
+  // before any request, the resolver answers warm hits from its own edge cache,
+  // and the hover token bucket caps how many of these a browsing burst can start.
+  async function warmZenithParsed(embedUrl, details = {}) {
+    if (!zenithIdOf(embedUrl)) return;
+    await resolveZenithParsed(embedUrl, { wantSeasons: !!details?.isSeries });
+  }
+
   async function prepareTarget(target, details = {}) {
     if (!target?.kind) return;
     const prepKey = keyFor(target);
@@ -5018,8 +5324,8 @@ addEventListener('message', async (event) => {
     preparedTargets.add(prepKey);
     try {
       if (target.kind === "kp") {
-        const hasZona = !!cacheGet("zona", target.kpId)?.embedUrl;
-        if (hasZona) ensureShaka().catch(() => {});
+        const zonaEmbedUrl = cacheGet("zona", target.kpId)?.embedUrl || "";
+        if (zonaEmbedUrl) ensureShaka().catch(() => {});
         if (!collapsPreviewOnCooldown()) {
           warmCollapsConnections();
           try {
@@ -5028,8 +5334,9 @@ addEventListener('message', async (event) => {
             if (shouldCooldownCollapsPreview(error)) setCollapsPreviewCooldown(error);
             throw error;
           }
-        } else if (hasZona) {
+        } else if (zonaEmbedUrl) {
           await ensureShaka();
+          await warmZenithParsed(zonaEmbedUrl, details);
         }
       } else if (target.kind === "clps") {
         warmCollapsConnections();
@@ -5043,7 +5350,13 @@ addEventListener('message', async (event) => {
         const movies = await loadSoapCatalog();
         const movie = movies.find((entry) => String(entry.id) === String(target.soapId));
         if (movie) prefetchTopSoapManifest([movie]);
-      } else if (target.kind === "zen" || target.kind === "opr") {
+      } else if (target.kind === "zen") {
+        // Curated shelves are mostly zen: items, and their whole click-to-play
+        // cost is "load Shaka" + "resolve this embed". Warming both on intent is
+        // what turns a click into an immediate player instead of a spinner.
+        await ensureShaka();
+        await warmZenithParsed(`https://api.zenithjs.ws/embed/movie/${encodeURIComponent(target.zenithId)}`, details);
+      } else if (target.kind === "opr") {
         await ensureShaka();
       } else if (target.kind === "ort") {
         await fetchCachedEmbedText(target.embedUrl, { preferSandbox: true, label: "ortified-intent" });
@@ -5064,9 +5377,9 @@ addEventListener('message', async (event) => {
     let claimedSpeculativeSlot = false;
     const run = (speculative) => {
       if (speculative) {
-        if (claimedSpeculativeSlot || speculativeIntentBudget <= 0) return;
+        if (claimedSpeculativeSlot) return;
+        if (!claimSpeculativeIntent()) return;
         claimedSpeculativeSlot = true;
-        speculativeIntentBudget -= 1;
       }
       prepareTarget(target, details).catch((error) => log("intent-prefetch-warn", error.message));
     };
@@ -5898,6 +6211,12 @@ addEventListener('message', async (event) => {
       externalId: {
         ...(meta.externalId || meta.externalIds || {}),
       },
+      ageRating: Number.isFinite(Number(meta.ageRating)) ? Number(meta.ageRating) : null,
+      ratingMpaa: meta.ratingMpaa || "",
+      genres: Array.isArray(meta.genres) ? meta.genres : [],
+      countries: Array.isArray(meta.countries) ? meta.countries : [],
+      directors: Array.isArray(meta.directors) ? meta.directors : [],
+      cast: Array.isArray(meta.cast) ? meta.cast : [],
       target,
       cachedAt: new Date().toISOString(),
     };
@@ -5917,6 +6236,14 @@ addEventListener('message', async (event) => {
       rating: item.rating,
       kpId: item.kpId,
       externalId: item.externalId,
+      // Whatever the curator stored is served straight from the snapshot, so a
+      // listed title opens with full metadata and zero API calls.
+      ageRating: item.ageRating,
+      ratingMpaa: item.ratingMpaa,
+      genres: item.genres,
+      countries: item.countries,
+      directors: item.directors,
+      cast: item.cast,
     };
     cacheSet("curatedmeta", keyFor(target), meta, TTL.enriched);
     if (target.kind === "ort") cacheSet("ortmeta", canonicalOrtEmbedUrl(target.embedUrl), meta, TTL.enriched);
@@ -6069,6 +6396,7 @@ addEventListener('message', async (event) => {
       const detail = await fetchMovieMeta(hit.kpId);
       const m = detail || hit;
       const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+      const list = (v) => (Array.isArray(v) ? v.filter(Boolean).map(String) : []);
       return {
         ok: true,
         kpId: hit.kpId,
@@ -6077,6 +6405,19 @@ addEventListener('message', async (event) => {
         imdbId: m.externalId?.imdb || hit.externalId?.imdb || "",
         name: movieTitle(m) || title,
         year: m.year || hit.year || year || "",
+        // Descriptive metadata rides along on the /movie call the refresh already
+        // makes, so baking it into the curated snapshot is free. Once stored, the
+        // watch page renders жанр/страна/режиссёр/актёры for that title with no
+        // request at all — that is the whole point of curating it here.
+        isSeries: m.isSeries ?? hit.isSeries ?? false,
+        movieLength: num(m.movieLength) ?? num(hit.movieLength),
+        description: m.description || m.shortDescription || "",
+        ageRating: num(m.ageRating),
+        ratingMpaa: m.ratingMpaa || "",
+        genres: list(m.genres),
+        countries: list(m.countries),
+        directors: list(m.directors),
+        cast: list(m.cast),
       };
     } catch {
       return { ok: false };
@@ -6090,6 +6431,7 @@ addEventListener('message', async (event) => {
     armCardIntent,
     prepareTarget,
     resolveKpPlaybackSource,
+    resolveZenithParsed,
     layoutMobileGrid,
     resolvePosterByTitle,
     resolveCardMeta,

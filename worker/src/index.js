@@ -799,6 +799,41 @@ async function poiskkinoFetch(key, apiUrl) {
   return JSON.parse(text);
 }
 
+// kinopoisk.dev returns the whole document (we never send selectFields), so the
+// descriptive fields below are already paid for by the /movie request the client
+// makes anyway. Passing them through costs zero extra upstream calls and is what
+// lets the watch page show возраст/жанр/страна/режиссёр/актёры without a second
+// API round trip.
+const NAME_LIMIT = 24;
+
+function nameList(value, limit = NAME_LIMIT) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const entry of value) {
+    const name = String(entry?.name || entry || "").trim();
+    if (name && !out.includes(name)) out.push(name);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+// kinopoisk.dev `persons`: [{ name, enName, profession, enProfession, photo }].
+// Russian `profession` values are plural ("режиссеры", "актеры"); enProfession is
+// the stable singular key, so match on it first and fall back to the RU string.
+function personsByProfession(value, enProfession, ruProfession, limit) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const person of value) {
+    const en = String(person?.enProfession || "").toLowerCase();
+    const ru = String(person?.profession || "").toLowerCase();
+    if (en ? en !== enProfession : !ru.startsWith(ruProfession)) continue;
+    const name = String(person?.name || person?.enName || "").trim();
+    if (name && !out.includes(name)) out.push(name);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 function normalizeMovie(item) {
   return {
     kpId: item.id ?? null,
@@ -809,9 +844,17 @@ function normalizeMovie(item) {
     year: item.year ?? null,
     isSeries: item.isSeries ?? false,
     movieLength: item.movieLength ?? null,
+    seriesLength: item.seriesLength ?? null,
     description: item.description ?? null,
     shortDescription: item.shortDescription ?? null,
+    slogan: item.slogan ?? null,
     poster: item.poster?.url || item.poster?.previewUrl || null,
+    ageRating: Number.isFinite(Number(item.ageRating)) ? Number(item.ageRating) : null,
+    ratingMpaa: item.ratingMpaa || null,
+    genres: nameList(item.genres),
+    countries: nameList(item.countries),
+    directors: personsByProfession(item.persons, "director", "режисс", 3),
+    cast: personsByProfession(item.persons, "actor", "актер", 8),
     externalId: {
       imdb: item.externalId?.imdb || item.imdbId || null,
       tmdb: item.externalId?.tmdb || item.tmdbId || null,
@@ -841,7 +884,16 @@ function normalizeUnofficialFilm(item) {
     movieLength: typeof item.filmLength === "number" ? item.filmLength : null,
     description: item.description ?? null,
     shortDescription: item.shortDescription ?? null,
+    slogan: item.slogan ?? null,
     poster: item.posterUrl || item.posterUrlPreview || null,
+    // "age16" -> 16. This source exposes no staff list, so directors/cast stay
+    // empty here and the client backfills them from /api/v1/staff when needed.
+    ageRating: Number(String(item.ratingAgeLimits || "").match(/\d+/)?.[0]) || null,
+    ratingMpaa: item.ratingMpaa || null,
+    genres: nameList((item.genres || []).map((g) => g?.genre)),
+    countries: nameList((item.countries || []).map((c) => c?.country)),
+    directors: [],
+    cast: [],
     externalId: {
       imdb: item.imdbId || null,
       tmdb: item.tmdbId || null,

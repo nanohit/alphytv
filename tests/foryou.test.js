@@ -181,3 +181,91 @@ test("cached row paints instantly; mode off empties it", async () => {
   api.setMode("off");
   assert.equal(api.getItems().length, 0, "off hides the row everywhere");
 });
+
+// --- «Похожее» -------------------------------------------------------------
+
+test("rankSimilars: keeps the title's own pool but promotes what the viewer likes", async () => {
+  const storage = new Map();
+  const now = Date.now();
+  // The viewer finished film 100. Its cached similars name candidate 30.
+  storage.set("alphy.history", JSON.stringify([
+    historyEntry({ kpId: "100", title: "Любимое", progress: 0.95, updatedAt: now }),
+  ]));
+  storage.set("alphy.bookmarks", JSON.stringify([]));
+  storage.set("alphy.foryou.sim.100", JSON.stringify({
+    v: [{ id: "30", ru: "Связанное со вкусом" }],
+    exp: now + 86400e3,
+  }));
+
+  const { api } = await loadForYou(storage);
+  // Pool for the title being watched (id 900): 30 sits LAST by Kinopoisk order.
+  const picked = api._test.rankSimilars([
+    { id: "10", ru: "Первое" },
+    { id: "20", ru: "Второе" },
+    { id: "30", ru: "Связанное со вкусом" },
+  ], "900");
+
+  assert.equal(picked[0].id, "30", "taste affinity outranks raw Kinopoisk position");
+  assert.deepEqual(picked.map((p) => p.id).sort(), ["10", "20", "30"], "pool is not widened");
+  assert.ok(picked.every((p) => p.score > 0));
+});
+
+test("rankSimilars: never recommends the current title, watched titles or hidden ones", async () => {
+  const storage = new Map();
+  const now = Date.now();
+  storage.set("alphy.history", JSON.stringify([
+    historyEntry({ kpId: "10", title: "Уже смотрел", updatedAt: now }),
+    { key: "zen:7", kind: "zen", target: { kind: "zen", zenithId: "7" }, title: "Только по названию", updatedAt: now },
+  ]));
+  storage.set("alphy.bookmarks", JSON.stringify([]));
+  storage.set("alphy.foryou.hidden.v1", JSON.stringify([{ id: "20", at: now }]));
+
+  const { api } = await loadForYou(storage);
+  const picked = api._test.rankSimilars([
+    { id: "10", ru: "Уже смотрел" },
+    { id: "20", ru: "Скрытое" },
+    { id: "30", ru: "Только по названию" },
+    { id: "900", ru: "Сам этот фильм" },
+    { id: "40", ru: "Годное" },
+  ], "900");
+
+  assert.deepEqual(picked.map((p) => p.id), ["40"]);
+});
+
+test("affinityIndex reads only cached similars and ignores the current title's own seed", async () => {
+  const storage = new Map();
+  const now = Date.now();
+  storage.set("alphy.history", JSON.stringify([
+    historyEntry({ kpId: "100", title: "Одно", updatedAt: now }),
+    historyEntry({ kpId: "200", title: "Другое", updatedAt: now }),
+  ]));
+  storage.set("alphy.bookmarks", JSON.stringify([]));
+  storage.set("alphy.foryou.sim.100", JSON.stringify({ v: [{ id: "5", ru: "A" }], exp: now + 86400e3 }));
+  // 200 has no cached similars: it must be skipped silently, never fetched
+  // (the sandbox's fetch throws, so a fetch here would fail the test).
+  const { api } = await loadForYou(storage);
+
+  const all = api._test.affinityIndex("");
+  assert.ok(all.affinity.get("5") > 0);
+
+  const excluded = api._test.affinityIndex("100");
+  assert.equal(excluded.affinity.size, 0, "the title being watched does not vote for its own similars");
+});
+
+test("personNames pulls directors and cast out of the staff payload in order", async () => {
+  const { api } = await loadForYou();
+  const staff = [
+    { professionKey: "DIRECTOR", nameRu: "Режиссёр" },
+    { professionKey: "ACTOR", nameRu: "Первый" },
+    { professionKey: "ACTOR", nameRu: "Второй" },
+    { professionKey: "ACTOR", nameRu: "Первый" },
+    { professionKey: "WRITER", nameRu: "Сценарист" },
+    { professionKey: "ACTOR", nameEn: "Third" },
+  ];
+  // The sandbox returns cross-realm arrays, so compare plain structures.
+  const names = (...args) => JSON.parse(JSON.stringify(api._test.personNames(...args)));
+  assert.deepEqual(names(staff, "DIRECTOR", 3), ["Режиссёр"]);
+  assert.deepEqual(names(staff, "ACTOR", 2), ["Первый", "Второй"], "deduped and capped");
+  assert.deepEqual(names(staff, "ACTOR", 9), ["Первый", "Второй", "Third"]);
+  assert.deepEqual(names(null, "ACTOR", 3), []);
+});

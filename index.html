@@ -12,9 +12,9 @@
   <link rel="preconnect" href="https://soap4youand.me" crossorigin>
   <link rel="preconnect" href="https://plapi.cdnvideohub.com" crossorigin>
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-  <title>alphy</title>
+  <title>Alphy TV — каталог фильмов и сериалов.</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260715-ux4">
+  <link rel="stylesheet" href="/styles.css?v=20260720-meta1">
 </head>
 <body>
   <div id="bookmarkBanner" class="bookmark-banner hidden">Добавьте сайт в закладки</div>
@@ -142,6 +142,15 @@
         </div>
         <aside id="metaPanel" class="meta-panel hidden"></aside>
       </div>
+      <!-- Deliberately outside .watch-layout: a full-width shelf below the player
+           reads as its own section rather than as an ad stapled to the title. -->
+      <section id="similarSection" class="similar-section hidden" aria-label="Похожее">
+        <div class="similar-head">
+          <h3>Похожее</h3>
+          <span class="similar-note">подобрано под ваши просмотры</span>
+        </div>
+        <div id="similarRow" class="similar-row"></div>
+      </section>
     </section>
 
     <div id="loading" class="loading hidden"><div class="spinner"></div><div>Загрузка…</div></div>
@@ -152,6 +161,19 @@
       <button id="adminEntry" class="admin-entry" type="button">admin</button>
     </footer>
   </div>
+
+  <dialog id="itemMetaDialog" class="compact-dialog item-meta-dialog">
+    <form method="dialog">
+      <div class="dialog-head">
+        <strong>Метаданные</strong>
+        <button class="dialog-close" type="button" data-close-dialog aria-label="Закрыть">×</button>
+      </div>
+      <div id="itemMetaBody" class="item-meta-body"></div>
+      <div class="item-meta-actions">
+        <button id="itemMetaRefresh" type="button">Обновить с Кинопоиска</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="listPickerDialog" class="compact-dialog">
     <form method="dialog">
@@ -164,8 +186,8 @@
   </dialog>
 
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
-  <script src="/app.js?v=20260715-ux4"></script>
-  <script src="/foryou.js?v=20260715-ux4"></script>
-  <script src="/catalog.js?v=20260715-ux4"></script>
+  <script src="/app.js?v=20260720-meta1"></script>
+  <script src="/foryou.js?v=20260720-meta1"></script>
+  <script src="/catalog.js?v=20260720-meta1"></script>
 </body>
 </html>

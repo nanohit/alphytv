@@ -44,12 +44,25 @@
   const MAX_SIM_FETCH_PER_RUN = 10;
   const MAX_META_FETCH_PER_RUN = 8;
   const MAX_LOOKUP_PER_RUN = 5;
-  const DAILY_FETCH_CAP = 60;
+  // Three keys × ~500/day is ~1500 calls of real capacity. The cap is the safety
+  // rail, not the target: the pipeline is cache-first, so a normal day spends a
+  // handful. It now also covers «Похожее» (≤1 call per newly opened title) and
+  // watch-page credits backfill, which is exactly why it is no longer 60 — a few
+  // evenings of browsing new titles must not silently switch the row off.
+  const DAILY_FETCH_CAP = 220;
   const FETCH_CONCURRENCY = 3;
   const ROW_SIZE = 18;
   const MIN_ROW = 6;
   const MAX_PER_SEED = 5;
   const RECOMPUTE_MIN_MS = 60e3;
+
+  // «Похожее» (under the player)
+  const SIMILAR_ROW_SIZE = 14;
+  const SIMILAR_MIN_ROW = 4;
+  // How hard the viewer's taste is allowed to re-order the title's own similars.
+  // The row must stay recognisably about the title being watched, so affinity
+  // re-ranks within that list instead of replacing it.
+  const SIMILAR_TASTE_WEIGHT = 1.1;
 
   const state = {
     mode: null,          // null until catalog.js delivers the envelope flag
@@ -64,6 +77,21 @@
     try {
       if (localStorage.getItem("alphy.debug")) console.log("[foryou]", ...args);
     } catch { /* ignore */ }
+  }
+
+  // `mode` arrives from catalog.js once the curated envelope is loaded. The watch
+  // page can ask for recommendations before that lands (deep link straight into a
+  // player), so callers wait briefly instead of silently getting an empty row.
+  // Timing out means the catalog is unreachable — stay off rather than guess.
+  let resolveModeReady;
+  const modeReady = new Promise((resolve) => { resolveModeReady = resolve; });
+
+  function whenModeReady(timeoutMs = 4000) {
+    if (state.mode) return Promise.resolve(state.mode);
+    return Promise.race([
+      modeReady,
+      new Promise((resolve) => setTimeout(() => resolve(state.mode), timeoutMs)),
+    ]);
   }
 
   // --- localStorage helpers (own namespaces, TTL envelopes like app.js) ---
@@ -586,10 +614,148 @@
     compute();
   }
 
+  // --- descriptive extras (жанр / страна / возраст / режиссёр / актёры) -------
+  //
+  // The resolver's /movie already carries all of this for kp: titles, so this is
+  // only the backfill for targets that have no kinopoisk.dev document behind them
+  // (zen:, ort:, nd: …). Cached for 30 days: a film's director does not change.
+  // Two calls at most, once per title, ever.
+
+  const EXTRAS_PREFIX = "alphy.foryou.extras.";
+
+  function personNames(staff, professionKey, limit) {
+    const out = [];
+    for (const person of Array.isArray(staff) ? staff : []) {
+      if (String(person?.professionKey || "") !== professionKey) continue;
+      const name = String(person?.nameRu || person?.nameEn || "").trim();
+      if (name && !out.includes(name)) out.push(name);
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  async function filmExtras(kpId, { network = true } = {}) {
+    const id = String(kpId || "");
+    if (!/^\d+$/.test(id)) return null;
+    const cacheKey = `${EXTRAS_PREFIX}${id}`;
+    const cached = lsGet(cacheKey);
+    if (cached) return cached;
+    if (!network) return null;
+    if (await whenModeReady() !== "on") return null;
+    try {
+      const [film, staff] = await Promise.all([
+        apiGet(`/api/v2.2/films/${encodeURIComponent(id)}`).catch(() => null),
+        apiGet(`/api/v1/staff?filmId=${encodeURIComponent(id)}`).catch(() => null),
+      ]);
+      if (!film && !staff) return null;
+      const extras = {
+        genres: (film?.genres || []).map((g) => g?.genre).filter(Boolean).slice(0, 6),
+        countries: (film?.countries || []).map((c) => c?.country).filter(Boolean).slice(0, 4),
+        ageRating: Number(String(film?.ratingAgeLimits || "").match(/\d+/)?.[0]) || null,
+        ratingMpaa: film?.ratingMpaa || null,
+        slogan: film?.slogan || null,
+        directors: personNames(staff, "DIRECTOR", 3),
+        cast: personNames(staff, "ACTOR", 8),
+      };
+      lsSet(cacheKey, extras, META_TTL);
+      return extras;
+    } catch (error) {
+      log("extras failed", id, error.message);
+      return null;
+    }
+  }
+
+  // --- «Похожее» -------------------------------------------------------------
+  //
+  // Same engine, different question. «Для вас» asks "what fits this viewer?";
+  // «Похожее» asks "what fits THIS title, for this viewer?". The candidate pool is
+  // therefore always the current title's own similars, so the row stays honestly
+  // about what is on screen — the taste graph only re-orders it.
+  //
+  // Cost, by construction:
+  //   • the pool is one /similars call, cached 30 days, in the SAME namespace
+  //     «Для вас» uses — so opening a title either costs nothing (already known)
+  //     or costs one call that also improves the homepage row later;
+  //   • the affinity signal reads only ALREADY-CACHED seed similars, never
+  //     fetches;
+  //   • posters/titles come from the similars payload itself, so there is no
+  //     per-candidate metadata fan-out. Year/rating are filled in from caches the
+  //     app already has, and simply left out when unknown.
+  // A cold title costs exactly one request. Nothing here fans out.
+
+  // Affinity = "how connected is this candidate to what the viewer already
+  // likes", computed purely from cached seed→similars edges. Zero network.
+  function affinityIndex(excludeSeedId) {
+    const { seeds } = buildSeeds();
+    const affinity = new Map();
+    let max = 0;
+    for (const seed of seeds) {
+      if (String(seed.kpId) === String(excludeSeedId)) continue;
+      const similars = lsGet(`${SIM_PREFIX}${seed.kpId}`);
+      if (!Array.isArray(similars) || !similars.length) continue;
+      similars.forEach((candidate, index) => {
+        const contribution = seed.weight / (1 + index * 0.12);
+        const next = (affinity.get(candidate.id) || 0) + contribution;
+        affinity.set(candidate.id, next);
+        if (next > max) max = next;
+      });
+    }
+    return { affinity, max };
+  }
+
+  function rankSimilars(base, kpId) {
+    const { excludeKp, excludeTitles } = buildSeeds();
+    const hidden = hiddenIds();
+    const { affinity, max } = affinityIndex(kpId);
+
+    return base
+      .filter((candidate) => {
+        if (String(candidate.id) === String(kpId)) return false;
+        if (hidden.has(String(candidate.id))) return false;
+        // Already watched or bookmarked: recommending it back is the single most
+        // "forced" thing this row could do.
+        if (excludeKp.has(String(candidate.id))) return false;
+        return !excludeTitles.has(normTitle(candidate.ru));
+      })
+      .map((candidate, index) => {
+        // Kinopoisk's own ordering is a real relevance signal, so it sets the
+        // baseline; taste multiplies it rather than overriding it.
+        const positional = 1 / (1 + index * 0.10);
+        const taste = max > 0 ? (affinity.get(candidate.id) || 0) / max : 0;
+        return { ...candidate, score: positional * (1 + SIMILAR_TASTE_WEIGHT * taste), taste };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, SIMILAR_ROW_SIZE);
+  }
+
+  // Returns curated-shaped items for the watch page, or [] when there is nothing
+  // worth showing. `network: false` keeps it strictly cache-only.
+  async function similarRow(kpId, { network = true } = {}) {
+    const id = String(kpId || "");
+    if (!/^\d+$/.test(id)) return [];
+    const cached = lsGet(`${SIM_PREFIX}${id}`);
+    let base = Array.isArray(cached) ? cached : null;
+    if (!base) {
+      if (!network) return [];
+      if (await whenModeReady() !== "on") return [];
+      base = await fetchSimilars(id).catch(() => []);
+    } else if (state.mode === "off") {
+      return [];
+    }
+    if (!base.length) return [];
+    const picked = rankSimilars(base, id);
+    if (picked.length < SIMILAR_MIN_ROW) return [];
+    // Metadata is best-effort and free: whatever the app or our own cache already
+    // knows. A missing year or rating just renders as absent.
+    return picked.map((candidate) =>
+      toCuratedItem(candidate, lsGet(`${META_PREFIX}${candidate.id}`) || appMetaFor(candidate.id)));
+  }
+
   // --- public surface -----------------------------------------------------
 
   function setMode(mode) {
     const next = mode === "frozen" || mode === "off" ? mode : "on";
+    resolveModeReady(next);
     if (state.mode === next) return;
     state.mode = next;
     if (next === "off") {
@@ -622,6 +788,12 @@
     },
     hide,
     refresh: () => compute(),
-    _test: { buildSeeds, scoreCandidates, normTitle, recencyWeight, engagementWeight, toCuratedItem, hiddenIds },
+    similarRow,
+    filmExtras,
+    budgetLeft,
+    _test: {
+      buildSeeds, scoreCandidates, normTitle, recencyWeight, engagementWeight,
+      toCuratedItem, hiddenIds, rankSimilars, affinityIndex, personNames,
+    },
   };
 })();
