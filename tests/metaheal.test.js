@@ -119,6 +119,27 @@ test("boot sweep drops expired foryou caches but never its stateful keys", async
   assert.ok(ctx.storage.has("alphy.foryou.last.v1"), "cached row untouched");
 });
 
+test("boot drops legacy false 0+ caches once without touching user state", async () => {
+  const now = Date.now();
+  const seed = new Map();
+  seed.set("alphy.cache.meta:301", JSON.stringify({
+    v: { kpId: 301, title: "Старый ответ", ageRating: 0, ratingMpaa: "pg13" },
+    exp: now + 86400e3,
+  }));
+  seed.set("alphy.cache.meta:309", JSON.stringify({
+    v: { kpId: 309, title: "Нормальный ответ", ageRating: 16 },
+    exp: now + 86400e3,
+  }));
+  seed.set("alphy.history", JSON.stringify([{ key: "kp:301", title: "Старый ответ" }]));
+  const ctx = makeSandbox({ storageSeed: seed });
+  ctx.run();
+  await sleep(100);
+  assert.equal(ctx.storage.has("alphy.cache.meta:301"), false, "ambiguous old 0+ is refetched");
+  assert.ok(ctx.storage.has("alphy.cache.meta:309"), "valid age metadata stays warm");
+  assert.ok(ctx.storage.has("alphy.history"), "history is not part of the cache migration");
+  assert.equal(ctx.storage.get("alphy.migration.ageRating.v1"), "1");
+});
+
 test("curated click meta handoff survives quota exhaustion", async () => {
   const seed = new Map();
   let junkSize = 0;

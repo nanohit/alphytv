@@ -20,6 +20,7 @@
   const STORE_BOOKMARKS = "alphy.bookmarks";
   const STORE_HISTORY = "alphy.history";
   const STORE_SIMILAR_COLLAPSED = "alphy.similarCollapsed";
+  const STORE_AGE_CACHE_MIGRATION = "alphy.migration.ageRating.v1";
   const CACHE_PREFIX = "alphy.cache.";
   // Older builds cached a transient empty Newdeaf result for six hours. Keep
   // this namespace versioned so those false misses cannot survive an upgrade.
@@ -259,6 +260,27 @@
       doomed.forEach((key) => localStorage.removeItem(key));
     } catch { /* ignore */ }
     return doomed.length;
+  }
+  function containsLegacyZeroAge(value) {
+    if (!value || typeof value !== "object") return false;
+    if (Object.prototype.hasOwnProperty.call(value, "ageRating") && value.ageRating === 0) return true;
+    return Object.values(value).some(containsLegacyZeroAge);
+  }
+  function dropLegacyZeroAgeCache() {
+    try {
+      if (localStorage.getItem(STORE_AGE_CACHE_MIGRATION) === "1") return;
+      const doomed = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i) || "";
+        if (!key.startsWith(CACHE_PREFIX)) continue;
+        try {
+          const envelope = JSON.parse(localStorage.getItem(key) || "null");
+          if (containsLegacyZeroAge(envelope?.v)) doomed.push(key);
+        } catch { /* malformed TTL entries expire through the normal cache path */ }
+      }
+      doomed.forEach((key) => localStorage.removeItem(key));
+      localStorage.setItem(STORE_AGE_CACHE_MIGRATION, "1");
+    } catch { /* storage may be unavailable in strict privacy modes */ }
   }
   function freeCacheSpace() {
     if (dropExpiredCache()) return;
@@ -6416,6 +6438,7 @@ addEventListener('message', async (event) => {
   // boot
   // =====================================================================
   function boot() {
+    dropLegacyZeroAgeCache();
     dropExpiredCache();
     state.playerPlaceholder = el.playerHost.innerHTML;
     const savedRate = parseFloat(localStorage.getItem("alphy.playbackRate") || "1");
