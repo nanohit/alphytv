@@ -748,9 +748,9 @@ body.admin-mode .meta-info { display: flex; }
 
 .watch-layout {
   display: grid; grid-template-columns: minmax(0, 1fr) 260px;
-  gap: 20px; align-items: start;
+  column-gap: 20px; row-gap: 0; align-items: start;
 }
-.watch-main { min-width: 0; }
+.watch-main { min-width: 0; grid-column: 1; grid-row: 1; }
 .player-host {
   width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 12px; overflow: hidden;
   display: flex; align-items: center; justify-content: center;
@@ -759,6 +759,7 @@ body.admin-mode .meta-info { display: flex; }
 .player-host .placeholder { display: flex; flex-direction: column; gap: 12px; align-items: center; color: var(--muted); }
 
 .meta-panel {
+  grid-column: 2; grid-row: 1 / span 2;
   background: var(--panel); border: 1px solid var(--stroke); border-radius: 12px;
   padding: 13px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px;
   align-content: start;
@@ -812,7 +813,7 @@ body.admin-mode .meta-info { display: flex; }
 .meta-facts dd { margin: 0; font-size: 11px; line-height: 1.45; color: #cfcfcf; }
 
 /* ---------- «Похожее» shelf directly under the player ---------- */
-.similar-section { margin-top: 17px; }
+.similar-section { grid-column: 1; grid-row: 2; min-width: 0; margin-top: 17px; }
 .similar-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
 .similar-head h3 { margin: 0; font-size: 16px; font-weight: 600; }
 .similar-toggle {
@@ -894,7 +895,9 @@ body.admin-mode .meta-info { display: flex; }
   header { flex-direction: row; align-items: center; gap: 12px; }
   .brand { min-width: 100px; display: flex; justify-content: flex-start; }
   .logo-image { height: 44px; max-width: 110px; }
-  .watch-layout { grid-template-columns: 1fr; }
+  .watch-layout { display: flex; flex-direction: column; gap: 0; }
+  .watch-main, .meta-panel, .similar-section { width: 100%; }
+  .meta-panel { margin-top: 20px; }
   /* Below the player the panel is wide rather than tall, so the poster moves
      beside the text instead of on top of it. */
   .meta-panel { grid-template-columns: 110px minmax(0, 1fr); column-gap: 14px; }
