@@ -790,6 +790,15 @@
     refresh: () => compute(),
     similarRow,
     filmExtras,
+    // Title -> kpId, verified by normalized title + year and cached for 30 days.
+    // Curated zen:/ort: targets carry no Kinopoisk id, and without one there are
+    // no similars and no credits for them. One lookup unlocks both, and the same
+    // answer later seeds «Для вас».
+    resolveKpId: async (title, year) => {
+      if (!title) return "";
+      if (await whenModeReady() !== "on") return "";
+      return lookupKpId(title, year).catch(() => "");
+    },
     budgetLeft,
     _test: {
       buildSeeds, scoreCandidates, normTitle, recencyWeight, engagementWeight,

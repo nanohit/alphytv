@@ -3687,9 +3687,26 @@
     const token = resolveToken;
     scheduleIdle(() => {
       if (isStale(token)) return;
-      backfillCredits(target, kpId, token).catch((error) => log("credits-warn", error.message));
-      renderSimilarRow(kpId, token).catch((error) => log("similar-warn", error.message));
+      runWatchExtras(target, kpId, token).catch((error) => log("watch-extras-warn", error.message));
     }, 1200);
+  }
+
+  async function runWatchExtras(target, knownKpId, token) {
+    let kpId = knownKpId;
+    if (!/^\d+$/.test(kpId)) {
+      // Curated zen:/ort: items carry no Kinopoisk id until an admin fills their
+      // metadata in. Resolving it by title once (cached 30 days) is what lets
+      // those titles show credits and «Похожее» at all.
+      const title = state.currentMeta?.title || target?.title || "";
+      kpId = String(await window.alphyForYou?.resolveKpId?.(title, state.currentMeta?.year || target?.year) || "");
+      if (isStale(token) || !/^\d+$/.test(kpId)) return;
+      attachHistoryKpId(keyFor(target), kpId);
+      if (state.currentMeta) state.currentMeta.kpId = kpId;
+    }
+    await Promise.all([
+      backfillCredits(target, kpId, token).catch((error) => log("credits-warn", error.message)),
+      renderSimilarRow(kpId, token).catch((error) => log("similar-warn", error.message)),
+    ]);
   }
 
   // Only ever runs for titles the resolver could not describe (zen:/ort:/nd:
