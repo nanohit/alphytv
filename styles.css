@@ -747,8 +747,8 @@ body.admin-mode .meta-info { display: flex; }
 .admin-entry:hover { color: #555; }
 
 .watch-layout {
-  display: grid; grid-template-columns: minmax(0, 2fr) minmax(360px, .95fr);
-  gap: 18px; align-items: start;
+  display: grid; grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 20px; align-items: start;
 }
 .watch-main { min-width: 0; }
 .player-host {
@@ -760,10 +760,10 @@ body.admin-mode .meta-info { display: flex; }
 
 .meta-panel {
   background: var(--panel); border: 1px solid var(--stroke); border-radius: 12px;
-  padding: 13px; display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 13px;
+  padding: 13px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px;
   align-content: start;
 }
-.meta-poster { width: 112px; align-self: start; }
+.meta-poster { width: 100%; align-self: start; }
 .meta-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .meta-poster { position: relative; overflow: hidden; border-radius: 9px; }
 .meta-panel img { width: 100%; display: block; border-radius: 9px; border: 1px solid var(--stroke); object-fit: cover; }
@@ -829,10 +829,10 @@ body.admin-mode .meta-info { display: flex; }
   display: grid;
   grid-auto-flow: column;
   grid-template-rows: max-content;
-  grid-auto-columns: clamp(117px, 11.9vw, 138px);
+  grid-auto-columns: clamp(104px, 9vw, 118px);
   justify-content: start;
   align-content: start;
-  gap: 14px;
+  gap: 10px;
   overflow-x: auto;
   overflow-y: hidden;
   padding: 7px 5px 12px;
