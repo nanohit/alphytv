@@ -574,6 +574,12 @@
       movieLength: item.movieLength || null,
       rating: item.rating || undefined,
       kpId: item.kpId || undefined,
+      ageRating: item.ageRating ?? undefined,
+      ratingMpaa: item.ratingMpaa || undefined,
+      genres: item.genres || [],
+      countries: item.countries || [],
+      directors: item.directors || [],
+      cast: item.cast || [],
     };
   }
   // Fire-and-forget heal for a watch page that opened with rotted/partial meta.
@@ -2871,6 +2877,13 @@
     if (cachedMeta) renderMeta(cachedMeta, target);
     else el.metaPanel.classList.add("hidden");
     recordOpen(target);
+    // A deep link to a curated zen: title (a shared URL, a bookmark, a reopened
+    // tab) arrives with no cached meta, and used to render as a bare
+    // "Zenith <id>" with no sidebar — and therefore no credits and no «Похожее».
+    // ort:/opr: already healed from the catalog; zen: was simply missing it.
+    if (!cachedMeta?.title || !cachedMeta?.poster) {
+      healWatchMeta(target, token, cachedMeta, "curatedmeta", `zen:${zenithId}`, `Zenith ${zenithId}`);
+    }
     const embedUrl = `https://api.zenithjs.ws/embed/movie/${encodeURIComponent(zenithId)}`;
     await playZenithEmbed(embedUrl, target, token, {
       histKey: `zen:${zenithId}`,
