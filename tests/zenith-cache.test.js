@@ -17,7 +17,9 @@ const PARSED = {
 };
 
 function zenithSandbox({ seed = new Map(), zenithResponse } = {}) {
-  const ctx = makeSandbox({ storageSeed: seed });
+  const storageSeed = new Map(seed);
+  storageSeed.set("alphy.zenithBrowserBlockedUntil", String(Date.now() + 60_000));
+  const ctx = makeSandbox({ storageSeed });
   const calls = [];
   const baseFetch = ctx.sandbox.fetch;
   ctx.sandbox.fetch = async (input, init) => {

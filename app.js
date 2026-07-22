@@ -982,22 +982,25 @@
   }
 
   async function fetchCollapsJson(url, timeoutMs = 9000) {
-    const response = await fetchWithTimeout(url, {
-      headers: { Accept: "application/json" },
-      credentials: "omit",
-      mode: "cors",
-      cache: "no-store",
-      referrerPolicy: "no-referrer",
-    }, timeoutMs);
-    const text = await response.text();
+    if (!isCollapsControlUrl(url)) throw new Error("Collaps: blocked control URL");
+    // A normal cross-origin fetch would reveal https://alphy.tv in Origin even
+    // with referrerPolicy=no-referrer. The sandbox has an opaque origin, so the
+    // provider sees Origin:null while the request still leaves from the viewer's
+    // own IP. Never fall back to a direct fetch here: privacy must fail closed.
+    const text = await sandboxFetchText(url, "collaps", timeoutMs);
     let data;
     try { data = JSON.parse(text); } catch { data = { raw: text.slice(0, 400) }; }
-    if (!response.ok) {
-      const error = new Error(`Collaps ${response.status}`);
-      error.status = response.status;
-      throw error;
-    }
     return data;
+  }
+
+  function isCollapsControlUrl(value) {
+    try {
+      const url = new URL(value);
+      return url.origin === "https://plapi.cdnvideohub.com" &&
+        url.pathname.startsWith("/api/v1/player/sv/");
+    } catch {
+      return false;
+    }
   }
 
   async function fetchCollapsPlaylist(kpId) {
@@ -2679,6 +2682,7 @@
     const video = document.createElement("video");
     video.controls = true;
     video.playsInline = true;
+    video.referrerPolicy = "no-referrer";
     mountPaused(video);
     video.playbackRate = state.playbackRate;
     return video;
@@ -4285,7 +4289,11 @@
     showPlayerLoading();
     let html;
     try {
-      html = await fetchCachedEmbedText(embedUrl, { preferSandbox: true, label: "ortified" });
+      html = await fetchCachedEmbedText(embedUrl, {
+        preferSandbox: true,
+        directFallback: false,
+        label: "ortified",
+      });
     } catch (error) {
       // api.ortified.ws answers 422 to any request from a non-Russian IP — for a
       // user who normally streams from RU that means a VPN was left on. Surface the
@@ -4302,6 +4310,9 @@
     iframe.allow = "autoplay; fullscreen; encrypted-media; picture-in-picture";
     iframe.allowFullscreen = true;
     iframe.referrerPolicy = "no-referrer";
+    // Omitting allow-same-origin gives this srcdoc a unique opaque origin. Thus
+    // Ortified and its media APIs receive Origin:null rather than alphy.tv.
+    iframe.sandbox = "allow-scripts allow-forms allow-modals allow-presentation";
     iframe.srcdoc = sanitized.html;
     el.playerHost.replaceChildren(iframe);
     el.serialPanel.classList.add("hidden");
@@ -4394,11 +4405,12 @@
       let parsed = null;
       if (!force && !zenithBrowserFetchBlocked()) {
         try {
-          // A browser that can reach Zenith directly normally answers quickly. Do
-          // one abortable CORS attempt; XHR/sandbox retries can each hang for tens
-          // of seconds and the resolver is both faster and more reliable here.
+          // A browser that can reach Zenith directly normally answers quickly.
+          // Keep that viewer-IP fast path, but run it from an opaque sandbox so
+          // Zenith cannot learn the Alphy origin.
           const html = await fetchThirdPartyText(embedUrl, {
-            directOnly: true,
+            preferSandbox: true,
+            directFallback: false,
             timeoutMs: ZENITH_BROWSER_FAST_WINDOW_MS,
             label: "zenith",
           });
@@ -5706,10 +5718,12 @@ LIMIT 1`;
   }
 
   function sandboxFetchText(url, label, timeoutMs) {
+    if (!isOpaqueFetchUrl(url)) return Promise.reject(new Error(`Sandbox fetch blocked for ${url}`));
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     return new Promise((resolve, reject) => {
       const iframe = document.createElement("iframe");
       iframe.sandbox = "allow-scripts";
+      iframe.referrerPolicy = "no-referrer";
       iframe.style.cssText = "position:absolute;width:1px;height:1px;left:-9999px;top:-9999px;border:0";
       const timer = setTimeout(() => cleanup(new Error(`Sandbox fetch timeout for ${url}`)), timeoutMs || 30000);
       const cleanup = (error, value) => {
@@ -5720,8 +5734,11 @@ LIMIT 1`;
         else resolve(value);
       };
       const onMessage = (event) => {
+        if (event.source !== iframe.contentWindow || event.origin !== "null") return;
         const data = event.data || {};
         if (!data.alphyFetch || data.id !== id) return;
+        if (data.requestOrigin !== "null") { cleanup(new Error(`Sandbox origin leak for ${url}`)); return; }
+        if (data.documentReferrer) { cleanup(new Error(`Sandbox referrer leak for ${url}`)); return; }
         if (!data.ok) { cleanup(new Error(data.error || `Sandbox fetch failed for ${url}`)); return; }
         cleanup(null, data.text);
       };
@@ -5730,19 +5747,43 @@ LIMIT 1`;
       iframe.srcdoc = `<!doctype html><meta charset="utf-8"><script>
 addEventListener('message', async (event) => {
   const data = event.data || {};
-  if (!data.alphyFetch) return;
+  if (event.source !== parent || !data.alphyFetch) return;
   try {
+    const target = new URL(data.url);
+    const host = target.hostname.toLowerCase();
+    const allowed = target.protocol === 'https:' && (
+      host === 'plapi.cdnvideohub.com' ||
+      host === 'api.ortified.ws' ||
+      host === 'api.zenithjs.ws' ||
+      host === 'newdeaf.co' || host.endsWith('.newdeaf.co')
+    );
+    if (!allowed) throw new Error('Blocked sandbox URL');
     const response = await fetch(data.url, { cache: 'no-store', credentials: 'omit', mode: 'cors', referrerPolicy: 'no-referrer' });
     const text = await response.text();
     if (!response.ok) throw new Error('Fetch ' + response.status);
-    parent.postMessage({ alphyFetch: true, id: data.id, ok: true, status: response.status, contentType: response.headers.get('content-type') || '', text }, '*');
+    parent.postMessage({ alphyFetch: true, id: data.id, ok: true, requestOrigin: location.origin, documentReferrer: document.referrer, status: response.status, contentType: response.headers.get('content-type') || '', text }, '*');
   } catch (error) {
-    parent.postMessage({ alphyFetch: true, id: data.id, ok: false, error: String(error && error.message || error) }, '*');
+    parent.postMessage({ alphyFetch: true, id: data.id, ok: false, requestOrigin: location.origin, documentReferrer: document.referrer, error: String(error && error.message || error) }, '*');
   }
 });
 <\/script>`;
       document.body.appendChild(iframe);
     });
+  }
+
+  function isOpaqueFetchUrl(value) {
+    try {
+      const url = new URL(value);
+      const host = url.hostname.toLowerCase();
+      return url.protocol === "https:" && (
+        host === "plapi.cdnvideohub.com" ||
+        host === "api.ortified.ws" ||
+        host === "api.zenithjs.ws" ||
+        host === "newdeaf.co" || host.endsWith(".newdeaf.co")
+      );
+    } catch {
+      return false;
+    }
   }
 
   function warmNewdeafConnections() {
@@ -5821,7 +5862,11 @@ addEventListener('message', async (event) => {
     if (!pageUrl || newdeafPagePrefetches.has(pageUrl)) return;
     const warmPlayer = (parsed) => {
       const embedUrl = parsed?.ortified?.[0];
-      if (embedUrl) return fetchCachedEmbedText(embedUrl, { preferSandbox: true, label: "ortified-prefetch" });
+      if (embedUrl) return fetchCachedEmbedText(embedUrl, {
+        preferSandbox: true,
+        directFallback: false,
+        label: "ortified-prefetch",
+      });
       return null;
     };
     const cached = cacheGet("ndpage", pageUrl);
@@ -5999,11 +6044,19 @@ addEventListener('message', async (event) => {
       } else if (target.kind === "opr") {
         await ensureShaka();
       } else if (target.kind === "ort") {
-        await fetchCachedEmbedText(target.embedUrl, { preferSandbox: true, label: "ortified-intent" });
+        await fetchCachedEmbedText(target.embedUrl, {
+          preferSandbox: true,
+          directFallback: false,
+          label: "ortified-intent",
+        });
       } else if (target.kind === "nd") {
         const parsed = await resolveNewdeafPage(target.pageUrl);
         const embedUrl = parsed?.ortified?.[0];
-        if (embedUrl) await fetchCachedEmbedText(embedUrl, { preferSandbox: true, label: "ortified-intent" });
+        if (embedUrl) await fetchCachedEmbedText(embedUrl, {
+          preferSandbox: true,
+          directFallback: false,
+          label: "ortified-intent",
+        });
       }
     } catch (error) {
       preparedTargets.delete(prepKey);
@@ -6277,6 +6330,9 @@ addEventListener('message', async (event) => {
     out = out.replace(/ads:\s*adsConfig\s*,/g, "ads: {},");
     if (!/<base\s/i.test(out) && /<head([^>]*)>/i.test(out)) out = out.replace(/<head([^>]*)>/i, `<head$1><base href="${escapeAttr(baseHref)}">`);
     if (!/<base\s/i.test(out)) out = out.replace(/<html([^>]*)>/i, `<html$1><head><base href="${escapeAttr(baseHref)}"></head>`);
+    if (!/<meta\s+name=["']referrer["']/i.test(out)) {
+      out = out.replace(/<head([^>]*)>/i, '<head$1><meta name="referrer" content="no-referrer">');
+    }
     out = out.replace(/<head([^>]*)>/i, `<head$1>${adBlockPrelude()}${progressHook()}<style>html,body{margin:0;background:#000;min-height:100%;height:100%;overflow:hidden;}</style>`);
     stats.ok = stats.makePlayerRefs > 0;
     return { html: out, stats };
@@ -7168,6 +7224,9 @@ addEventListener('message', async (event) => {
       normalizeTitle,
       newdeafSerialHint,
       resolveRecommendationTarget,
+      isCollapsControlUrl,
+      isOpaqueFetchUrl,
+      sanitizeOrtifiedHtml,
     },
   };
 
