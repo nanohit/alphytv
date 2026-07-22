@@ -59,7 +59,7 @@ test("does not turn missing numeric metadata into zero", () => {
   assert.deepEqual(item.rating, {});
 });
 
-test("normalizes persistent soap and Collaps targets", () => {
+test("normalizes persistent soap, Collaps, and Rezka targets", () => {
   const catalog = normalizeCatalog({
     lists: [{
       id: "players",
@@ -76,12 +76,18 @@ test("normalizes persistent soap and Collaps targets", () => {
           isSeries: true,
           target: { kind: "clps", kpId: 404900, season: "1", episode: "1" },
         },
+        {
+          key: "rezka:657",
+          title: "Pacific Rim",
+          target: { kind: "rezka", rezkaId: 657, kpId: 1234 },
+        },
       ],
     }],
   });
 
   assert.deepEqual(catalog.lists[0].items[0].target, { kind: "soap", soapId: "123" });
   assert.deepEqual(catalog.lists[0].items[1].target, { kind: "clps", kpId: "404900", season: 1, episode: 1 });
+  assert.deepEqual(catalog.lists[0].items[2].target, { kind: "rezka", rezkaId: "657", kpId: "1234" });
 });
 
 test("rejects invalid targets, duplicate keys and non-https artwork", () => {

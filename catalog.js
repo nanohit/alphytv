@@ -95,6 +95,11 @@
     if (kind === "soap" && /^\d+$/.test(String(value?.soapId || ""))) {
       return { kind, soapId: String(value.soapId) };
     }
+    if (kind === "rezka" && /^\d+$/.test(String(value?.rezkaId || ""))) {
+      const target = { kind, rezkaId: String(value.rezkaId) };
+      if (/^\d+$/.test(String(value?.kpId || ""))) target.kpId = String(value.kpId);
+      return target;
+    }
     if (kind === "clps" && /^\d+$/.test(String(value?.kpId || ""))) {
       const target = { kind, kpId: String(value.kpId) };
       const season = Number.parseInt(String(value?.season || ""), 10);

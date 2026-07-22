@@ -576,8 +576,22 @@ async function handleZenithCached(request, url) {
   }, 200, "public, max-age=60");
 }
 
-Deno.serve(async (request) => {
+const listenPort = Number(Deno.env.get("ALPHY_LOCAL_PORT") || 8000);
+Deno.serve({ port: listenPort }, async (request, info) => {
   const url = new URL(request.url);
+  if (url.pathname === "/resolve-rezka") {
+    const headers = new Headers(request.headers);
+    const forwarded = String(headers.get("x-forwarded-for") || "").split(",", 1)[0].trim();
+    const realIp = String(headers.get("x-real-ip") || "").trim();
+    const remoteIp = info.remoteAddr && "hostname" in info.remoteAddr
+      ? String(info.remoteAddr.hostname || "").trim()
+      : "";
+    const clientIp = Deno.env.get("ALPHY_TEST_CLIENT_IP") || forwarded || realIp || remoteIp;
+    // Always overwrite the public request value inside our Deno -> shared-worker
+    // handoff. RezkaClient validates the resulting address again before forwarding.
+    headers.set("x-alphy-client-ip", clientIp);
+    request = new Request(request, { headers });
+  }
   if (url.pathname === "/key-pool/status" && request.method === "GET") {
     return keyPoolStatusResponse(request);
   }

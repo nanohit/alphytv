@@ -18,6 +18,10 @@
       "destination": "/"
     },
     {
+      "source": "/r/:path*",
+      "destination": "/"
+    },
+    {
       "source": "/c/:path*",
       "destination": "/"
     },

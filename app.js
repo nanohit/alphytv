@@ -35,6 +35,8 @@
   const COLLAPS_PREVIEW_LIMIT = 1;
   const COLLAPS_PREVIEW_IDLE_TIMEOUT = 3500;
   const COLLAPS_PREVIEW_COOLDOWN_MS = 20 * 60e3;
+  const REZKA_PREVIEW_LIMIT = 1;
+  const REZKA_PREVIEW_COOLDOWN_MS = 20 * 60e3;
   const COLLAPS_FAST_PATH_TIMEOUT_MS = 1400;
   const ZENITH_BROWSER_FAST_WINDOW_MS = 1400;
   // The resolver itself hands the SAME payload to every client for a full hour
@@ -71,6 +73,7 @@
     clpsprobe: 6 * 3600e3,
     clpsmiss: 60 * 60e3,
     clpsvideo: 90e3,
+    rezkamiss: 60 * 60e3,
     zona: 30 * 24 * 3600e3,
     zenith: 20 * 60e3,
     meta: 7 * 24 * 3600e3,
@@ -186,8 +189,10 @@
   const soapWarmOrigins = new Set();
   const soapManifestPrefetches = new Set();
   const collapsWarmOrigins = new Set();
+  const rezkaWarmOrigins = new Set();
   const collapsProbeInflight = new Map();
   const collapsVideoInflight = new Map();
+  const rezkaProbeInflight = new Map();
   const embedTextCache = new Map();
   const embedTextInflight = new Map();
   const zenithParsedCache = new Map();
@@ -395,6 +400,30 @@
     return target;
   }
 
+  function rezkaTarget(rezkaId, kpId = null) {
+    const target = { kind: "rezka", rezkaId: String(rezkaId || "") };
+    if (/^\d+$/.test(String(kpId || ""))) target.kpId = String(kpId);
+    return target;
+  }
+
+  function rezkaListItem(hit, details = {}) {
+    const target = rezkaTarget(hit.rezkaId, hit.kpId);
+    return {
+      id: crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+      key: keyFor(target),
+      title: details.title || hit.title || `Фильм ${hit.rezkaId}`,
+      year: details.year || hit.year || "",
+      poster: details.poster || hit.poster || "",
+      description: details.description || "",
+      isSeries: false,
+      movieLength: details.movieLength || hit.movieLength || null,
+      rating: details.rating || hit.rating || {},
+      kpId: String(hit.kpId || ""),
+      target,
+      cachedAt: new Date().toISOString(),
+    };
+  }
+
   function collapsListItem(hit, details = {}) {
     const target = collapsTarget(hit.kpId, hit.selection || hit);
     const title = details.title || hit.title || `KP ${hit.kpId}`;
@@ -460,6 +489,7 @@
     if (t.kind === "nd") return `nd:${t.pageUrl}`;
     if (t.kind === "soap") return `soap:${t.soapId}`;
     if (t.kind === "clps") return `clps:${t.kpId}`;
+    if (t.kind === "rezka") return `rezka:${t.rezkaId}`;
     return "x";
   }
   function cleanTarget(t) {
@@ -470,6 +500,7 @@
     if (t.kind === "nd") return { kind: "nd", pageUrl: t.pageUrl };
     if (t.kind === "soap") return { kind: "soap", soapId: String(t.soapId) };
     if (t.kind === "clps") return collapsTarget(t.kpId, t);
+    if (t.kind === "rezka") return rezkaTarget(t.rezkaId, t.kpId);
     return t;
   }
   function hashFor(t) {
@@ -479,6 +510,10 @@
     if (t.kind === "opr") return legacyHashPath(`/watch/opr/${encodeURIComponent(t.playerUrl)}`);
     if (t.kind === "nd") return shortNewdeafPath(t.pageUrl) || legacyHashPath(`/watch/nd/${encodeURIComponent(t.pageUrl)}`);
     if (t.kind === "soap") return `/m/${encodeURIComponent(t.soapId)}`;
+    if (t.kind === "rezka") {
+      const path = `/r/${encodeURIComponent(t.rezkaId)}`;
+      return /^\d+$/.test(String(t.kpId || "")) ? `${path}/${encodeURIComponent(t.kpId)}` : path;
+    }
     if (t.kind === "clps") {
       const path = `/c/${encodeURIComponent(t.kpId)}`;
       const season = positiveInt(t.season);
@@ -1138,6 +1173,55 @@
     }, COLLAPS_PREVIEW_COOLDOWN_MS);
   }
 
+  function rezkaPreviewOnCooldown() {
+    return !!cacheGet("rezkapreview", "cooldown");
+  }
+
+  function setRezkaPreviewCooldown(error) {
+    cacheSet("rezkapreview", "cooldown", {
+      at: Date.now(),
+      message: String(error?.message || error || "").slice(0, 120),
+    }, REZKA_PREVIEW_COOLDOWN_MS);
+  }
+
+  async function probeRezkaSearch(movies, token) {
+    if (!rezkaLastResortEnabled() || rezkaPreviewOnCooldown()) return [];
+    const movie = (movies || []).find((item) =>
+      !item?.isSeries && /^\d+$/.test(String(item?.kpId || "")) && cleanMovieTitle(movieTitle(item))
+    );
+    if (!movie || isStale(token)) return [];
+    const kpId = String(movie.kpId);
+    if (cacheGet("rezkamiss", kpId)) return [];
+    if (rezkaProbeInflight.has(kpId)) return rezkaProbeInflight.get(kpId);
+    const pending = (async () => {
+      try {
+        const title = cleanMovieTitle(movieTitle(movie));
+        const resolved = await resolveRezka({ title, year: movie.year || null });
+        if (!resolved?.movie?.rezkaId || Number(resolved.best?.quality) < 720) return [];
+        warmRezkaConnections(resolved);
+        return [{
+          kpId,
+          rezkaId: String(resolved.movie.rezkaId),
+          title: movieTitle(movie) || resolved.movie.title,
+          year: movie.year || resolved.movie.year || "",
+          poster: movie.poster || "",
+          rating: movie.rating || {},
+          movieLength: movie.movieLength || null,
+          qualityLabel: "720p",
+        }];
+      } catch (error) {
+        if (/not found|не найден|no working translator|no anonymous stream/i.test(String(error?.message || ""))) {
+          cacheSet("rezkamiss", kpId, true, TTL.rezkamiss);
+        } else {
+          setRezkaPreviewCooldown(error);
+        }
+        throw error;
+      }
+    })().finally(() => rezkaProbeInflight.delete(kpId));
+    rezkaProbeInflight.set(kpId, pending);
+    return pending;
+  }
+
   async function resolveZona(kpId) {
     const cached = cacheGet("zona", kpId);
     if (cached && cached.embedUrl) return cached;
@@ -1298,6 +1382,14 @@
     if (/^\d+$/.test(segs[0])) return { view: "watch", kind: "zen", raw: segs[0] };
     if (segs[0] === "k" && /^\d+$/.test(segs[1] || "")) return { view: "watch", kind: "kp", raw: segs[1] };
     if (segs[0] === "m" && /^\d+$/.test(segs[1] || "")) return { view: "watch", kind: "soap", raw: segs[1] };
+    if (segs[0] === "r" && /^\d+$/.test(segs[1] || "")) {
+      return {
+        view: "watch",
+        kind: "rezka",
+        raw: segs[1],
+        kpId: /^\d+$/.test(segs[2] || "") ? segs[2] : "",
+      };
+    }
     if (segs[0] === "c" && /^\d+$/.test(segs[1] || "")) {
       return { view: "watch", kind: "clps", raw: segs[1], selection: collapsSelectionFromEpisodeKey(segs[2]) };
     }
@@ -1334,6 +1426,7 @@
     if (route.kind === "nd") return { kind: "nd", pageUrl: route.raw };
     if (route.kind === "soap") return { kind: "soap", soapId: route.raw };
     if (route.kind === "clps") return collapsTarget(route.raw, route.selection || {});
+    if (route.kind === "rezka") return rezkaTarget(route.raw, route.kpId);
     return null;
   }
 
@@ -1617,23 +1710,67 @@
     let pk = [];
     let nd = [];
     let clps = [];
+    let rezka = [];
     let newdeafUnavailable = false;
     let collapsProbeKey = "";
     let collapsScheduledKey = "";
+    let rezkaProbeKey = "";
+    let rezkaScheduledKey = "";
+    const startRezkaProbe = (movies, { immediate = false } = {}) => {
+      const candidates = (movies || []).filter((m) => !m?.isSeries).slice(0, REZKA_PREVIEW_LIMIT);
+      const ids = candidates.map((m) => m.kpId).filter(Boolean).join(",");
+      if (!ids || ids === rezkaProbeKey || ids === rezkaScheduledKey || rezkaPreviewOnCooldown()) return;
+      rezkaScheduledKey = ids;
+      const run = () => {
+        if (isStale(token) || rezkaScheduledKey !== ids || rezkaPreviewOnCooldown()) return;
+        rezkaScheduledKey = "";
+        rezkaProbeKey = ids;
+        probeRezkaSearch(candidates, token)
+          .then((hits) => {
+            rezka = hits;
+            if (!isStale(token)) renderResults(nd, pk, query, {
+              newdeafUnavailable,
+              collapsHits: clps,
+              rezkaHits: rezka,
+            });
+          })
+          .catch((error) => log("rezka-probe-warn", error.message));
+      };
+      if (immediate) run();
+      else scheduleIdle(run, COLLAPS_PREVIEW_IDLE_TIMEOUT);
+    };
     const startCollapsProbe = (movies) => {
       const ids = (movies || []).map((m) => m.kpId).filter(Boolean).slice(0, COLLAPS_PREVIEW_LIMIT).join(",");
-      if (!ids || ids === collapsProbeKey || ids === collapsScheduledKey || collapsPreviewOnCooldown()) return;
+      if (!ids || ids === collapsProbeKey || ids === collapsScheduledKey) return;
+      if (collapsPreviewOnCooldown()) {
+        startRezkaProbe(movies);
+        return;
+      }
       collapsScheduledKey = ids;
       scheduleIdle(() => {
-        if (isStale(token) || collapsScheduledKey !== ids || collapsPreviewOnCooldown()) return;
+        if (isStale(token) || collapsScheduledKey !== ids) return;
+        if (collapsPreviewOnCooldown()) {
+          collapsScheduledKey = "";
+          startRezkaProbe(movies, { immediate: true });
+          return;
+        }
         collapsScheduledKey = "";
         collapsProbeKey = ids;
         probeCollapsSearch(movies, token)
           .then((hits) => {
             clps = hits;
-            if (!isStale(token)) renderResults(nd, pk, query, { newdeafUnavailable, collapsHits: clps });
+            const topId = String((movies || []).find((m) => !m?.isSeries)?.kpId || "");
+            if (!hits.some((hit) => String(hit.kpId) === topId)) startRezkaProbe(movies, { immediate: true });
+            if (!isStale(token)) renderResults(nd, pk, query, {
+              newdeafUnavailable,
+              collapsHits: clps,
+              rezkaHits: rezka,
+            });
           })
-          .catch((error) => log("collaps-probe-warn", error.message));
+          .catch((error) => {
+            log("collaps-probe-warn", error.message);
+            startRezkaProbe(movies, { immediate: true });
+          });
       }, COLLAPS_PREVIEW_IDLE_TIMEOUT);
     };
     const canStartNewdeafNow = /[а-яё]/i.test(query);
@@ -1658,7 +1795,7 @@
         newdeafUnavailable = first.unavailable;
       }
       if (pk.length) startCollapsProbe(pk);
-      renderResults(nd, pk, query, { newdeafUnavailable, collapsHits: clps });
+      renderResults(nd, pk, query, { newdeafUnavailable, collapsHits: clps, rezkaHits: rezka });
 
       const [poisk, newdeaf] = await Promise.all([poiskTask, newdeafTask]);
       pk = poisk.results;
@@ -1670,7 +1807,7 @@
       if (isStale(token)) return;
       pk = poisk.results;
       startCollapsProbe(pk);
-      renderResults([], pk, query, { collapsHits: clps });
+      renderResults([], pk, query, { collapsHits: clps, rezkaHits: rezka });
 
       // newdeaf indexes Russian titles only. If the query has no Cyrillic, search
       // newdeaf with the Russian name from the top PoiskKino hit so English queries
@@ -1686,8 +1823,8 @@
     if (isStale(token)) return;
     await soapTask;
     if (isStale(token)) return;
-    renderResults(nd, pk, query, { newdeafUnavailable, collapsHits: clps });
-    if (!pk.length && !nd.length && !clps.length && !soapSearch(query, { limit: 1 }).length) {
+    renderResults(nd, pk, query, { newdeafUnavailable, collapsHits: clps, rezkaHits: rezka });
+    if (!pk.length && !nd.length && !clps.length && !rezka.length && !soapSearch(query, { limit: 1 }).length) {
       el.resultsTitle.textContent = "Ничего не найдено";
     }
   }
@@ -1706,6 +1843,7 @@
     el.resultsTitle.textContent = "Результаты";
     if (ndCandidates.length) prefetchTopNewdeafPage(ndCandidates);
     const collapsHits = Array.isArray(options.collapsHits) ? options.collapsHits : [];
+    const rezkaHits = Array.isArray(options.rezkaHits) ? options.rezkaHits : [];
     const highCollapsHits = collapsHits.filter((hit) => Number(hit.qualityHeight) >= 1440);
     const regularCollapsHits = collapsHits.filter((hit) => Number(hit.qualityHeight) < 1440);
     for (const hit of highCollapsHits) frag.appendChild(makeCollapsCard(hit));
@@ -1747,6 +1885,7 @@
       frag.appendChild(card);
     }
     for (const hit of regularCollapsHits) frag.appendChild(makeCollapsCard(hit));
+    for (const hit of rezkaHits) frag.appendChild(makeRezkaCard(hit));
     for (const movie of pkResults) {
       if (movie.kpId == null) continue;
       const title = movieTitle(movie);
@@ -1799,7 +1938,7 @@
       note.textContent = "Newdeaf не ответил этому браузеру — показаны остальные результаты.";
       frag.appendChild(note);
     }
-    if (!pkResults.length && !ndCandidates.length && !collapsHits.length && !soapHits.length) {
+    if (!pkResults.length && !ndCandidates.length && !collapsHits.length && !rezkaHits.length && !soapHits.length) {
       const p = document.createElement("p");
       p.className = "muted";
       p.textContent = `Ничего не найдено по «${query}».`;
@@ -1832,6 +1971,31 @@
       bookmark: { target, details },
       onClick: () => go(hashFor(target)),
       onAdd: () => window.alphyCatalog?.addToList?.(collapsListItem(hit, details)),
+    });
+  }
+
+  function makeRezkaCard(hit) {
+    const target = rezkaTarget(hit.rezkaId, hit.kpId);
+    const details = {
+      title: hit.title || `Фильм ${hit.rezkaId}`,
+      year: hit.year || "",
+      poster: hit.poster || "",
+      rating: hit.rating || {},
+      movieLength: hit.movieLength || null,
+      isSeries: false,
+      kpId: String(hit.kpId || ""),
+    };
+    return makeCard({
+      title: details.title,
+      sub: ["720p", "фильм"].join(" · "),
+      poster: details.poster,
+      ratingPill: "720p",
+      rating: details.rating,
+      movieLength: details.movieLength,
+      isSeries: false,
+      bookmark: { target, details },
+      onClick: () => openRezkaHit(hit, details),
+      onAdd: () => window.alphyCatalog?.addToList?.(rezkaListItem(hit, details)),
     });
   }
 
@@ -2001,6 +2165,7 @@
     if (r.kind === "nd") return playNd(r.raw, token);
     if (r.kind === "soap") return playSoap(r.raw, token);
     if (r.kind === "clps") return playCollaps(r.raw, token, { selection: r.selection });
+    if (r.kind === "rezka") return playRezkaRoute(r.raw, r.kpId, token);
     throw new Error("Неизвестный тип контента");
   }
 
@@ -3338,12 +3503,13 @@
   // =====================================================================
   // Playback — HDRezka (the LAST-RESORT source)
   //
-  // Only reached when Collaps AND Zona/Zenith all fail for a title. The resolver
+  // Reached either from an explicit 720p search card or after Collaps AND
+  // Zona/Zenith fail. The resolver
   // relays short-lived signed Voidboost MP4/VTT URLs (a few KB); the video bytes
   // stream browser -> Voidboost directly, so this never loads the resolver with
-  // video. It is NEVER prefetched speculatively — the resolver call happens only
-  // on a real failed-through click. A localStorage kill switch (alphy.rezka.off)
-  // lets it be disabled without a redeploy if the upstream misbehaves.
+  // video. Search may probe one top movie only after its Collaps probe misses;
+  // everything else resolves on a real click. A localStorage kill switch
+  // (alphy.rezka.off) lets it be disabled without a redeploy.
   // =====================================================================
   const rezkaResolveCache = new Map();
   const REZKA_RESOLVE_TTL_MS = 8 * 60e3;
@@ -3370,7 +3536,27 @@
     });
   }
 
-  async function resolveRezka({ kpId = null, title = null, year = null, rezkaId = null, translator = null } = {}) {
+  function openRezkaHit(hit, details = {}) {
+    const target = rezkaTarget(hit.rezkaId, hit.kpId);
+    const meta = {
+      ...details,
+      title: details.title || hit.title || `Фильм ${hit.rezkaId}`,
+      year: details.year || hit.year || "",
+      poster: details.poster || hit.poster || "",
+      rating: details.rating || hit.rating || {},
+      movieLength: details.movieLength || hit.movieLength || null,
+      isSeries: false,
+      kpId: String(hit.kpId || ""),
+    };
+    cacheSet("curatedmeta", keyFor(target), meta, TTL.enriched);
+    if (target.kpId) cacheSet("meta", target.kpId, meta, TTL.meta);
+    go(hashFor(target));
+  }
+
+  async function resolveRezka(
+    { kpId = null, title = null, year = null, rezkaId = null, translator = null } = {},
+    { force = false } = {},
+  ) {
     const params = new URLSearchParams();
     if (rezkaId) params.set("id", String(rezkaId));
     else if (title) { params.set("title", title); if (year) params.set("year", String(year)); }
@@ -3378,11 +3564,18 @@
     else throw new Error("HDRezka: не задан фильм");
     if (translator) params.set("translator", String(translator));
     const path = `/resolve-rezka?${params}`;
+    if (force) rezkaResolveCache.delete(path);
     const cached = rezkaResolveCache.get(path);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
     const data = await resolverJson(path, { retries: 0, timeoutMs: 20000 });
     if (!data.ok || !data.best?.url) throw new Error(data.message || "HDRezka не вернул поток");
-    rezkaResolveCache.set(path, { value: data, expiresAt: Date.now() + REZKA_RESOLVE_TTL_MS });
+    const entry = { value: data, expiresAt: Date.now() + REZKA_RESOLVE_TTL_MS };
+    rezkaResolveCache.set(path, entry);
+    // A search preview resolves by title, while its permanent card opens by the
+    // stable Rezka ID. Alias the same fresh signed payload so that click is instant.
+    if (!translator && data.movie?.rezkaId) {
+      rezkaResolveCache.set(`/resolve-rezka?id=${encodeURIComponent(data.movie.rezkaId)}`, entry);
+    }
     return data;
   }
 
@@ -3395,6 +3588,45 @@
     return sorted[0];
   }
 
+  async function playRezkaRoute(rezkaId, kpId, token) {
+    const target = rezkaTarget(rezkaId, kpId);
+    const histKey = keyFor(target);
+    let meta = cacheGet("curatedmeta", histKey) || storedMeta(histKey) ||
+      (target.kpId ? cacheGet("meta", target.kpId) : null);
+    const metaTask = !meta && target.kpId ? fetchMovieMeta(target.kpId).catch(() => null) : Promise.resolve(meta);
+    const savedDub = savedRezkaPref(histKey, "rezkaTranslator");
+    const resolveTask = savedDub
+      ? resolveRezka({ rezkaId, translator: savedDub }).catch(() => resolveRezka({ rezkaId }))
+      : resolveRezka({ rezkaId });
+
+    target.title = movieTitle(meta) || meta?.title || `Фильм ${rezkaId}`;
+    target.poster = meta?.poster || "";
+    target.year = meta?.year || "";
+    target.isSeries = false;
+    state.currentTarget = target;
+    setWatchHead(target.title, target);
+    if (meta) renderMeta(meta, target);
+    recordOpen(target);
+
+    const [resolved, freshMeta] = await Promise.all([resolveTask, metaTask]);
+    if (isStale(token)) return;
+    if (freshMeta && freshMeta !== meta) {
+      meta = { ...freshMeta, kpId: target.kpId || freshMeta.kpId };
+      cacheSet("curatedmeta", histKey, meta, TTL.enriched);
+      if (target.kpId) cacheSet("meta", target.kpId, meta, TTL.meta);
+      target.title = movieTitle(meta) || meta.title || target.title;
+      target.poster = meta.poster || target.poster;
+      target.year = meta.year || target.year;
+      setWatchHead(target.title, target);
+      renderMeta(meta, target);
+      recordOpen(target);
+    }
+    await playRezka(resolved, target, token, {
+      histKey,
+      resume: resumePosition(histKey),
+    });
+  }
+
   async function playRezka(resolved, target, token, opts = {}) {
     if (isStale(token)) return;
     await teardownPlayer();
@@ -3403,16 +3635,22 @@
     const streams = (resolved.streams || []).filter((s) => s.url);
     if (!streams.length) throw new Error("HDRezka не вернул качество");
     const pick = chooseRezkaStream(streams, opts.qualityKey || savedRezkaPref(histKey, "rezkaQuality"));
+    warmRezkaConnections(resolved);
 
     state.rezka = {
       streams: [...streams].sort((a, b) => (b.quality || 0) - (a.quality || 0)),
       subtitles: resolved.subtitles || [],
-      translators: resolved.translators || [],
+      translators: (resolved.translators || []).length
+        ? resolved.translators
+        : (resolved.translatorCandidates || []),
       translatorId: resolved.translatorId,
       movie: resolved.movie || {},
       target,
       histKey,
       qualityLabel: pick.label,
+      retryCount: Number(opts.retryCount || 0),
+      refreshing: false,
+      switchingTranslator: false,
     };
 
     const video = document.createElement("video");
@@ -3456,11 +3694,31 @@
     video.addEventListener("error", () => {
       if (isStale(token) || state.videoEl !== video) return;
       log("rezka-video-error", { code: video.error?.code, histKey });
-      // If it never produced a decodable frame, every source is now exhausted, so
-      // surface a clear error rather than leaving a silent black player.
-      if (video.readyState < 2) {
-        showError(new Error("HDRezka: поток не открылся (ссылка истекла или недоступна из вашей сети). Откройте заново."));
+      const r = state.rezka;
+      if (!r || r.refreshing || r.retryCount >= 1 || !r.movie?.rezkaId) {
+        showError(new Error("Резервный поток не открылся или перестал отвечать."));
+        return;
       }
+      r.refreshing = true;
+      renderRezkaControls();
+      const at = video.currentTime || opts.resume || 0;
+      resolveRezka({ rezkaId: r.movie.rezkaId, translator: r.translatorId }, { force: true })
+        .then((fresh) => {
+          if (isStale(token) || state.rezka !== r) return;
+          return playRezka(fresh, r.target, token, {
+            histKey: r.histKey,
+            resume: at,
+            qualityKey: r.qualityLabel,
+            retryCount: r.retryCount + 1,
+          });
+        })
+        .catch((error) => {
+          if (!isStale(token) && state.rezka === r) {
+            r.refreshing = false;
+            renderRezkaControls();
+            showError(new Error(`Резервный поток не восстановился: ${error.message}`));
+          }
+        });
     });
     // Start loading the MP4 immediately — do not block first bytes on the subtitle
     // fetch below.
@@ -3477,29 +3735,35 @@
 
     // If canplay is slow (cold CDN), still reveal controls so the user isn't stuck
     // on a spinner over an already-loading <video>.
-    setTimeout(onReady, 2600);
+    setTimeout(() => {
+      if (!ready && !isStale(token) && state.videoEl === video) renderRezkaControls();
+    }, 2600);
   }
 
   async function attachRezkaSubtitles(video, subs, token) {
-    for (const sub of subs || []) {
-      if (isStale(token)) return;
+    const loaded = await Promise.all((subs || []).map(async (sub) => {
       try {
         const res = await fetch(sub.url, { cache: "no-store" });
-        if (!res.ok) continue;
+        if (!res.ok) return null;
         const raw = (await res.text()).replace(/^﻿/, "");
-        if (!raw.trim()) continue;
+        if (!raw.trim()) return null;
         const vtt = /^WEBVTT/i.test(raw.trim()) ? raw : subtitleTextToVtt(raw, "srt");
-        const blobUrl = URL.createObjectURL(new Blob([vtt], { type: "text/vtt;charset=utf-8" }));
-        state.subtitleObjectUrls.push(blobUrl);
-        const track = document.createElement("track");
-        track.kind = "subtitles";
-        track.label = sub.label || sub.lang || "Субтитры";
-        track.srclang = sub.lang || "und";
-        track.src = blobUrl;
-        video.appendChild(track);
+        return { sub, vtt };
       } catch (error) {
         log("rezka-subtitle-warn", { url: sub.url, message: error.message });
+        return null;
       }
+    }));
+    if (isStale(token) || state.videoEl !== video) return;
+    for (const item of loaded.filter(Boolean)) {
+      const blobUrl = URL.createObjectURL(new Blob([item.vtt], { type: "text/vtt;charset=utf-8" }));
+      state.subtitleObjectUrls.push(blobUrl);
+      const track = document.createElement("track");
+      track.kind = "subtitles";
+      track.label = item.sub.label || item.sub.lang || "Субтитры";
+      track.srclang = item.sub.lang || "und";
+      track.src = blobUrl;
+      video.appendChild(track);
     }
   }
 
@@ -3512,12 +3776,14 @@
     el.trackPanel.replaceChildren();
     el.trackPanel.classList.remove("hidden");
 
-    // Audio track (dub) — only when the film page yielded more than one translator.
+    // Audio tracks are authoritative when the film page is reachable. Datacenter
+    // WAF blocks it often, so tentative common IDs are resolved only when clicked.
     if (r.translators.length > 1) {
       addTrackGroup("Озвучка", r.translators, (t) => {
         const btn = document.createElement("button");
         btn.textContent = rezkaTranslatorName(t);
         if (Number(t.id) === Number(r.translatorId)) btn.className = "active";
+        btn.disabled = !!(r.switchingTranslator || r.refreshing);
         btn.addEventListener("click", () => { switchRezkaTranslator(t.id).catch((e) => showError(e)); });
         return btn;
       });
@@ -3531,6 +3797,7 @@
         ? ` · ${video.videoWidth}×${video.videoHeight}` : "";
       btn.textContent = `${s.label}${real}`;
       if (s.label === r.qualityLabel) btn.className = "active";
+      btn.disabled = !!(r.switchingTranslator || r.refreshing);
       btn.addEventListener("click", () => switchRezkaQuality(s.label));
       return btn;
     });
@@ -3562,7 +3829,9 @@
 
     const note = document.createElement("div");
     note.className = "track-note muted";
-    note.textContent = "Резервный источник (HDRezka), без рекламы. Ярлык качества — от источника; фактическое разрешение показано на активной кнопке.";
+    note.textContent = r.refreshing
+      ? "Обновляем ссылку на резервный поток…"
+      : "Резервный источник без рекламы. Фактическое разрешение показано на активной кнопке.";
     el.trackPanel.appendChild(note);
   }
 
@@ -3587,18 +3856,29 @@
 
   async function switchRezkaTranslator(translatorId) {
     const r = state.rezka;
-    if (!r || Number(translatorId) === Number(r.translatorId)) return;
+    if (!r || r.switchingTranslator || Number(translatorId) === Number(r.translatorId)) return;
     if (!r.movie?.rezkaId) return;
     const token = resolveToken;
     const at = state.videoEl?.currentTime || 0;
-    const resolved = await resolveRezka({ rezkaId: r.movie.rezkaId, translator: translatorId });
-    if (isStale(token)) return;
-    persistRezkaPref(r.histKey, { rezkaTranslator: String(translatorId) });
-    await playRezka(resolved, r.target, token, {
-      histKey: r.histKey,
-      resume: at,
-      qualityKey: r.qualityLabel,
-    });
+    r.switchingTranslator = true;
+    renderRezkaControls();
+    try {
+      const resolved = await resolveRezka({ rezkaId: r.movie.rezkaId, translator: translatorId });
+      if (isStale(token) || state.rezka !== r) return;
+      persistRezkaPref(r.histKey, { rezkaTranslator: String(translatorId) });
+      await playRezka(resolved, r.target, token, {
+        histKey: r.histKey,
+        resume: at,
+        qualityKey: r.qualityLabel,
+      });
+    } catch (error) {
+      if (!isStale(token) && state.rezka === r) {
+        r.switchingTranslator = false;
+        r.translators = r.translators.filter((item) => Number(item.id) !== Number(translatorId));
+        renderRezkaControls();
+      }
+      throw new Error(`Эта озвучка недоступна: ${error.message}`);
+    }
   }
 
   // The last-resort entry point: resolve HDRezka for a title and play it. Returns
@@ -3616,12 +3896,15 @@
     try {
       const savedDub = opts.histKey ? savedRezkaPref(opts.histKey, "rezkaTranslator") : null;
       // Title+year is the resolver's fast path (no KinoPoisk->title lookup).
-      const resolved = await resolveRezka({
+      const request = {
         title: title || null,
         year: title ? year : null,
         kpId: title ? null : kpId,
         translator: savedDub,
-      });
+      };
+      const resolved = savedDub
+        ? await resolveRezka(request).catch(() => resolveRezka({ ...request, translator: null }))
+        : await resolveRezka(request);
       if (isStale(token)) return true;
       log("rezka-last-resort", { title: resolved.movie?.title, best: resolved.best?.label });
       await playRezka(resolved, target, token, {
@@ -5508,6 +5791,24 @@ addEventListener('message', async (event) => {
     }
   }
 
+  function warmRezkaConnections(resolved) {
+    const urls = [
+      ...(resolved?.streams || []).map((item) => item?.url),
+      ...(resolved?.subtitles || []).map((item) => item?.url),
+    ];
+    for (const value of urls) {
+      let origin = "";
+      try { origin = new URL(value).origin; } catch { /* ignore malformed signed URLs */ }
+      if (!origin || rezkaWarmOrigins.has(origin)) continue;
+      rezkaWarmOrigins.add(origin);
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = origin;
+      link.crossOrigin = "anonymous";
+      document.head.appendChild(link);
+    }
+  }
+
   function scheduleIdle(callback, timeout = 2500) {
     if (typeof requestIdleCallback === "function") {
       return requestIdleCallback(callback, { timeout });
@@ -6656,6 +6957,9 @@ addEventListener('message', async (event) => {
     }
     if (target.kind === "kp") cacheSet("meta", target.kpId, { ...meta, kpId: target.kpId }, TTL.enriched);
     if (target.kind === "clps") cacheSet("meta", target.kpId, { ...meta, kpId: target.kpId }, TTL.enriched);
+    if (target.kind === "rezka" && target.kpId) {
+      cacheSet("meta", target.kpId, { ...meta, kpId: target.kpId }, TTL.enriched);
+    }
     go(hashFor(target));
   }
 

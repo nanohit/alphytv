@@ -24,7 +24,7 @@ const APP_VERSION = "2.2.5";
 // The common Russian dubs, tried in order until one returns a real stream. This is
 // only the *fallback* order when no explicit translator is requested and the film
 // page (the authoritative dub list) is unreachable.
-const DEFAULT_TRANSLATORS = [56, 238, 1, 111];
+export const DEFAULT_TRANSLATORS = [56, 238, 1, 111];
 const USER_AGENT = [
   "Mozilla/5.0 (Linux; Android 14; Pixel 7)",
   "AppleWebKit/537.36 (KHTML, like Gecko)",
@@ -178,17 +178,19 @@ export function parseTranslators(html) {
 
 export function chooseSearchResult(results, wantedTitle, wantedYear) {
   const normalizedWanted = normalizeTitle(wantedTitle);
-  const ranked = results.map((item) => {
-    const normalized = normalizeTitle(item.title);
-    let score = 0;
-    if (normalized === normalizedWanted) score += 100;
-    else if (normalized.startsWith(normalizedWanted) || normalizedWanted.startsWith(normalized)) score += 50;
-    else if (normalized.includes(normalizedWanted) || normalizedWanted.includes(normalized)) score += 25;
-    if (wantedYear && item.year === Number(wantedYear)) score += 30;
-    else if (wantedYear && item.year) score -= Math.min(20, Math.abs(item.year - Number(wantedYear)) * 5);
-    return { item, score };
-  }).sort((left, right) => right.score - left.score || left.item.rezkaId - right.item.rezkaId);
-  return ranked[0]?.score > 0 ? ranked[0].item : null;
+  if (!normalizedWanted) return null;
+  const exact = results.filter((item) => normalizeTitle(item.title) === normalizedWanted);
+  if (!exact.length) return null;
+  const year = Number(wantedYear);
+  if (Number.isFinite(year) && year > 0) {
+    const sameYear = exact.filter((item) => Number(item.year) === year);
+    // A known but different year is a remake, not an acceptable fuzzy fallback.
+    if (!sameYear.length) return exact.length === 1 && !exact[0].year ? exact[0] : null;
+    return sameYear.sort((a, b) => a.rezkaId - b.rezkaId)[0];
+  }
+  // Without a year, duplicate exact titles are ambiguous. Fail closed instead of
+  // silently opening whichever remake happened to sort first.
+  return exact.length === 1 ? exact[0] : null;
 }
 
 function cookiePairs(headers) {
@@ -207,12 +209,18 @@ export class RezkaClient {
     fetchImpl = globalThis.fetch,
     translators = DEFAULT_TRANSLATORS,
     timeoutMs = 12000,
+    clientIp = "",
   } = {}) {
     if (!fetchImpl) throw new Error("A fetch implementation is required");
     this.baseUrl = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
-    this.fetch = fetchImpl;
+    // workerd's native fetch is an Web IDL function and rejects a method-style
+    // call (`this.fetch(...)`) with "Illegal invocation". Keep a plain closure so
+    // the same client works in Cloudflare Workers, Deno, Node tests, and browsers.
+    this.fetch = (...args) => fetchImpl(...args);
     this.translators = translators;
     this.timeoutMs = timeoutMs;
+    const firstIp = String(clientIp || "").split(",", 1)[0].trim();
+    this.clientIp = firstIp.length <= 45 && /^[0-9a-f:.]+$/i.test(firstIp) ? firstIp : "";
     this.cookies = [];
   }
 
@@ -221,6 +229,9 @@ export class RezkaClient {
       "User-Agent": USER_AGENT,
       "X-Hdrezka-Android-App": "1",
       "X-Hdrezka-Android-App-Version": APP_VERSION,
+      // Voidboost validates signed URLs against the viewer IP. Cloudflare gives
+      // us that address inbound; forwarding it lets the MP4 bypass the Worker.
+      ...(this.clientIp ? { "CF-Connecting-IP": this.clientIp } : {}),
       ...extra,
     };
   }

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import worker from "../worker/src/index.js";
 import {
+  RezkaClient,
   parseStreams,
   parseSubtitles,
   parseTranslators,
@@ -37,6 +38,24 @@ test("decodeStreamString base64-decodes the #h obfuscated form (UTF-8 safe)", ()
   const b64 = Buffer.from(plain, "utf8").toString("base64");
   assert.equal(decodeStreamString(`#h${b64}`), plain);
   assert.equal(decodeStreamString(plain), plain, "unobfuscated strings pass through");
+});
+
+test("RezkaClient does not method-bind a Web IDL fetch implementation", async () => {
+  function strictFetch() {
+    assert.equal(this, undefined);
+    return Promise.resolve(new Response("ok"));
+  }
+  const client = new RezkaClient({ fetchImpl: strictFetch });
+  const response = await client.fetchWithTimeout("https://example.test/");
+  assert.equal(await response.text(), "ok");
+});
+
+test("RezkaClient forwards only a valid viewer IP for CDN signing", () => {
+  const client = new RezkaClient({ clientIp: "203.0.113.7" });
+  assert.equal(client.appHeaders()["CF-Connecting-IP"], "203.0.113.7");
+
+  const invalid = new RezkaClient({ clientIp: "203.0.113.7\r\nx-bad: yes" });
+  assert.equal(invalid.appHeaders()["CF-Connecting-IP"], undefined);
 });
 
 // --- Subtitles from the get_movie response ------------------------------------
@@ -95,6 +114,18 @@ test("chooseSearchResult prefers exact title + matching year", () => {
   assert.equal(chooseSearchResult(results, "Тихоокеанский рубеж", 2013).rezkaId, 657);
 });
 
+test("chooseSearchResult never upgrades a partial title or the wrong remake", () => {
+  const results = [
+    { rezkaId: 1, title: "Бэтмен", year: 1989 },
+    { rezkaId: 2, title: "Бэтмен", year: 2022 },
+    { rezkaId: 3, title: "Лего Фильм: Бэтмен", year: 2017 },
+  ];
+  assert.equal(chooseSearchResult(results, "Бэтмен", 2022)?.rezkaId, 2);
+  assert.equal(chooseSearchResult(results, "Бэтмен", 2010), null);
+  assert.equal(chooseSearchResult(results, "Лего Бэтмен", 2017), null);
+  assert.equal(chooseSearchResult(results, "Бэтмен", null), null);
+});
+
 // --- Endpoint validation (hermetic: rejects before any upstream call) ----------
 
 test("/resolve-rezka rejects a request with no kp/id/title", async () => {
@@ -116,4 +147,54 @@ test("/resolve-rezka rejects a non-numeric translator", async () => {
   const body = await res.json();
   assert.equal(res.status, 400);
   assert.equal(body.error, "invalid_translator");
+});
+
+test("/resolve-rezka rejects Cloudflare even when the caller spoofs the Deno handoff header", async () => {
+  const request = new Request("http://local/resolve-rezka?id=657", {
+    headers: { "x-alphy-client-ip": "203.0.113.7" },
+  });
+  Object.defineProperty(request, "cf", { value: { colo: "RIX" } });
+  const response = await worker.fetch(request, env);
+  const body = await response.json();
+  assert.equal(response.status, 501);
+  assert.equal(body.error, "rezka_requires_deno_relay");
+});
+
+test("/resolve-rezka fails closed when Deno cannot determine the viewer IP", async () => {
+  const response = await worker.fetch(new Request("http://local/resolve-rezka?id=657"), env);
+  const body = await response.json();
+  assert.equal(response.status, 503);
+  assert.equal(body.error, "rezka_client_ip_unavailable");
+});
+
+test("/resolve-rezka signs for the Deno-supplied viewer IP and exposes lazy dub candidates", async () => {
+  const originalFetch = globalThis.fetch;
+  const forwarded = [];
+  globalThis.fetch = async (input, init = {}) => {
+    forwarded.push(new Headers(init.headers).get("cf-connecting-ip"));
+    const url = new URL(String(input));
+    if (url.pathname === "/") {
+      return new Response("ok", { headers: { "set-cookie": "PHPSESSID=test; Path=/" } });
+    }
+    return new Response(JSON.stringify({
+      success: true,
+      url: "[360p]https://stream.test/360.mp4,[720p]https://stream.test/720.mp4",
+      subtitle: "[Русский]https://subs.test/ru.vtt",
+      subtitle_lns: { "Русский": "ru" },
+      subtitle_def: "ru",
+    }), { headers: { "content-type": "application/json" } });
+  };
+  try {
+    const response = await worker.fetch(new Request("http://local/resolve-rezka?id=657", {
+      headers: { "x-alphy-client-ip": "203.0.113.7" },
+    }), env);
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.deepEqual(forwarded, ["203.0.113.7", "203.0.113.7"]);
+    assert.equal(body.best.label, "720p");
+    assert.equal(body.translatorCandidates[0].id, body.translatorId);
+    assert.equal(body.translatorCandidates.length >= 3, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

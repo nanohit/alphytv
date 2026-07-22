@@ -169,6 +169,28 @@ proxying media; Shaka still requests manifests and segments from the media CDN.
 Shaka Player handles DASH/HLS and exposes season, episode, quality, and audio
 switching.
 
+### HDRezka 720p reserve
+
+For films only, HDRezka is the final fallback after Collaps and Zona/Zenith.
+Search probes at most one top film, and only after its Collaps probe misses; a
+confirmed result is shown as a plain `720p` source card. Permanent links use
+`/r/<rezkaId>/<kpId>` and keep only stable numeric IDs.
+
+Rezka's anonymous Android resolver returns distinct 360p, 480p, and 720p MP4
+URLs plus VTT subtitles. It is not browser-readable because the response has no
+CORS allowance, and Voidboost binds each signed MP4 URL to the viewer IP. The
+Deno wrapper therefore forwards the request's trusted client IP only for the
+small resolver POST. The browser then downloads all MP4 bytes directly from
+Voidboost; Deno never proxies media. Cloudflare Workers are intentionally not
+used for this route because cross-origin Worker fetch rewrites the client-IP
+header and produces a signature for the PoP instead of the viewer.
+
+Signed URL payloads stay only in the tab's memory for eight minutes. A media
+error triggers one fresh resolve and resumes at the previous position. Quality
+switches reuse the already-returned URLs; tentative common dub IDs resolve only
+when selected. Subtitle files are fetched in parallel and attached as local VTT
+blob tracks.
+
 ### Curated homepage
 
 Public visitors never call a catalog Function or Deno. `catalog.js` reads the
@@ -212,6 +234,7 @@ The Worker is intentionally narrow:
 - Zona `kpId -> Zenith` ID resolution;
 - Zenith metadata/serial-playlist fallback.
 - Gencit/Opravar player/API metadata resolution and media-host substitution.
+- HDRezka anonymous URL resolution through Deno, signed for the viewer IP.
 
 It does not proxy video segments, manifests, MP4, M4S, TS, or images.
 

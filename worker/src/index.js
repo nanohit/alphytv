@@ -1,5 +1,5 @@
 import { getZonaLib, zonaUserAgent } from "./zona-runtime-and-loader.js";
-import { RezkaClient } from "./rezka.js";
+import { DEFAULT_TRANSLATORS, RezkaClient } from "./rezka.js";
 
 const DEFAULT_POISKKINO_BASE_URL = "https://api.poiskkino.dev";
 
@@ -837,6 +837,12 @@ async function handleSubtitles(request, env, url) {
 // (a few KB), so it adds no video bandwidth to the resolver. Signed URLs are
 // short-lived, hence no-store.
 async function handleRezkaResolve(request, env, url) {
+  // Cloudflare rewrites CF-Connecting-IP on cross-origin Worker subrequests, so
+  // Rezka signs for the PoP and Voidboost rejects the viewer. The Deno wrapper
+  // injects a trusted x-alphy-client-ip and is the supported production relay.
+  if (request.cf) {
+    return json(request, env, { ok: false, error: "rezka_requires_deno_relay" }, 501);
+  }
   const kp = (url.searchParams.get("kp") || url.searchParams.get("kpId") || "").trim();
   const id = (url.searchParams.get("id") || "").trim();
   const title = (url.searchParams.get("title") || "").trim();
@@ -852,7 +858,15 @@ async function handleRezkaResolve(request, env, url) {
     return json(request, env, { ok: false, error: "invalid_translator" }, 400);
   }
 
-  const client = new RezkaClient();
+  const client = new RezkaClient({
+    clientIp:
+      request.headers.get("x-alphy-client-ip") ||
+      request.headers.get("cf-connecting-ip") ||
+      "",
+  });
+  if (!client.clientIp) {
+    return json(request, env, { ok: false, error: "rezka_client_ip_unavailable" }, 503);
+  }
   let resolved;
   try {
     resolved = await client.resolve({
@@ -889,6 +903,13 @@ async function handleRezkaResolve(request, env, url) {
     },
     translatorId: resolved.translatorId,
     translators: resolved.translators,
+    translatorCandidates: resolved.translators.length
+      ? []
+      : [...new Set([resolved.translatorId, ...DEFAULT_TRANSLATORS])].map((id) => ({
+        id,
+        name: `Дорожка ${id}`,
+        tentative: true,
+      })),
     streams: resolved.playable.map((s) => ({ label: s.label, quality: s.quality, url: s.url })),
     subtitles: resolved.subtitles,
     best: { label: resolved.best.label, quality: resolved.best.quality, url: resolved.best.url },
