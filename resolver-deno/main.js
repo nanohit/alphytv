@@ -579,18 +579,6 @@ async function handleZenithCached(request, url) {
 const listenPort = Number(Deno.env.get("ALPHY_LOCAL_PORT") || 8000);
 Deno.serve({ port: listenPort }, async (request, info) => {
   const url = new URL(request.url);
-  if (url.pathname === "/health" && url.searchParams.has("ipdiag")) {
-    return jsonResponse(request, {
-      ok: true,
-      forwardedFor: request.headers.get("x-forwarded-for") || "",
-      realIp: request.headers.get("x-real-ip") || "",
-      cfIp: request.headers.get("cf-connecting-ip") || "",
-      forwarded: request.headers.get("forwarded") || "",
-      remoteIp: info.remoteAddr && "hostname" in info.remoteAddr
-        ? String(info.remoteAddr.hostname || "")
-        : "",
-    });
-  }
   if (url.pathname === "/resolve-rezka") {
     const headers = new Headers(request.headers);
     const forwarded = String(headers.get("x-forwarded-for") || "").split(",", 1)[0].trim();

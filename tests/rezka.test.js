@@ -54,6 +54,9 @@ test("RezkaClient forwards only a valid viewer IP for CDN signing", () => {
   const client = new RezkaClient({ clientIp: "203.0.113.7" });
   assert.equal(client.appHeaders()["CF-Connecting-IP"], "203.0.113.7");
 
+  const mapped = new RezkaClient({ clientIp: "::ffff:203.0.113.7" });
+  assert.equal(mapped.appHeaders()["CF-Connecting-IP"], "203.0.113.7");
+
   const invalid = new RezkaClient({ clientIp: "203.0.113.7\r\nx-bad: yes" });
   assert.equal(invalid.appHeaders()["CF-Connecting-IP"], undefined);
 });

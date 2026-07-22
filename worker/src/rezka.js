@@ -220,7 +220,11 @@ export class RezkaClient {
     this.translators = translators;
     this.timeoutMs = timeoutMs;
     const firstIp = String(clientIp || "").split(",", 1)[0].trim();
-    this.clientIp = firstIp.length <= 45 && /^[0-9a-f:.]+$/i.test(firstIp) ? firstIp : "";
+    // Deno Deploy exposes IPv4 clients through remoteAddr as ::ffff:a.b.c.d.
+    // Rezka signs the literal header value, while the CDN later sees plain IPv4,
+    // so preserving the mapped form makes every otherwise-valid URL return 404.
+    const normalizedIp = firstIp.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i)?.[1] || firstIp;
+    this.clientIp = normalizedIp.length <= 45 && /^[0-9a-f:.]+$/i.test(normalizedIp) ? normalizedIp : "";
     this.cookies = [];
   }
 
