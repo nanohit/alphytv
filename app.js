@@ -25,6 +25,9 @@
   // Older builds cached a transient empty Newdeaf result for six hours. Keep
   // this namespace versioned so those false misses cannot survive an upgrade.
   const ND_SEARCH_CACHE_NS = "ndsearch.v2";
+  // v1 may contain fuzzy Batman->Lego Batman metadata written by older builds.
+  const ND_ENRICHED_CACHE_NS = "ndenriched.v2";
+  const ND_RECOMMEND_CACHE_NS = "ndrecommend.v1";
   const SHAKA_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/shaka-player@4.11.17/dist/shaka-player.compiled.js";
   const HLS_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js";
   const SOAP_CDN_ORIGIN = "https://cdn-r11.soap4youand.me";
@@ -61,6 +64,8 @@
   const TTL = {
     search: 6 * 3600e3,
     ndsearch: 6 * 3600e3,
+    ndrecommend: 24 * 3600e3,
+    ndrecommendMiss: 60 * 60e3,
     ndpage: 24 * 3600e3,
     clpsplaylist: 2 * 3600e3,
     clpsprobe: 6 * 3600e3,
@@ -177,6 +182,7 @@
   const newdeafWarmOrigins = new Set();
   const newdeafPagePrefetches = new Set();
   const newdeafPageInflight = new Map();
+  const newdeafRecommendationInflight = new Map();
   const soapWarmOrigins = new Set();
   const soapManifestPrefetches = new Set();
   const collapsWarmOrigins = new Set();
@@ -197,6 +203,11 @@
   const SPECULATIVE_REFILL_MS = 15e3;
   let speculativeIntentBudget = SPECULATIVE_BUDGET_MAX;
   let speculativeRefillAt = Date.now();
+  // The top «Для вас» card is already warmed during idle. Allow just one extra
+  // hover-driven Newdeaf lookup per tab; every other title resolves only when the
+  // user actually presses it, avoiding a two-request crawl across the whole row.
+  let speculativeNewdeafRecommendationBudget = 1;
+  let recommendationOpenToken = 0;
 
   function claimSpeculativeIntent() {
     const now = Date.now();
@@ -1703,16 +1714,17 @@
     // preferred choice, so it leads the grid — same ordering as the old MVP.
     for (const item of ndCandidates) {
       const match = matchNewdeafMetadata(item, pkResults);
-      if (match) cacheSet("ndenriched", item.url, match, TTL.enriched);
+      if (match) cacheSet(ND_ENRICHED_CACHE_NS, item.url, match, TTL.enriched);
       const title = item.title || "Newdeaf";
       const target = { kind: "nd", pageUrl: item.url };
+      const pageType = newdeafPageType(item);
       const details = {
         title,
-        year: match?.year || "",
+        year: match?.year || extractYear(`${item.title || ""} ${item.url || ""}`),
         poster: match?.poster || item.poster || "",
         rating: match?.rating || {},
         movieLength: match?.movieLength || null,
-        isSeries: match?.isSeries ?? false,
+        isSeries: match?.isSeries ?? pageType ?? false,
       };
       // An already-curated title opens through its resolved list target
       // (instant Ortified/Zona) instead of re-running the newdeaf resolve.
@@ -1721,7 +1733,7 @@
         : null;
       const card = makeCard({
         title,
-        sub: [match?.year, match?.isSeries ? "сериал" : "Newdeaf"].filter(Boolean).join(" · "),
+        sub: [details.year, details.isSeries ? "сериал" : "Newdeaf"].filter(Boolean).join(" · "),
         poster: details.poster,
         rating: match?.rating,
         movieLength: match?.movieLength,
@@ -1833,6 +1845,7 @@
     isSeries,
     bookmark,
     intent,
+    recommendation,
     onBookmarkChange,
     onClick,
     onRemove,
@@ -1914,15 +1927,30 @@
       s.textContent = sub;
       card.appendChild(s);
     }
-    card.addEventListener("click", onClick);
+    const activate = () => {
+      const result = onClick?.();
+      if (result && typeof result.then === "function") {
+        card.classList.add("card-resolving");
+        card.setAttribute("aria-busy", "true");
+        const clear = () => {
+          card.classList.remove("card-resolving");
+          card.removeAttribute("aria-busy");
+        };
+        Promise.resolve(result).then(clear, clear);
+      }
+    };
+    card.addEventListener("click", activate);
     card.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        onClick();
+        activate();
       }
     });
-    const prep = intent || bookmark;
-    if (prep?.target) armCardIntent(card, prep.target, prep.details || {});
+    if (recommendation?.target) armRecommendationIntent(card, recommendation);
+    else {
+      const prep = intent || bookmark;
+      if (prep?.target) armCardIntent(card, prep.target, prep.details || {});
+    }
     return card;
   }
   function blankPoster() {
@@ -3228,7 +3256,7 @@
     setWatchHead("Newdeaf…", { kind: "nd", pageUrl });
     const parsed = await resolveNewdeafPage(pageUrl);
     if (isStale(token)) return;
-    const enriched = cacheGet("ndenriched", pageUrl);
+    const enriched = cacheGet(ND_ENRICHED_CACHE_NS, pageUrl);
     const serialHint = newdeafSerialHint(
       parsed.title || "",
       pageUrl,
@@ -3675,7 +3703,7 @@
     const results = await searchPoiskkino(cleanTitle, meta?.year);
     const match = matchNewdeafMetadata({ title: meta?.title, url: pageUrl }, results);
     if (!match) return null;
-    cacheSet("ndenriched", pageUrl, match, TTL.enriched);
+    cacheSet(ND_ENRICHED_CACHE_NS, pageUrl, match, TTL.enriched);
     if (isStale(token) || !state.currentTarget) return match;
     const merged = mergeMetadata(meta, match);
     state.currentMeta = merged;
@@ -3932,7 +3960,8 @@
         movieLength: entry.movieLength,
         isSeries: entry.isSeries,
         bookmark: { target: entry.target, details: entry },
-        onClick: () => openCuratedItem(entry),
+        recommendation: entry,
+        onClick: () => openRecommendationItem(entry),
         onRemove: () => {
           window.alphyForYou?.hide?.(item.target?.kpId);
           card?.remove();
@@ -5542,6 +5571,91 @@ addEventListener('message', async (event) => {
     await resolveZenithParsed(embedUrl, { wantSeasons: !!details?.isSeries });
   }
 
+  function recommendationCacheKey(item) {
+    const kpId = String(item?.kpId || item?.target?.kpId || "");
+    if (/^\d+$/.test(kpId)) return `kp:${kpId}`;
+    return `${normalizeTitle(item?.title || "")}|${item?.year || ""}|${item?.isSeries ? "s" : "f"}`;
+  }
+
+  function cachedRecommendationTarget(value) {
+    if (value?.miss) return null;
+    const embedUrl = canonicalOrtEmbedUrl(value?.target?.embedUrl || "");
+    return embedUrl ? { kind: "ort", embedUrl } : null;
+  }
+
+  // Recommendations originate as kp: items, but Newdeaf has no Kinopoisk id.
+  // Resolve the exact Russian title client-side, verify that the matched page
+  // actually exposes Ortified, and remember the resulting direct embed. Fuzzy
+  // matches are intentionally forbidden here: falling back to kp is always safer
+  // than opening a different film with one shared word in its title.
+  async function resolveRecommendationTarget(item) {
+    if (!item?.target?.kind || item.target.kind !== "kp") return item?.target || null;
+    const cacheKey = recommendationCacheKey(item);
+    const cached = cacheGet(ND_RECOMMEND_CACHE_NS, cacheKey);
+    if (cached) return cachedRecommendationTarget(cached);
+    const inflight = newdeafRecommendationInflight.get(cacheKey);
+    if (inflight) return inflight;
+
+    const pending = (async () => {
+      const query = cleanMovieTitle(item.title || "");
+      if (!query || !/[а-яё]/i.test(query)) return null;
+      const results = await searchNewdeaf(query);
+      const hit = pickExactNewdeafResult(results, item);
+      if (!hit) {
+        // First-paint recommendations can arrive before their batch metadata, so
+        // an absent year may be temporary. Do not pin an ambiguous title-only miss
+        // under the kpId before the enriched row gets a chance to retry it.
+        if (item.year) cacheSet(ND_RECOMMEND_CACHE_NS, cacheKey, { miss: true }, TTL.ndrecommendMiss);
+        return null;
+      }
+      const parsed = await resolveNewdeafPage(hit.url);
+      const embedUrl = canonicalOrtEmbedUrl(parsed?.ortified?.[0] || "");
+      if (!embedUrl) {
+        cacheSet(ND_RECOMMEND_CACHE_NS, cacheKey, { miss: true }, TTL.ndrecommendMiss);
+        return null;
+      }
+      const kpId = String(item.kpId || item.target.kpId || "");
+      const meta = {
+        ...item,
+        title: item.title || parsed.title || hit.title || "",
+        year: item.year || parsed.year || extractYear(`${hit.title || ""} ${hit.url || ""}`),
+        poster: item.poster || parsed.poster || hit.poster || "",
+        kpId: /^\d+$/.test(kpId) ? kpId : "",
+        target: { kind: "ort", embedUrl },
+      };
+      cacheSet(ND_ENRICHED_CACHE_NS, hit.url, meta, TTL.enriched);
+      cacheSet("ortmeta", embedUrl, meta, TTL.enriched);
+      cacheSet(ND_RECOMMEND_CACHE_NS, cacheKey, { target: meta.target, pageUrl: hit.url }, TTL.ndrecommend);
+      return meta.target;
+    })().finally(() => newdeafRecommendationInflight.delete(cacheKey));
+    newdeafRecommendationInflight.set(cacheKey, pending);
+    return pending;
+  }
+
+  async function prepareRecommendation(item) {
+    if (!item?.target?.kind) return;
+    let target = null;
+    try { target = await resolveRecommendationTarget(item); }
+    catch (error) { log("newdeaf-recommend-warn", error.message); }
+    return prepareTarget(target || item.target, item);
+  }
+
+  async function openRecommendationItem(item) {
+    if (!item?.target?.kind || item.target.kind !== "kp") return openCuratedItem(item);
+    const openToken = ++recommendationOpenToken;
+    const routeToken = resolveToken;
+    let target = null;
+    try { target = await resolveRecommendationTarget(item); }
+    catch (error) { log("newdeaf-recommend-warn", error.message); }
+    if (openToken !== recommendationOpenToken || isStale(routeToken)) return;
+    const kpId = String(item.kpId || item.target.kpId || "");
+    return openCuratedItem({
+      ...item,
+      kpId: /^\d+$/.test(kpId) ? kpId : item.kpId,
+      target: target || item.target,
+    });
+  }
+
   async function prepareTarget(target, details = {}) {
     if (!target?.kind) return;
     const prepKey = keyFor(target);
@@ -5596,8 +5710,8 @@ addEventListener('message', async (event) => {
     }
   }
 
-  function armCardIntent(card, target, details = {}) {
-    if (!card || !target?.kind) return;
+  function armIntent(card, prepare, label) {
+    if (!card || typeof prepare !== "function") return;
     let timer = null;
     let claimedSpeculativeSlot = false;
     const run = (speculative) => {
@@ -5606,7 +5720,7 @@ addEventListener('message', async (event) => {
         if (!claimSpeculativeIntent()) return;
         claimedSpeculativeSlot = true;
       }
-      prepareTarget(target, details).catch((error) => log("intent-prefetch-warn", error.message));
+      prepare(speculative).catch((error) => log(label, error.message));
     };
     const schedule = () => {
       clearTimeout(timer);
@@ -5618,6 +5732,22 @@ addEventListener('message', async (event) => {
     card.addEventListener("focus", schedule);
     card.addEventListener("blur", cancel);
     card.addEventListener("pointerdown", () => run(false), { passive: true });
+  }
+
+  function armCardIntent(card, target, details = {}) {
+    if (!target?.kind) return;
+    armIntent(card, () => prepareTarget(target, details), "intent-prefetch-warn");
+  }
+
+  function armRecommendationIntent(card, item) {
+    if (!item?.target?.kind) return;
+    armIntent(card, (speculative) => {
+      if (speculative) {
+        if (speculativeNewdeafRecommendationBudget <= 0) return Promise.resolve();
+        speculativeNewdeafRecommendationBudget -= 1;
+      }
+      return prepareRecommendation(item);
+    }, "recommendation-prefetch-warn");
   }
 
   function pageUrlCandidates(pageUrl) {
@@ -6111,13 +6241,13 @@ addEventListener('message', async (event) => {
 
     const text = compact(textParts.join(" "));
     season ||= positiveInt(
-      text.match(/\b(?:сезон|season|sezon)\s*(?:№|#|:|-)?\s*(\d{1,3})\b/i)?.[1] ||
-      text.match(/\b(\d{1,3})\s*(?:сезон|season|sezon)\b/i)?.[1] ||
+      text.match(/(?:сезон|season|sezon)\s*(?:№|#|:|-)?\s*(\d{1,3})(?!\d)/i)?.[1] ||
+      text.match(/(?:^|\D)(\d{1,3})\s*(?:сезон|season|sezon)(?![a-zа-яё])/i)?.[1] ||
       text.match(/(?:^|[\s/_-])s(?:eason|ezon)?[\s_-]?(\d{1,3})(?:$|[\s/_.-])/i)?.[1],
     );
     episode ||= positiveInt(
-      text.match(/\b(?:серия|эпизод|episode|seriya|epizod|ep)\s*(?:№|#|:|-)?\s*(\d{1,4})\b/i)?.[1] ||
-      text.match(/\b(\d{1,4})\s*(?:серия|эпизод|episode|seriya|epizod)\b/i)?.[1] ||
+      text.match(/(?:серия|эпизод|episode|seriya|epizod|ep)\s*(?:№|#|:|-)?\s*(\d{1,4})(?!\d)/i)?.[1] ||
+      text.match(/(?:^|\D)(\d{1,4})\s*(?:серия|эпизод|episode|seriya|epizod)(?![a-zа-яё])/i)?.[1] ||
       text.match(/(?:^|[\s/_.-])e(?:p(?:isode)?)?[\s_-]?(\d{1,4})(?:$|[\s/_.-])/i)?.[1],
     );
     return normalizeSerialHint({ season, episode });
@@ -6184,42 +6314,81 @@ addEventListener('message', async (event) => {
       results[0];
   }
 
+  // Newdeaf search results often share one generic token ("Бэтмен") while being
+  // completely different films ("Лего Фильм: Бэтмен", "Бэтмен-ниндзя", ...).
+  // Metadata enrichment must fail closed: a blank rating is harmless, a confident
+  // looking cover/year copied from another title is not.
   function matchNewdeafMetadata(item, movies) {
     if (!item?.title || !Array.isArray(movies) || !movies.length) return null;
-    const wanted = matchTitleTokens(item.title);
-    if (!wanted.size) return null;
-    let best = null;
-    let bestScore = 0;
-    for (const movie of movies) {
-      const names = [movieTitle(movie), movie?.alternativeName, movie?.enName].filter(Boolean);
-      let score = 0;
-      for (const name of names) {
-        const candidate = matchTitleTokens(name);
-        if (!candidate.size) continue;
-        const intersection = [...wanted].filter((token) => candidate.has(token)).length;
-        const union = new Set([...wanted, ...candidate]).size;
-        const jaccard = union ? intersection / union : 0;
-        const left = [...wanted].join("");
-        const right = [...candidate].join("");
-        const containment = left === right ? 1 : left.includes(right) || right.includes(left) ? 0.86 : 0;
-        score = Math.max(score, jaccard, containment);
-      }
-      const pageYear = extractYear(`${item.title} ${item.url}`);
-      if (pageYear && String(movie?.year || "") === pageYear) score += 0.1;
-      if (score > bestScore) {
-        best = movie;
-        bestScore = score;
-      }
+    const wanted = normalizeTitle(item.title);
+    if (!wanted) return null;
+    const pageYear = extractYear(`${item.title || ""} ${item.url || ""}`);
+    const pageType = newdeafPageType(item);
+    let exact = movies.filter((movie) =>
+      [movieTitle(movie), movie?.alternativeName, movie?.enName]
+        .filter(Boolean)
+        .some((name) => normalizeTitle(name) === wanted));
+    if (pageType !== null) {
+      exact = exact.filter((movie) => typeof movie?.isSeries !== "boolean" || movie.isSeries === pageType);
     }
-    return bestScore >= 0.54 ? best : null;
+    if (!exact.length) return null;
+    if (pageYear) return exact.find((movie) => String(movie?.year || "") === pageYear) || null;
+    if (exact.length === 1) return exact[0];
+    const years = new Set(exact.map((movie) => String(movie?.year || "")).filter(Boolean));
+    return years.size <= 1 ? exact[0] : null;
+  }
+
+  function newdeafPageType(item) {
+    const title = String(item?.title || "");
+    const href = String(item?.url || item?.pageUrl || "");
+    if (newdeafSerialHint(title, href)?.season) return true;
+    try {
+      const path = new URL(href).pathname;
+      if (/\/(?:serial|multserial|multserialy)\//i.test(path)) return true;
+      if (/\/(?:film|multfilm)\//i.test(path)) return false;
+    } catch { /* title-only candidates have no reliable type signal */ }
+    return null;
+  }
+
+  function pickExactNewdeafResult(results, details) {
+    const wanted = normalizeTitle(details?.title || "");
+    if (!wanted || !Array.isArray(results)) return null;
+    const wantedYear = String(details?.year || "");
+    const wantedType = typeof details?.isSeries === "boolean" ? details.isSeries : null;
+    const ranked = [];
+    for (const candidate of results) {
+      if (normalizeTitle(candidate?.title || "") !== wanted) continue;
+      const candidateYear = extractYear(`${candidate.title || ""} ${candidate.url || ""}`);
+      if (wantedYear && candidateYear && candidateYear !== wantedYear) continue;
+      const candidateType = newdeafPageType(candidate);
+      if (wantedType !== null && candidateType !== null && candidateType !== wantedType) continue;
+      const serialHint = newdeafSerialHint(candidate.title || "", candidate.url || "");
+      let score = 0;
+      if (wantedYear && candidateYear === wantedYear) score += 8;
+      if (wantedType !== null && candidateType === wantedType) score += 4;
+      if (wantedType === true) {
+        if (serialHint?.season === 1) score += 3;
+        else if (serialHint?.season) score += 1 / serialHint.season;
+      } else if (!serialHint?.season) {
+        score += 2;
+      }
+      ranked.push({ candidate, score });
+    }
+    if (!wantedYear) {
+      const knownYears = new Set(ranked.map(({ candidate }) =>
+        extractYear(`${candidate.title || ""} ${candidate.url || ""}`)).filter(Boolean));
+      if (knownYears.size > 1) return null;
+    }
+    ranked.sort((a, b) => b.score - a.score);
+    return ranked[0]?.candidate || null;
   }
 
   function matchTitleTokens(value) {
     const cleaned = compact(value)
-      .replace(/\([^)]*\b(?:сезон|season)\b[^)]*\)/gi, " ")
-      .replace(/\b\d+\s*(?:сезон|season)\b/gi, " ")
-      .replace(/\b(?:русские?|english|английские?)\s+субтитры\b/gi, " ")
-      .replace(/\b(?:субтитры|subtitle[sd]?|смотреть|онлайн|online)\b/gi, " ")
+      .replace(/\([^)]*(?:сезон|season)[^)]*\)/gi, " ")
+      .replace(/\d+\s*(?:сезон|season)/gi, " ")
+      .replace(/(?:русские?|english|английские?)\s+субтитры/gi, " ")
+      .replace(/(?:субтитры|subtitle[sd]?|смотреть|онлайн|online)/gi, " ")
       .replace(/\b(?:19|20)\d{2}\b/g, " ")
       .toLowerCase()
       .replace(/ё/g, "е")
@@ -6234,6 +6403,7 @@ addEventListener('message', async (event) => {
     return compact(value)
       .replace(/\s*[-–—]\s*смотреть\s+онлайн.*$/i, "")
       .replace(/\s*смотреть\s+онлайн.*$/i, "")
+      .replace(/\s*[-–—]\s*(?:русские?|english|английские?)\s+субтитры.*$/i, "")
       .replace(/\s*[-–—]\s*newdeaf.*$/i, "")
       .trim();
   }
@@ -6241,10 +6411,10 @@ addEventListener('message', async (event) => {
   function cleanMovieTitle(value) {
     return compact(value)
       .replace(/^(фильм|сериал|мультфильм|аниме|мультсериал)\s+/i, "")
-      .replace(/\([^)]*\b(?:сезон|season|sezon)\b[^)]*\)/gi, " ")
-      .replace(/\b\d+\s*(?:сезон|season|sezon)\b/gi, " ")
-      .replace(/\b(?:русские?|english|английские?)\s+субтитры\b/gi, " ")
-      .replace(/\b(?:субтитры|subtitle[sd]?)\b/gi, " ")
+      .replace(/\([^)]*(?:сезон|season|sezon)[^)]*\)/gi, " ")
+      .replace(/\d+\s*(?:сезон|season|sezon)/gi, " ")
+      .replace(/(?:русские?|english|английские?)\s+субтитры/gi, " ")
+      .replace(/(?:субтитры|subtitle[sd]?)/gi, " ")
       .replace(/\s*\((?:19|20)\d{2}\).*$/, "")
       .replace(/\s*смотреть.*$/i, "")
       .replace(/\s*[-–—]\s*$/, "")
@@ -6675,14 +6845,26 @@ addEventListener('message', async (event) => {
     openCuratedItem,
     addCardBookmark,
     armCardIntent,
+    armRecommendationIntent,
     prepareTarget,
+    prepareRecommendation,
+    openRecommendationItem,
     resolveKpPlaybackSource,
     resolveZenithParsed,
     layoutMobileGrid,
     resolvePosterByTitle,
     resolveCardMeta,
     resolverJson,
-    _test: { ageBadge },
+    _test: {
+      ageBadge,
+      matchNewdeafMetadata,
+      newdeafPageType,
+      pickExactNewdeafResult,
+      cleanNewdeafTitle,
+      normalizeTitle,
+      newdeafSerialHint,
+      resolveRecommendationTarget,
+    },
   };
 
   boot();

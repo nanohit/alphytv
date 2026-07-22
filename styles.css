@@ -196,6 +196,13 @@ header {
   background: #101010;
   transition: border-color .18s, box-shadow .18s;
 }
+.card-resolving { pointer-events: none; }
+.card-resolving .card-media::after {
+  content: ""; position: absolute; z-index: 8; inset: 50% auto auto 50%;
+  width: 24px; height: 24px; margin: -14px 0 0 -14px;
+  border: 3px solid rgba(255,255,255,.34); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin .8s linear infinite;
+}
 .card .poster {
   width: 100%; aspect-ratio: 2 / 3; background: #111;
   border: 0; object-fit: cover; display: block;

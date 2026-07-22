@@ -517,7 +517,7 @@
     image.dataset.posterStage = "done";
   }
 
-  function makePublicCard(item) {
+  function makePublicCard(item, { recommendation = false } = {}) {
     const card = document.createElement("article");
     card.className = "card curated-card";
     card.tabIndex = 0;
@@ -576,7 +576,20 @@
     sub.textContent = [item.year, item.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · ");
     card.appendChild(sub);
 
-    const open = () => window.alphyBridge?.openCuratedItem?.(item);
+    const open = () => {
+      const result = recommendation
+        ? window.alphyBridge?.openRecommendationItem?.(item)
+        : window.alphyBridge?.openCuratedItem?.(item);
+      if (result && typeof result.then === "function") {
+        card.classList.add("card-resolving");
+        card.setAttribute("aria-busy", "true");
+        const clear = () => {
+          card.classList.remove("card-resolving");
+          card.removeAttribute("aria-busy");
+        };
+        Promise.resolve(result).then(clear, clear);
+      }
+    };
     card.addEventListener("click", (event) => {
       if (event.target.closest(".admin-item-controls, .admin-label-controls")) return;
       open();
@@ -587,7 +600,8 @@
         open();
       }
     });
-    window.alphyBridge?.armCardIntent?.(card, item.target, item);
+    if (recommendation) window.alphyBridge?.armRecommendationIntent?.(card, item);
+    else window.alphyBridge?.armCardIntent?.(card, item.target, item);
     return card;
   }
 
@@ -1218,7 +1232,7 @@
     row.className = "curated-row";
     items.forEach((item) => row.appendChild(makeForYouCard(item)));
     const top = items[0];
-    const warmTop = () => window.alphyBridge?.prepareTarget?.(top?.target, top);
+    const warmTop = () => window.alphyBridge?.prepareRecommendation?.(top);
     if (typeof requestIdleCallback === "function") requestIdleCallback(warmTop, { timeout: 1800 });
     else setTimeout(warmTop, 650);
     wrap.appendChild(row);
@@ -1230,7 +1244,7 @@
   // A «Для вас» card is a regular curated card plus a dismiss cross: hiding a
   // title only removes it from the row (no negative taste signal).
   function makeForYouCard(item) {
-    const card = makePublicCard(item);
+    const card = makePublicCard(item, { recommendation: true });
     const kpId = String(item.fyKpId || item.target?.kpId || "");
     const media = card.querySelector(".card-media");
     if (!media || !/^\d+$/.test(kpId)) return card;
