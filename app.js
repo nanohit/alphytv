@@ -52,9 +52,11 @@
   // already known to fail.
   const ZENITH_DIRECT_BLOCK_MS = 12 * 3600e3;
   const COLLAPS_REFRESH_SEC = 240;
+  // CDNVideoHub's field names are counterintuitive: empirical ffprobe checks
+  // show type=7 (mpeg2kUrl) is 3840-wide, while type=6 (mpeg4kUrl) is 2560-wide.
   const COLLAPS_QUALITY_FIELDS = [
-    ["mpeg4kUrl", "4K", 2160],
-    ["mpeg2kUrl", "2K", 1440],
+    ["mpeg2kUrl", "4K", 2160],
+    ["mpeg4kUrl", "2K", 1440],
     ["mpegQhdUrl", "1440p", 1440],
     ["mpegFullHdUrl", "1080p", 1080],
     ["mpegHighUrl", "720p", 720],
@@ -7224,6 +7226,7 @@ addEventListener('message', async (event) => {
       normalizeTitle,
       newdeafSerialHint,
       resolveRecommendationTarget,
+      normalizeCollapsSources,
       isCollapsControlUrl,
       isOpaqueFetchUrl,
       sanitizeOrtifiedHtml,

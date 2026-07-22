@@ -27,6 +27,20 @@ test("Collaps broker is limited to its control-plane path", async () => {
   assert.equal(helpers.isCollapsControlUrl("https://plapi.cdnvideohub.com.evil.example/api/v1/player/sv/video/1"), false);
 });
 
+test("Collaps type 7 is presented before type 6 as the real 4K rendition", async () => {
+  const helpers = await privacyHelpers();
+  const sources = helpers.normalizeCollapsSources({
+    mpeg2kUrl: "https://media.example/type-7",
+    mpeg4kUrl: "https://media.example/type-6",
+    mpegFullHdUrl: "https://media.example/type-5",
+  });
+  assert.deepEqual(Array.from(sources, ({ key, label, height }) => [key, label, height]), [
+    ["mpeg2kUrl", "4K", 2160],
+    ["mpeg4kUrl", "2K", 1440],
+    ["mpegFullHdUrl", "1080p", 1080],
+  ]);
+});
+
 test("Ortified cleanroom carries an internal no-referrer policy", async () => {
   const helpers = await privacyHelpers();
   const result = helpers.sanitizeOrtifiedHtml(
