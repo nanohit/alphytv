@@ -4291,11 +4291,7 @@
     showPlayerLoading();
     let html;
     try {
-      html = await fetchCachedEmbedText(embedUrl, {
-        preferSandbox: true,
-        directFallback: false,
-        label: "ortified",
-      });
+      html = await fetchCachedEmbedText(embedUrl, { preferSandbox: true, label: "ortified" });
     } catch (error) {
       // api.ortified.ws answers 422 to any request from a non-Russian IP — for a
       // user who normally streams from RU that means a VPN was left on. Surface the
@@ -4312,9 +4308,6 @@
     iframe.allow = "autoplay; fullscreen; encrypted-media; picture-in-picture";
     iframe.allowFullscreen = true;
     iframe.referrerPolicy = "no-referrer";
-    // Omitting allow-same-origin gives this srcdoc a unique opaque origin. Thus
-    // Ortified and its media APIs receive Origin:null rather than alphy.tv.
-    iframe.sandbox = "allow-scripts allow-forms allow-modals allow-presentation";
     iframe.srcdoc = sanitized.html;
     el.playerHost.replaceChildren(iframe);
     el.serialPanel.classList.add("hidden");
@@ -5864,11 +5857,7 @@ addEventListener('message', async (event) => {
     if (!pageUrl || newdeafPagePrefetches.has(pageUrl)) return;
     const warmPlayer = (parsed) => {
       const embedUrl = parsed?.ortified?.[0];
-      if (embedUrl) return fetchCachedEmbedText(embedUrl, {
-        preferSandbox: true,
-        directFallback: false,
-        label: "ortified-prefetch",
-      });
+      if (embedUrl) return fetchCachedEmbedText(embedUrl, { preferSandbox: true, label: "ortified-prefetch" });
       return null;
     };
     const cached = cacheGet("ndpage", pageUrl);
@@ -6046,19 +6035,11 @@ addEventListener('message', async (event) => {
       } else if (target.kind === "opr") {
         await ensureShaka();
       } else if (target.kind === "ort") {
-        await fetchCachedEmbedText(target.embedUrl, {
-          preferSandbox: true,
-          directFallback: false,
-          label: "ortified-intent",
-        });
+        await fetchCachedEmbedText(target.embedUrl, { preferSandbox: true, label: "ortified-intent" });
       } else if (target.kind === "nd") {
         const parsed = await resolveNewdeafPage(target.pageUrl);
         const embedUrl = parsed?.ortified?.[0];
-        if (embedUrl) await fetchCachedEmbedText(embedUrl, {
-          preferSandbox: true,
-          directFallback: false,
-          label: "ortified-intent",
-        });
+        if (embedUrl) await fetchCachedEmbedText(embedUrl, { preferSandbox: true, label: "ortified-intent" });
       }
     } catch (error) {
       preparedTargets.delete(prepKey);
@@ -6332,9 +6313,6 @@ addEventListener('message', async (event) => {
     out = out.replace(/ads:\s*adsConfig\s*,/g, "ads: {},");
     if (!/<base\s/i.test(out) && /<head([^>]*)>/i.test(out)) out = out.replace(/<head([^>]*)>/i, `<head$1><base href="${escapeAttr(baseHref)}">`);
     if (!/<base\s/i.test(out)) out = out.replace(/<html([^>]*)>/i, `<html$1><head><base href="${escapeAttr(baseHref)}"></head>`);
-    if (!/<meta\s+name=["']referrer["']/i.test(out)) {
-      out = out.replace(/<head([^>]*)>/i, '<head$1><meta name="referrer" content="no-referrer">');
-    }
     out = out.replace(/<head([^>]*)>/i, `<head$1>${adBlockPrelude()}${progressHook()}<style>html,body{margin:0;background:#000;min-height:100%;height:100%;overflow:hidden;}</style>`);
     stats.ok = stats.makePlayerRefs > 0;
     return { html: out, stats };

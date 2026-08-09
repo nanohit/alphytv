@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { makeSandbox, sleep } from "./helpers/app-sandbox.js";
 
 async function privacyHelpers() {
@@ -41,7 +42,7 @@ test("Collaps type 7 is presented before type 6 as the real 4K rendition", async
   ]);
 });
 
-test("Ortified cleanroom carries an internal no-referrer policy", async () => {
+test("Ortified cleanroom keeps the fullscreen-compatible document shape", async () => {
   const helpers = await privacyHelpers();
   const result = helpers.sanitizeOrtifiedHtml(
     "<!doctype html><html><head></head><body><script>makePlayer({})</script></body></html>",
@@ -49,6 +50,17 @@ test("Ortified cleanroom carries an internal no-referrer policy", async () => {
     "test",
   );
   assert.equal(result.stats.ok, true);
-  assert.match(result.html, /<meta name="referrer" content="no-referrer">/i);
+  assert.doesNotMatch(result.html, /<meta name="referrer" content="no-referrer">/i);
   assert.match(result.html, /<base href="https:\/\/api\.ortified\.ws\/">/i);
+});
+
+test("Ortified playback keeps its compatible unsandboxed iframe and fetch fallback", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const start = source.indexOf("async function playOrtifiedCleanroom");
+  const end = source.indexOf("// Playback — Zenith", start);
+  const block = source.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(block, /iframe\.allowFullscreen = true/);
+  assert.doesNotMatch(block, /iframe\.sandbox\s*=/);
+  assert.doesNotMatch(block, /directFallback:\s*false/);
 });
