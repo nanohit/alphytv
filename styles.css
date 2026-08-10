@@ -1110,6 +1110,14 @@ body.admin-mode .meta-info { display: flex; }
 /* Letterboxd is a 0-5 score, so it carries two decimals and needs a hair less
    size than the 0-10 badges beside it to keep the row on one line. */
 .meta-ratings .rt-lb b { font-size: 16px; }
+/* A third figure on a cover: the row tightens rather than the card widening. */
+.hover-ratings.has-three {
+  grid-template-columns: minmax(0,1fr) 1px minmax(0,1fr) 1px minmax(0,1fr);
+  max-width: 100%;
+  column-gap: 5px;
+}
+.hover-ratings.has-three .hover-rating-value { font-size: clamp(13px, 1.25vw, 18px); }
+.hover-ratings.has-three .hover-rating-name { font-size: 7px; }
 .meta-ratings .kp-rating-link { color: inherit; text-decoration: none; }
 .meta-ratings .kp-rating-link:hover span { color: var(--accent); }
 

@@ -1702,6 +1702,7 @@
   // =====================================================================
   const letterboxdCooldown = new Map();
   const letterboxdInflight = new Map();
+  const letterboxdAsked = new Map();
 
   // Deterministic first pick, then the rest of the ring. Keeping a film pinned
   // to one project is what makes the function's own Cache-Control worth having.
@@ -1741,7 +1742,9 @@
         const payload = await response.json();
         const rating = Number(payload?.r);
         const found = payload?.found && Number.isFinite(rating) && rating > 0 && rating <= 5;
-        const value = found ? { r: rating, n: positiveInt(payload.n) } : null;
+        const value = found
+          ? { r: rating, n: positiveInt(payload.n), slug: compact(payload.slug).slice(0, 120) }
+          : null;
         cacheSet(LETTERBOXD_CACHE_NS, id, value || { r: 0 }, found ? TTL.letterboxd : TTL.letterboxdmiss);
         return value;
       } catch (error) {
@@ -1752,6 +1755,65 @@
       }
     }
     return null;
+  }
+
+  // A grid asks once per shard rather than once per card. The server answers
+  // these from its table only and never reaches out to Letterboxd, so a page of
+  // covers can never turn into a burst of scraping — unknown films simply stay
+  // blank until someone opens one.
+  async function letterboxdBatch(imdbIds) {
+    const ids = [...new Set(imdbIds)].filter((id) => /^tt\d{6,10}$/.test(id));
+    // A search grid renders twice — once for the race winner, once for the merged
+    // result — and the second pass builds fresh card elements. It must therefore
+    // wait on the first pass's request rather than skip it, or it would paint
+    // from a cache that has not been filled yet.
+    const waiting = ids.map((id) => letterboxdAsked.get(id)).filter(Boolean);
+    const wanted = ids.filter((id) => !cacheGet(LETTERBOXD_CACHE_NS, id) && !letterboxdAsked.has(id));
+    if (!wanted.length) {
+      await Promise.all(waiting);
+      return;
+    }
+    const byEndpoint = new Map();
+    for (const id of wanted) {
+      const endpoint = letterboxdEndpointOrder(id)[0];
+      if (!byEndpoint.has(endpoint)) byEndpoint.set(endpoint, []);
+      byEndpoint.get(endpoint).push(id);
+    }
+    const runs = [...byEndpoint].map(async ([endpoint, ids]) => {
+      if ((letterboxdCooldown.get(endpoint) || 0) > Date.now()) return;
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 7000);
+        const response = await fetch(`${endpoint}?imdb=${ids.slice(0, 60).join(",")}`, {
+          signal: controller.signal,
+          referrerPolicy: "no-referrer",
+        });
+        clearTimeout(timer);
+        if (!response.ok) throw new Error(`http ${response.status}`);
+        const items = (await response.json())?.items || {};
+        for (const id of ids) {
+          const hit = items[id];
+          const rating = Number(hit?.r);
+          // Absent means "not looked up yet", not "no rating" — only a row the
+          // table actually holds is worth remembering on the client.
+          if (!(id in items)) continue;
+          const value = hit && Number.isFinite(rating) && rating > 0 && rating <= 5
+            ? { r: rating, n: positiveInt(hit.n), slug: compact(hit.slug).slice(0, 120) }
+            : null;
+          cacheSet(LETTERBOXD_CACHE_NS, id, value || { r: 0 }, value ? TTL.letterboxd : TTL.letterboxdmiss);
+        }
+      } catch (error) {
+        log("letterboxd-batch-warn", { endpoint, message: error.message });
+        // A shard that failed is worth asking again later, unlike one that
+        // answered "I do not know that film".
+        for (const id of ids) letterboxdAsked.delete(id);
+      }
+    });
+    for (const [endpoint, ids] of byEndpoint) {
+      const run = runs[[...byEndpoint.keys()].indexOf(endpoint)];
+      for (const id of ids) letterboxdAsked.set(id, run);
+    }
+    await Promise.all([...runs, ...waiting]);
   }
 
   // =====================================================================
@@ -2551,6 +2613,7 @@
         title,
         sub: [movie.year, movie.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · "),
         poster: movie.poster,
+        imdb: movie.isSeries ? "" : movie.externalId?.imdb,
         rating: movie.rating,
         movieLength: movie.movieLength,
         isSeries: movie.isSeries,
@@ -2600,6 +2663,7 @@
     }
     el.resultsGrid.replaceChildren(frag);
     layoutMobileGrid(el.resultsGrid);
+    fillGridLetterboxd(el.resultsGrid);
   }
 
   function makeLiftwCard(item) {
@@ -2701,6 +2765,7 @@
     sub,
     poster,
     flag,
+    imdb,
     rating,
     movieLength,
     isSeries,
@@ -2716,6 +2781,7 @@
     card.className = "card";
     card.tabIndex = 0;
     card.setAttribute("role", "button");
+    if (/^tt\d{6,10}$/.test(String(imdb || ""))) card.dataset.imdb = imdb;
     const media = document.createElement("div");
     media.className = "card-media";
     const imageUrl = poster;
@@ -2865,6 +2931,37 @@
 
   function setCardDuration(card, movieLength, isSeries) {
     renderHoverDuration(card?.querySelector?.(".card-hover-meta"), movieLength, isSeries);
+  }
+
+  // Letterboxd is a 0-5 score, so it gets its own column rather than being
+  // mixed in with the two 0-10 ones. The row shrinks to fit a third figure
+  // instead of the card growing to accommodate it.
+  function setCardLetterboxd(card, rating) {
+    const host = card?.querySelector?.(".hover-ratings");
+    if (!host || !rating?.r || host.querySelector(".hover-rating-lb")) return;
+    const divider = document.createElement("i");
+    divider.className = "hover-rating-divider";
+    const cell = document.createElement("div");
+    cell.className = "hover-rating hover-rating-lb";
+    cell.innerHTML = `<span class="hover-rating-name">LB</span>` +
+      `<b class="hover-rating-value">${escapeHtml(rating.r.toFixed(2))}</b>`;
+    host.append(divider, cell);
+    host.classList.add("has-three");
+  }
+
+  // Called once per rendered grid: collect what the cards declared, ask the
+  // shards for whatever is not already known, then paint from the cache.
+  function fillGridLetterboxd(grid) {
+    const cards = [...(grid?.querySelectorAll?.("[data-imdb]") || [])];
+    if (!cards.length) return;
+    const paint = () => {
+      for (const card of cards) {
+        const cached = cacheGet(LETTERBOXD_CACHE_NS, card.dataset.imdb);
+        if (cached?.r > 0) setCardLetterboxd(card, cached);
+      }
+    };
+    paint();
+    letterboxdBatch(cards.map((card) => card.dataset.imdb)).then(paint).catch(() => {});
   }
 
   // =====================================================================
@@ -5074,9 +5171,15 @@
         if (keyFor(state.currentTarget) !== keyFor(target)) return;
         const host = el.metaPanel.querySelector(".meta-ratings");
         if (!host || host.querySelector(".rt-lb")) return;
-        const node = document.createElement("div");
-        node.className = "rt rt-lb";
+        const href = rating.slug ? `https://letterboxd.com/film/${encodeURIComponent(rating.slug)}/` : "";
+        const node = document.createElement(href ? "a" : "div");
+        node.className = href ? "rt rt-lb kp-rating-link" : "rt rt-lb";
         node.title = `${rating.r.toFixed(2)} из 5 на Letterboxd`;
+        if (href) {
+          node.href = href;
+          node.target = "_blank";
+          node.rel = "noopener noreferrer";
+        }
         node.innerHTML = `<b>${escapeHtml(rating.r.toFixed(2))}</b><span>Letterboxd</span>`;
         host.appendChild(node);
       })
@@ -8266,6 +8369,7 @@ addEventListener('message', async (event) => {
       findLiftwByKpId,
       letterboxdEndpointOrder,
       letterboxdRating,
+      letterboxdBatch,
       LETTERBOXD_ENDPOINTS,
       isPlaceholderTitle,
       mergeMetadata,

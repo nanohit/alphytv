@@ -52,8 +52,10 @@ test("a rating is fetched once and then served from storage", async () => {
   const { helpers, calls, storage } = await boot({
     handler: () => ok({ imdb: "tt0111161", found: true, slug: "the-shawshank-redemption", r: 4.6, n: 3008699 }),
   });
-  assert.deepEqual(plain(await helpers.letterboxdRating("tt0111161")), { r: 4.6, n: 3008699 });
-  assert.deepEqual(plain(await helpers.letterboxdRating("tt0111161")), { r: 4.6, n: 3008699 });
+  // The slug rides along so the watch-page badge can link out to the film.
+  const expected = { r: 4.6, n: 3008699, slug: "the-shawshank-redemption" };
+  assert.deepEqual(plain(await helpers.letterboxdRating("tt0111161")), expected);
+  assert.deepEqual(plain(await helpers.letterboxdRating("tt0111161")), expected);
   assert.equal(calls.length, 1, "the second ask must not touch the network");
   assert.ok([...storage.keys()].some((k) => k.endsWith("letterboxd.v1:tt0111161")));
 });
@@ -78,7 +80,7 @@ test("a dead project is skipped, and stops being tried for a while", async () =>
   // tt0137523 starts on the dead project, so this exercises the fall-through.
   const order = helpers.letterboxdEndpointOrder("tt0137523");
   assert.match(order[0], /lcldjrphnkufymdhevyx/);
-  assert.deepEqual(plain(await helpers.letterboxdRating("tt0137523")), { r: 4.27, n: 5862630 });
+  assert.deepEqual(plain(await helpers.letterboxdRating("tt0137523")), { r: 4.27, n: 5862630, slug: "" });
   assert.equal(calls.length, 2, "one failure, then the next project answers");
 
   // The dead one is now on cooldown: another id that would have started there
@@ -116,4 +118,79 @@ test("the badge is appended, never rendered inline, and is skipped for series", 
   // A late answer must not land on a page the user has already navigated away from.
   assert.match(block, /isStale\(token\)/);
   assert.match(block, /keyFor\(state\.currentTarget\) !== keyFor\(target\)/);
+});
+
+test("a grid asks once per shard and never triggers scraping", async () => {
+  const asked = [];
+  const { helpers, storage } = await boot({
+    handler: (url) => {
+      asked.push(url);
+      const ids = new URL(url).searchParams.get("imdb").split(",");
+      // The table answers only what it holds; an unknown film is simply absent.
+      const items = {};
+      for (const id of ids) if (id !== "tt9999999") items[id] = { r: 4.1, n: 100, slug: `s-${id}` };
+      return ok({ items });
+    },
+  });
+  const ids = ["tt0111161", "tt0137523", "tt6751668", "tt1877830", "tt9999999"];
+  await helpers.letterboxdBatch(ids);
+
+  // One request per shard, not one per film.
+  assert.ok(asked.length <= 3 && asked.length >= 1, `${asked.length} requests for ${ids.length} films`);
+  assert.ok(asked.every((url) => url.includes(",") || new URL(url).searchParams.get("imdb").split(",").length >= 1));
+  // Every id went to the shard its hash picks, so batch and single agree.
+  for (const url of asked) {
+    const endpoint = url.split("?")[0];
+    for (const id of new URL(url).searchParams.get("imdb").split(",")) {
+      assert.equal(helpers.letterboxdEndpointOrder(id)[0], endpoint, `${id} went to the wrong shard`);
+    }
+  }
+  assert.equal(JSON.parse(storage.get("alphy.cache.letterboxd.v1:tt0111161")).v.r, 4.1);
+  // A film the table has never seen must stay unknown rather than be cached as
+  // "no rating" — opening it later is what fills it in.
+  assert.equal(storage.get("alphy.cache.letterboxd.v1:tt9999999"), undefined);
+});
+
+test("a batch never re-asks for something already cached", async () => {
+  const asked = [];
+  const { helpers } = await boot({
+    handler: (url) => { asked.push(url); return ok({ items: { tt0111161: { r: 4.6, n: 1, slug: "x" } } }); },
+  });
+  await helpers.letterboxdBatch(["tt0111161"]);
+  await helpers.letterboxdBatch(["tt0111161"]);
+  assert.equal(asked.length, 1);
+});
+
+test("a film the server could not answer for is still asked only once", async () => {
+  // A search grid renders twice, and an unanswerable film leaves nothing in the
+  // cache to suppress the second pass — which is how one grid became four calls.
+  const asked = [];
+  const { helpers } = await boot({
+    handler: (url) => { asked.push(url); return ok({ items: {} }); },
+  });
+  await helpers.letterboxdBatch(["tt0111161", "tt0137523"]);
+  await helpers.letterboxdBatch(["tt0111161", "tt0137523"]);
+  assert.equal(asked.length, 2, "two shards, one pass — not two passes");
+});
+
+test("a second render pass waits for the first request instead of painting early", async () => {
+  // The grid renders twice and the second pass builds new card elements. If it
+  // skipped the in-flight request it would read an empty cache and paint nothing.
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const asked = [];
+  const { helpers, storage } = await boot({
+    handler: async (url) => {
+      asked.push(url);
+      await gate;
+      return ok({ items: { tt0111161: { r: 4.6, n: 7, slug: "x" } } });
+    },
+  });
+  const first = helpers.letterboxdBatch(["tt0111161"]);
+  const second = helpers.letterboxdBatch(["tt0111161"]);
+  release();
+  await Promise.all([first, second]);
+  assert.equal(asked.length, 1, "the second pass must not fire its own request");
+  assert.equal(JSON.parse(storage.get("alphy.cache.letterboxd.v1:tt0111161")).v.r, 4.6,
+    "and it must not return before the cache is filled");
 });
