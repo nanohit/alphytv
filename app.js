@@ -1543,6 +1543,12 @@
     warmLiftwConnections();
     const pending = resolveLiftwTitle(key);
     pending.catch((error) => log("liftw-prefetch-warn", error.message));
+    // Settle the AV1-vs-VP9 question here too, so the click reads a cached
+    // verdict instead of paying for a manifest. A series resolves its ladders per
+    // episode, so only a movie can be answered this early.
+    pending.then((parsed) => {
+      if (!parsed?.playlist?.seasons?.length) return pickLiftwLadder(parsed?.sources);
+    }).catch(() => {});
     return pending;
   }
 
@@ -1764,10 +1770,11 @@
     return score;
   }
 
-  // Three complete ladders arrive in the same embed and cost nothing to choose
-  // between: `dasha` is AV1 (1020p at ~0.95 Mbps), `dash` is VP9 (same frame
-  // size, ~12 Mbps), `hls` is H.264 capped near 720p. Prefer the cheapest codec
-  // the browser can actually decode, and fall back to HLS, which plays anywhere.
+  // Three complete ladders arrive in the same embed: `dasha` is AV1, `dash` is
+  // VP9 at the same frame size, `hls` is H.264 capped near 720p. Prefer the
+  // cheapest codec the browser can actually decode, and fall back to HLS, which
+  // plays anywhere. Whether that AV1 preference actually holds is decided by
+  // pickLiftwLadder below — see the bitrate note there.
   function bestLiftwSource(sources) {
     if (sources?.dasha && canPlayLiftwCodec('video/webm; codecs="av01.0.08M.08"')) {
       return { url: sources.dasha, kind: "dasha" };
@@ -1779,6 +1786,82 @@
     if (sources?.dash) return { url: sources.dash, kind: "dash" };
     if (sources?.dasha) return { url: sources.dasha, kind: "dasha" };
     return null;
+  }
+
+  // AV1 is roughly 30-50% more efficient than VP9, so a cheaper AV1 rung at the
+  // same frame size is normally the better deal. LiftW's AV1 ladders are not
+  // normal: measured across 25 films they are bimodal. A healthy one runs
+  // 0.07-0.24 bits per pixel per frame; a starved one runs 0.010-0.032 — the
+  // same 1920-wide frame at a tenth of the data, which is far past anything a
+  // codec can account for (Дюна: AV1 0.36 Mbps against VP9 3.42 Mbps). Nine of
+  // the thirteen AV1 ladders sampled were starved, so this is the common case.
+  //
+  // Worse, a starved ladder has no better rung to climb to: its top IS 0.36
+  // Mbps, so a fast connection buys nothing. Falling back to VP9 does not force
+  // anyone onto a 12 Mbps stream — ABR still picks by measured bandwidth; it
+  // just restores a ceiling worth reaching for.
+  //
+  // 0.045 sits in the empty gap between the two clusters.
+  const LIFTW_AV1_MIN_BPP = 0.045;
+  const LIFTW_LADDER_CACHE_NS = "liftwladder.v1";
+
+  async function pickLiftwLadder(sources) {
+    const choice = bestLiftwSource(sources);
+    // Only worth asking when AV1 was chosen AND there is something to fall back
+    // to. Everywhere else the sync answer already is the answer.
+    if (choice?.kind !== "dasha" || !sources?.dash) return choice;
+    const healthy = await liftwAv1IsHealthy(sources.dasha);
+    return healthy ? choice : { url: sources.dash, kind: "dash" };
+  }
+
+  // Fail-safe: any parse or network trouble keeps the AV1 ladder, which is what
+  // shipped before this check existed. The verdict is cached against the
+  // manifest path (the ?t= signature rotates, the path does not), so the hover
+  // warm-up pays for it and the click does not.
+  async function liftwAv1IsHealthy(manifestUrl) {
+    let key = "";
+    try { key = new URL(manifestUrl).pathname; } catch { return true; }
+    const cached = cacheGet(LIFTW_LADDER_CACHE_NS, key);
+    if (typeof cached === "boolean") return cached;
+    let healthy = true;
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 6000);
+      const response = await fetch(manifestUrl, { signal: controller.signal, referrerPolicy: "no-referrer" });
+      clearTimeout(timer);
+      if (!response.ok) return true;
+      const top = topDashRepresentation(await response.text());
+      if (top) healthy = top.bandwidth / (top.width * top.height * top.fps) >= LIFTW_AV1_MIN_BPP;
+    } catch {
+      return true;
+    }
+    cacheSet(LIFTW_LADDER_CACHE_NS, key, healthy, TTL.liftwtitle);
+    return healthy;
+  }
+
+  // The largest frame, and within it the fattest rung — that is the ceiling the
+  // player would actually be climbing towards.
+  function topDashRepresentation(xml) {
+    const text = String(xml || "");
+    const docFps = /frameRate="([\d/.]+)"/.exec(text)?.[1];
+    let best = null;
+    for (const tag of text.match(/<Representation[^>]*>/g) || []) {
+      // "bandwidth" ends in "width", so an unanchored /width="/ matches it.
+      const width = positiveInt(/(?<![a-z])width="(\d+)"/.exec(tag)?.[1]);
+      const height = positiveInt(/height="(\d+)"/.exec(tag)?.[1]);
+      const bandwidth = positiveInt(/bandwidth="(\d+)"/.exec(tag)?.[1]);
+      if (!width || !height || !bandwidth) continue;
+      const rate = /frameRate="([\d/.]+)"/.exec(tag)?.[1] || docFps || "24";
+      const [num, den] = String(rate).split("/");
+      const fps = Number(num) / (Number(den) || 1) || 24;
+      const candidate = { width, height, bandwidth, fps };
+      if (!best
+        || width * height > best.width * best.height
+        || (width === best.width && height === best.height && bandwidth > best.bandwidth)) {
+        best = candidate;
+      }
+    }
+    return best;
   }
 
   // Both WebM ladders carry Opus audio only, so a browser that cannot decode
@@ -2805,7 +2888,8 @@
   function soapAutoQualityLabel(hls) {
     const index = hls?.loadLevel >= 0 ? hls.loadLevel : hls?.nextLevel >= 0 ? hls.nextLevel : hls?.currentLevel;
     const level = index >= 0 ? hls.levels?.[index] : null;
-    return level?.height ? `Авто (${level.height}p)` : "Авто";
+    const label = qualityLabel(level);
+    return label ? `Авто (${label})` : "Авто";
   }
   function soapHlsConfig() {
     return {
@@ -3014,7 +3098,7 @@
           });
           return btn;
         }
-        btn.textContent = `${l.height ? `${l.height}p` : "auto"} ${(l.bitrate / 1e6).toFixed(1)} Mbps`;
+        btn.textContent = `${qualityLabel(l) || "auto"} ${(l.bitrate / 1e6).toFixed(1)} Mbps`;
         if (!hls.autoLevelEnabled && l._i === hls.currentLevel) btn.className = "active";
         btn.addEventListener("click", () => {
           hls.capLevelToPlayerSize = false;
@@ -3991,7 +4075,8 @@
     const selection = seasons.length ? chooseSerialSelection(seasons, requested) : null;
     const episode = selection ? findSerialEpisode(seasons, selection) : null;
     const sources = episode?.sources || parsed.sources;
-    const media = bestLiftwSource(sources);
+    const media = await pickLiftwLadder(sources);
+    if (isStale(token)) return;
     if (!media) throw new Error("LiftW не отдал dash/hls для этого тайтла");
 
     if (selection) {
@@ -4037,14 +4122,25 @@
     const selection = chooseSerialSelection(context.seasons, nextSelection);
     if (!selection || sameSerialSelection(selection, context.selection)) return;
     const episode = findSerialEpisode(context.seasons, selection);
-    const media = bestLiftwSource(episode?.sources);
-    if (!media) return;
+    if (!bestLiftwSource(episode?.sources)) return;
 
     const token = resolveToken;
+    // Read off the live player before anything can await: the dub has to be
+    // sampled while the old episode is still loaded.
     const audioLang = audioTag(state.player?.getVariantTracks?.().find((track) => track.active))
       || savedAudioLang(keyFor(target));
+    // Claimed before the first await so a double-click cannot start two switches.
     context.switching = true;
     renderTracks();
+    // Each episode carries its own ladders, so the AV1 health check is per
+    // episode too — a season can change encoder mid-run the same way it changes
+    // studios. Warm, this is a cache read; cold it is one small manifest GET.
+    const media = await pickLiftwLadder(episode.sources);
+    if (!media || isStale(token)) {
+      context.switching = false;
+      renderTracks();
+      return;
+    }
     await teardownPlayer();
     showPlayerLoading();
     target.season = selection.season;
@@ -5586,7 +5682,8 @@
       const btn = document.createElement("button");
       if (track.auto) {
         const active = variants.find((item) => item.active);
-        btn.textContent = active?.height ? `Авто (${active.height}p)` : "Авто";
+        const label = qualityLabel(active);
+        btn.textContent = label ? `Авто (${label})` : "Авто";
         if (abrEnabled) btn.className = "active";
         btn.addEventListener("click", () => {
           player.configure({ abr: { enabled: true } });
@@ -5594,7 +5691,7 @@
         });
         return btn;
       }
-      btn.textContent = `${track.height ? `${track.height}p` : "auto"} ${bitrateLabel(track)}`.trim();
+      btn.textContent = `${qualityLabel(track) || "auto"} ${bitrateLabel(track)}`.trim();
       if (!abrEnabled && track.active) btn.className = "active";
       btn.addEventListener("click", () => {
         player.configure({ abr: { enabled: false } });
@@ -7589,6 +7686,21 @@ addEventListener('message', async (event) => {
   function bitrateLabel(track) {
     return track.bandwidth ? `${(track.bandwidth / 1000000).toFixed(1)} Mbps` : "";
   }
+  // Name a rung by frame WIDTH. A 2.40:1 master is stored as 1920x800 with the
+  // letterbox rows simply absent, so reading the height called a full-width
+  // 1080p source "800p" — and an IMAX 1938x1020 one "1020p", which sorts below a
+  // narrower 1920x1080 despite being wider. Width is what actually tracks the
+  // master here, and it is what every mainstream player labels by.
+  const QUALITY_WIDTH_STEPS = [
+    [3600, "4K"], [2500, "1440p"], [1900, "1080p"], [1260, "720p"],
+    [830, "480p"], [620, "360p"], [1, "240p"],
+  ];
+  function qualityLabel(track) {
+    const width = Number(track?.width) || 0;
+    if (width) return QUALITY_WIDTH_STEPS.find(([min]) => width >= min)?.[1] || "";
+    // Some providers expose only a height; fall back rather than lose the rung.
+    return track?.height ? `${track.height}p` : "";
+  }
   function groupBy(list, keyFn) {
     const map = new Map();
     for (const item of list) {
@@ -8026,6 +8138,9 @@ addEventListener('message', async (event) => {
       liftwTextTracks,
       liftwTarget,
       bestLiftwSource,
+      pickLiftwLadder,
+      topDashRepresentation,
+      qualityLabel,
       liftwRuntimeMinutes,
       liftwCandidateScore,
       findLiftwByKpId,
