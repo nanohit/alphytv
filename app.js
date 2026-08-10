@@ -4907,6 +4907,10 @@
     const kpId = String(state.currentMeta?.kpId || target?.kpId || "");
     const key = `${keyFor(target)}|${kpId}`;
     if (!target || watchExtrasKey === key) return;
+    // Most sources render twice: a placeholder head first, then the real payload.
+    // With neither an id nor a name there is nothing to look anything up by, and
+    // scheduling anyway just buys a duplicate run once the id lands.
+    if (!kpId && isPlaceholderTitle(state.currentMeta?.title || target?.title || "")) return;
     watchExtrasKey = key;
     const token = resolveToken;
     scheduleIdle(() => {
