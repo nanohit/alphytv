@@ -14,7 +14,13 @@ test("opaque fetch allowlist accepts only the intended HTTPS provider hosts", as
   const helpers = await privacyHelpers();
   assert.equal(helpers.isOpaqueFetchUrl("https://plapi.cdnvideohub.com/api/v1/player/sv/video/1"), true);
   assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/search?q=test"), true);
-  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/info/1"), false);
+  // LiftW playback needs /info/<id> and the embed too — both are control plane
+  // and both must stay opaque, so LiftW never sees alphy.tv as an origin.
+  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/info/1"), true);
+  assert.equal(helpers.isOpaqueFetchUrl("https://embed.liftw.ws/embed/movie/51984?imp2=x"), true);
+  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/info/not-an-id"), false);
+  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/auth/login"), false);
+  assert.equal(helpers.isOpaqueFetchUrl("https://embed.liftw.ws.evil.example/embed/movie/1"), false);
   assert.equal(helpers.isOpaqueFetchUrl("https://api.ortified.ws/embed/movie/1"), true);
   assert.equal(helpers.isOpaqueFetchUrl("https://api.zenithjs.ws/embed/movie/1"), true);
   assert.equal(helpers.isOpaqueFetchUrl("https://22jul.newdeaf.co/search/test"), true);

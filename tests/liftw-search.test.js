@@ -54,7 +54,6 @@ test("LiftW search payload is normalized without Kinopoisk metadata calls", asyn
     type: 1,
     typeLabel: "фильм",
     isSeries: false,
-    url: "https://liftw.ws/details.html?id=15534",
   });
   assert.equal(results[1].isSeries, true);
   assert.equal(results[1].typeLabel, "мультсериал");
@@ -73,19 +72,35 @@ test("LiftW search is fail-closed inside the opaque client sandbox", async () =>
   assert.doesNotMatch(block, /resolverJson|\/api\//);
 });
 
-test("LiftW detail links accept only numeric ids", async () => {
+test("LiftW search results build in-app playback targets", async () => {
   const helpers = await liftwHelpers();
-  assert.equal(helpers.liftwDetailsUrl(42), "https://liftw.ws/details.html?id=42");
-  assert.equal(helpers.liftwDetailsUrl("javascript:alert(1)"), "");
+  const target = helpers.liftwTarget(15534);
+  assert.equal(target.kind, "lift");
+  assert.equal(helpers.hashFor(target), "/l/15534");
+  assert.equal(helpers.hashFor(helpers.liftwTarget(15534, { season: 3, episode: 7 })), "/l/15534/s3e7");
+
+  // Ids come straight off a third-party payload. A non-numeric one is emptied
+  // rather than smuggled into a URL, and the hash it produces routes home
+  // instead of opening a watch page that could never resolve.
+  for (const bad of ["javascript:alert(1)", "../../etc", "", null, 0, -5]) {
+    const target = helpers.liftwTarget(bad);
+    assert.equal(target.liftId, "", `${JSON.stringify(bad)} leaked into a target`);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(helpers.parsePathRoute(helpers.hashFor(target)))),
+      { view: "home" },
+    );
+  }
 });
 
-test("LiftW cards do not enter any Alphy playback route", async () => {
+test("a LiftW card opens the internal player and warms the title on hover", async () => {
   const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
   const start = source.indexOf("function makeLiftwCard");
   const end = source.indexOf("function makeCollapsCard", start);
   const block = source.slice(start, end);
   assert.ok(start >= 0 && end > start);
-  assert.match(block, /openExternalNoReferrer/);
-  assert.match(block, /noopener noreferrer/);
-  assert.doesNotMatch(block, /\/watch\/|\bgo\s*\(|resolveKp|recordOpen/);
+  // The card used to hand the user off to liftw.ws. It now routes into our own
+  // Shaka playback, and never leaves the site.
+  assert.match(block, /onClick:\s*\(\)\s*=>\s*go\(hashFor\(target\)\)/);
+  assert.match(block, /pointerenter[\s\S]*prefetchLiftwTitle/);
+  assert.doesNotMatch(block, /openExternal|liftw\.ws|noopener/);
 });

@@ -26,6 +26,13 @@
   const ND_SEARCH_CACHE_NS = "ndsearch.v2";
   const LIFTW_SEARCH_CACHE_NS = "liftwsearch.v1";
   const LIFTW_SEARCH_URL = "https://api.liftw.ws/search";
+  const LIFTW_TITLE_CACHE_NS = "liftwtitle.v1";
+  const LIFTW_INFO_URL = "https://api.liftw.ws/info/";
+  const LIFTW_EMBED_HOST = "embed.liftw.ws";
+  const LIFTW_CDN_ORIGINS = [
+    "https://hye1eaipby4w.interkh.com",
+    "https://ghzbfjzbazc.interkh.com",
+  ];
   // v1 may contain fuzzy Batman->Lego Batman metadata written by older builds.
   const ND_ENRICHED_CACHE_NS = "ndenriched.v2";
   const ND_RECOMMEND_CACHE_NS = "ndrecommend.v1";
@@ -70,6 +77,11 @@
     search: 6 * 3600e3,
     ndsearch: 6 * 3600e3,
     liftwsearch: 60 * 60e3,
+    // The signed CDN URLs inside a LiftW embed carry t=<unix> about ten days out,
+    // so a six-hour parse cache never outlives the stream it points at — and a
+    // reopened title costs zero network before Shaka. A load failure still
+    // re-resolves with { force: true }.
+    liftwtitle: 6 * 3600e3,
     ndrecommend: 24 * 3600e3,
     ndrecommendMiss: 60 * 60e3,
     ndpage: 24 * 3600e3,
@@ -201,6 +213,8 @@
   const embedTextInflight = new Map();
   const zenithParsedCache = new Map();
   const zenithParsedInflight = new Map();
+  const liftwTitleInflight = new Map();
+  const liftwWarmOrigins = new Set();
   const externalScriptPromises = new Map();
   const preparedTargets = new Set();
   // Hover prefetch budget. This used to be a plain countdown that, once spent,
@@ -492,6 +506,7 @@
     if (t.kind === "opr") return `opr:${t.playerUrl}`;
     if (t.kind === "nd") return `nd:${t.pageUrl}`;
     if (t.kind === "soap") return `soap:${t.soapId}`;
+    if (t.kind === "lift") return `lift:${t.liftId}`;
     if (t.kind === "clps") return `clps:${t.kpId}`;
     if (t.kind === "rezka") return `rezka:${t.rezkaId}`;
     return "x";
@@ -503,6 +518,7 @@
     if (t.kind === "opr") return { kind: "opr", playerUrl: t.playerUrl, pageUrl: t.pageUrl || "" };
     if (t.kind === "nd") return { kind: "nd", pageUrl: t.pageUrl };
     if (t.kind === "soap") return { kind: "soap", soapId: String(t.soapId) };
+    if (t.kind === "lift") return liftwTarget(t.liftId, t);
     if (t.kind === "clps") return collapsTarget(t.kpId, t);
     if (t.kind === "rezka") return rezkaTarget(t.rezkaId, t.kpId);
     return t;
@@ -514,6 +530,12 @@
     if (t.kind === "opr") return legacyHashPath(`/watch/opr/${encodeURIComponent(t.playerUrl)}`);
     if (t.kind === "nd") return shortNewdeafPath(t.pageUrl) || legacyHashPath(`/watch/nd/${encodeURIComponent(t.pageUrl)}`);
     if (t.kind === "soap") return `/m/${encodeURIComponent(t.soapId)}`;
+    if (t.kind === "lift") {
+      const path = `/l/${encodeURIComponent(t.liftId)}`;
+      const season = positiveInt(t.season);
+      const episode = positiveInt(t.episode);
+      return season && episode ? `${path}/s${season}e${episode}` : path;
+    }
     if (t.kind === "rezka") {
       const path = `/r/${encodeURIComponent(t.rezkaId)}`;
       return /^\d+$/.test(String(t.kpId || "")) ? `${path}/${encodeURIComponent(t.kpId)}` : path;
@@ -1400,7 +1422,6 @@
       type: typeInfo.type,
       typeLabel: typeInfo.label,
       isSeries: typeInfo.isSeries,
-      url: liftwDetailsUrl(id),
     };
   }
 
@@ -1425,9 +1446,231 @@
     }
   }
 
-  function liftwDetailsUrl(id) {
+  // =====================================================================
+  // LiftW playback.
+  //
+  // The embed is the same player-venom `makePlayer({...})` family Zenith uses,
+  // so parseZenithEmbed/normalizeSerialSeasons read it verbatim and the entire
+  // serial + Shaka stack below is reused rather than duplicated.
+  //
+  // Privacy: the control plane (api.liftw.ws/info, embed.liftw.ws/embed) runs
+  // inside the opaque sandbox and fails closed, so LiftW's own servers only ever
+  // see Origin: null with no referrer — never alphy.tv. Media lives on
+  // *.interkh.com, a third-party CDN that reflects whatever Origin it is given,
+  // and is played natively like every other source.
+  //
+  // Latency: one /info + one embed fetch carry EVERY season/episode with signed
+  // CDN URLs valid ~10 days. A whole series therefore costs two requests, and
+  // switching episodes costs zero.
+  // =====================================================================
+  function liftwTarget(id, selection = {}) {
+    const target = { kind: "lift", liftId: String(positiveInt(id) || "") };
+    const season = positiveInt(selection.season);
+    const episode = positiveInt(selection.episode);
+    if (season) target.season = season;
+    if (episode) target.episode = episode;
+    return target;
+  }
+
+  function liftwListItem(item, details = {}) {
+    const target = liftwTarget(item.id);
+    return {
+      id: crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+      key: keyFor(target),
+      title: details.title || item.title || `LiftW ${item.id}`,
+      year: details.year || item.year || "",
+      poster: details.poster || item.poster || "",
+      description: details.description || "",
+      isSeries: !!(details.isSeries ?? item.isSeries),
+      movieLength: details.movieLength || null,
+      rating: details.rating || item.rating || {},
+      target,
+      cachedAt: new Date().toISOString(),
+    };
+  }
+
+  function warmLiftwConnections() {
+    for (const origin of LIFTW_CDN_ORIGINS) {
+      if (liftwWarmOrigins.has(origin)) continue;
+      liftwWarmOrigins.add(origin);
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = origin;
+      link.crossOrigin = "anonymous";
+      document.head.appendChild(link);
+    }
+  }
+
+  // memory-free by design: the parse is small (sources + seasons + meta) and the
+  // localStorage TTL cache already survives reloads, which is what actually pays.
+  async function resolveLiftwTitle(id, { force = false } = {}) {
     const safeId = positiveInt(id);
-    return safeId ? `https://liftw.ws/details.html?id=${safeId}` : "";
+    if (!safeId) throw new Error("LiftW: неверный id");
+    const key = String(safeId);
+    if (force) {
+      try { localStorage.removeItem(`${CACHE_PREFIX}${LIFTW_TITLE_CACHE_NS}:${key}`); } catch { /* ignore */ }
+    } else {
+      const cached = cacheGet(LIFTW_TITLE_CACHE_NS, key);
+      if (cached?.sources || cached?.playlist?.seasons?.length) return cached;
+      const inflight = liftwTitleInflight.get(key);
+      if (inflight) return inflight;
+    }
+    const pending = fetchLiftwTitle(key)
+      .then((parsed) => {
+        cacheSet(LIFTW_TITLE_CACHE_NS, key, parsed, TTL.liftwtitle);
+        return parsed;
+      })
+      .finally(() => liftwTitleInflight.delete(key));
+    liftwTitleInflight.set(key, pending);
+    return pending;
+  }
+
+  // Hover warming. Costs a speculative token and stays silent on failure — a
+  // cold click still resolves normally, it just pays the two round trips itself.
+  function prefetchLiftwTitle(id) {
+    const key = String(positiveInt(id) || "");
+    if (!key || liftwTitleInflight.has(key) || cacheGet(LIFTW_TITLE_CACHE_NS, key)) return;
+    if (!claimSpeculativeIntent()) return;
+    warmLiftwConnections();
+    resolveLiftwTitle(key).catch((error) => log("liftw-prefetch-warn", error.message));
+  }
+
+  async function fetchLiftwTitle(id) {
+    const infoText = await fetchThirdPartyText(`${LIFTW_INFO_URL}${encodeURIComponent(id)}`, {
+      preferSandbox: true,
+      directFallback: false,
+      label: "liftw-info",
+      timeoutMs: 9000,
+      sandboxTimeoutMs: 9000,
+    });
+    let info;
+    try { info = JSON.parse(infoText); }
+    catch { throw new Error("LiftW вернул некорректный ответ"); }
+    const embedUrl = liftwEmbedUrl(info?.iframe_uri);
+    if (!embedUrl) throw new Error("LiftW не выдал ссылку на плеер");
+
+    const html = await fetchThirdPartyText(embedUrl, {
+      preferSandbox: true,
+      directFallback: false,
+      label: "liftw-embed",
+      timeoutMs: 12000,
+      sandboxTimeoutMs: 12000,
+    });
+    const parsed = parseZenithEmbed(html);
+    const seasons = parsed.playlist?.seasons || [];
+    if (!seasons.length && !bestLiftwSource(parsed.sources)) {
+      throw new Error("LiftW не отдал источники для этого тайтла");
+    }
+    return {
+      id: String(id),
+      sources: parsed.sources,
+      audioNames: parsed.meta.audioNames || [],
+      textTracks: liftwTextTracks(html),
+      meta: liftwMeta(info),
+      playlist: { current: parsed.playlist?.current || null, seasons },
+    };
+  }
+
+  // The signed iframe_uri is the only entry point that still works — the bare
+  // /embed/movie/<id> path started answering 410 Gone, so never synthesise it.
+  function liftwEmbedUrl(value) {
+    try {
+      const url = new URL(String(value || ""));
+      if (url.protocol !== "https:") return "";
+      if (url.hostname.toLowerCase() !== LIFTW_EMBED_HOST) return "";
+      if (!/^\/embed\/movie\/\d+$/.test(url.pathname)) return "";
+      return url.href;
+    } catch {
+      return "";
+    }
+  }
+
+  // A movie's `cc` is a JSON array of {url,name} sitting unquoted in the same
+  // makePlayer object; the .vtt files are on the CDN behind the video's own
+  // signature. Series pages have no top-level `cc:` — every episode carries its
+  // own inside the playlist JSON, which normalizeSerialSeasons picks up instead.
+  function liftwTextTracks(html) {
+    const match = /\bcc\s*:\s*\[/.exec(String(html || ""));
+    if (!match) return [];
+    const arrayText = balancedJsContainer(String(html), match.index + match[0].length - 1, "[", "]");
+    if (!arrayText) return [];
+    try { return embedTextTracks({ cc: JSON.parse(arrayText) }); }
+    catch { return []; }
+  }
+
+  function liftwSubtitleLanguage(label) {
+    const text = String(label || "").toLowerCase();
+    if (/укр|ukr/.test(text)) return "uk";
+    if (/рус|rus/.test(text)) return "ru";
+    if (/eng|англ/.test(text)) return "en";
+    return "und";
+  }
+
+  // /info carries a full Kinopoisk-grade record, so a LiftW watch page needs no
+  // kinopoisk key and no second metadata round trip.
+  function liftwMeta(info) {
+    const details = info?.info && typeof info.info === "object" ? info.info : {};
+    const typeInfo = liftwTypeInfo(info?.type);
+    const ratingNumber = (value) => {
+      const number = Number(value);
+      return Number.isFinite(number) && number > 0 && number <= 10 ? number : null;
+    };
+    const list = (value, limit) => (Array.isArray(value) ? value : [])
+      .map((entry) => compact(entry).slice(0, 60))
+      .filter(Boolean)
+      .slice(0, limit);
+    const minutes = positiveInt(String(details.time || "").match(/(\d+)\s*мин/i)?.[1]);
+    return {
+      title: compact(info?.name || info?.origin_name).slice(0, 180),
+      originalTitle: compact(info?.origin_name).slice(0, 180),
+      year: positiveInt(info?.year) || "",
+      poster: liftwPosterUrl(info?.poster),
+      description: compact(details.description).slice(0, 2000),
+      isSeries: typeInfo.isSeries,
+      movieLength: minutes,
+      ageRating: positiveInt(details.age),
+      ratingMpaa: compact(details.rate_mpaa).slice(0, 8).toLowerCase() || null,
+      genres: list(details.genre, 6),
+      countries: list(details.country, 4),
+      rating: {
+        kp: ratingNumber(info?.kp_rating),
+        imdb: ratingNumber(info?.imdb_rating),
+      },
+      people: {
+        directors: list(details.director, 3).map((name) => ({ name })),
+        cast: list(details.actors, 8).map((name) => ({ name })),
+      },
+      kpId: String(positiveInt(details.id) || ""),
+    };
+  }
+
+  // Three complete ladders arrive in the same embed and cost nothing to choose
+  // between: `dasha` is AV1 (1020p at ~0.95 Mbps), `dash` is VP9 (same frame
+  // size, ~12 Mbps), `hls` is H.264 capped near 720p. Prefer the cheapest codec
+  // the browser can actually decode, and fall back to HLS, which plays anywhere.
+  function bestLiftwSource(sources) {
+    if (sources?.dasha && canPlayLiftwCodec('video/webm; codecs="av01.0.08M.08"')) {
+      return { url: sources.dasha, kind: "dasha" };
+    }
+    if (sources?.dash && canPlayLiftwCodec('video/webm; codecs="vp09.00.40.08"')) {
+      return { url: sources.dash, kind: "dash" };
+    }
+    if (sources?.hls) return { url: sources.hls, kind: "hls" };
+    if (sources?.dash) return { url: sources.dash, kind: "dash" };
+    if (sources?.dasha) return { url: sources.dasha, kind: "dasha" };
+    return null;
+  }
+
+  // Both WebM ladders carry Opus audio only, so a browser that cannot decode
+  // Opus in MSE (older Safari) must not be handed DASH at all.
+  function canPlayLiftwCodec(videoType) {
+    const media = typeof window !== "undefined" ? window.MediaSource : null;
+    if (!media?.isTypeSupported) return false;
+    try {
+      return media.isTypeSupported(videoType) && media.isTypeSupported('audio/webm; codecs="opus"');
+    } catch {
+      return false;
+    }
   }
 
   async function resolveNewdeafPage(pageUrl) {
@@ -1480,12 +1723,15 @@
     if (segs[0] === "bookmarks") return { view: "bookmarks" };
     if (segs[0] === "search") return { view: "search", q: segs.slice(1).join("/") };
     if (segs[0] === "watch" && (segs[1] === "clps" || segs[1] === "collaps") && /^\d+$/.test(segs[2] || "")) {
-      return { view: "watch", kind: "clps", raw: segs[2], selection: collapsSelectionFromEpisodeKey(segs[3]) };
+      return { view: "watch", kind: "clps", raw: segs[2], selection: serialSelectionFromEpisodeKey(segs[3]) };
     }
     if (segs[0] === "watch") return { view: "watch", kind: segs[1], raw: segs.slice(2).join("/") || "" };
     if (/^\d+$/.test(segs[0])) return { view: "watch", kind: "zen", raw: segs[0] };
     if (segs[0] === "k" && /^\d+$/.test(segs[1] || "")) return { view: "watch", kind: "kp", raw: segs[1] };
     if (segs[0] === "m" && /^\d+$/.test(segs[1] || "")) return { view: "watch", kind: "soap", raw: segs[1] };
+    if (segs[0] === "l" && /^\d+$/.test(segs[1] || "")) {
+      return { view: "watch", kind: "lift", raw: segs[1], selection: serialSelectionFromEpisodeKey(segs[2]) };
+    }
     if (segs[0] === "r" && /^\d+$/.test(segs[1] || "")) {
       return {
         view: "watch",
@@ -1495,7 +1741,7 @@
       };
     }
     if (segs[0] === "c" && /^\d+$/.test(segs[1] || "")) {
-      return { view: "watch", kind: "clps", raw: segs[1], selection: collapsSelectionFromEpisodeKey(segs[2]) };
+      return { view: "watch", kind: "clps", raw: segs[1], selection: serialSelectionFromEpisodeKey(segs[2]) };
     }
     if (segs[0] === "o" && /^\d+$/.test(segs[1] || "")) {
       return { view: "watch", kind: "ort", raw: ortifiedUrlFromShort(segs[1], segs[2]) };
@@ -1529,6 +1775,7 @@
     if (route.kind === "opr") return { kind: "opr", playerUrl: route.raw };
     if (route.kind === "nd") return { kind: "nd", pageUrl: route.raw };
     if (route.kind === "soap") return { kind: "soap", soapId: route.raw };
+    if (route.kind === "lift") return liftwTarget(route.raw, route.selection || {});
     if (route.kind === "clps") return collapsTarget(route.raw, route.selection || {});
     if (route.kind === "rezka") return rezkaTarget(route.raw, route.kpId);
     return null;
@@ -2074,6 +2321,14 @@
   }
 
   function makeLiftwCard(item) {
+    const target = liftwTarget(item.id);
+    const details = {
+      title: item.title,
+      year: item.year || "",
+      poster: item.poster || "",
+      rating: item.rating || {},
+      isSeries: !!item.isSeries,
+    };
     const card = makeCard({
       title: item.title,
       sub: [item.year, item.typeLabel, item.quality].filter(Boolean).join(" · "),
@@ -2081,10 +2336,14 @@
       ratingPill: "LIFT",
       rating: item.rating,
       isSeries: item.isSeries,
-      onClick: () => openExternalNoReferrer(item.url),
+      bookmark: { target, details },
+      onClick: () => go(hashFor(target)),
+      onAdd: () => window.alphyCatalog?.addToList?.(liftwListItem(item, details)),
     });
     card.classList.add("liftw-card");
-    card.title = "Открыть на LiftW";
+    // One hovered card warms the whole title: /info + embed land in the TTL cache
+    // and the click then goes straight to Shaka.
+    card.addEventListener("pointerenter", () => prefetchLiftwTitle(item.id), { once: true });
     const ratings = [
       item.rating?.kp ? `КП ${formatRating(item.rating.kp)}` : "",
       item.rating?.imdb ? `IMDb ${formatRating(item.rating.imdb)}` : "",
@@ -2097,21 +2356,6 @@
       card.appendChild(meta);
     }
     return card;
-  }
-
-  function openExternalNoReferrer(url) {
-    let parsed;
-    try { parsed = new URL(String(url || "")); }
-    catch { return; }
-    if (parsed.protocol !== "https:" || parsed.hostname !== "liftw.ws" || parsed.pathname !== "/details.html") return;
-    const link = document.createElement("a");
-    link.href = parsed.href;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    link.referrerPolicy = "no-referrer";
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
   }
 
   function makeCollapsCard(hit) {
@@ -2331,6 +2575,7 @@
     if (r.kind === "opr") return playOpr(r.raw, token, null);
     if (r.kind === "nd") return playNd(r.raw, token);
     if (r.kind === "soap") return playSoap(r.raw, token);
+    if (r.kind === "lift") return playLiftw(r.raw, token, { serialSelection: r.selection });
     if (r.kind === "clps") return playCollaps(r.raw, token, { selection: r.selection });
     if (r.kind === "rezka") return playRezkaRoute(r.raw, r.kpId, token);
     throw new Error("Неизвестный тип контента");
@@ -3515,7 +3760,7 @@
     if (!media) return;
 
     const token = resolveToken;
-    const audioLang = state.player?.getVariantTracks?.().find((track) => track.active)?.language || savedAudioLang(keyFor(target));
+    const audioLang = audioTag(state.player?.getVariantTracks?.().find((track) => track.active)) || savedAudioLang(keyFor(target));
     context.switching = true;
     renderTracks();
     await teardownPlayer();
@@ -3548,6 +3793,131 @@
         if (isStale(token)) return;
         showError(new Error("Не удалось загрузить выбранную серию"));
         log("zenith-episode-switch-error", { selection, message: refreshError.message });
+      }
+    }
+  }
+
+  async function playLiftw(id, token, opts = {}) {
+    const safeId = positiveInt(id);
+    if (!safeId) throw new Error("LiftW: неверный id");
+    warmLiftwConnections();
+    // Shaka downloads in parallel with the only two network stages there are.
+    const shakaTask = ensureShaka();
+    shakaTask.catch(() => {});
+
+    const cachedMeta = cacheGet("curatedmeta", `lift:${safeId}`) || storedMeta(`lift:${safeId}`);
+    const target = liftwTarget(safeId, opts.serialSelection || {});
+    target.title = opts.meta?.title || cachedMeta?.title || `LiftW ${safeId}`;
+    target.poster = opts.meta?.poster || cachedMeta?.poster || "";
+    target.year = opts.meta?.year || cachedMeta?.year || "";
+    target.isSeries = !!(opts.meta?.isSeries ?? cachedMeta?.isSeries);
+    state.currentTarget = target;
+    setWatchHead(target.title, target);
+    renderMeta(mergeMetadata({ ...(opts.meta || {}) }, cachedMeta || {}), target);
+
+    const parsed = await resolveLiftwTitle(safeId, { force: !!opts.force });
+    if (isStale(token)) return;
+
+    const meta = mergeMetadata(parsed.meta, cachedMeta || {});
+    target.title = meta.title || target.title;
+    target.poster = meta.poster || target.poster;
+    target.year = meta.year || target.year;
+    target.isSeries = !!meta.isSeries;
+    setWatchHead(target.title, target);
+    renderMeta(meta, target);
+    recordOpen(target);
+    cacheSet("curatedmeta", `lift:${safeId}`, meta, TTL.enriched);
+
+    const seasons = parsed.playlist.seasons || [];
+    const requested =
+      normalizeSerialHint(opts.serialSelection) ||
+      normalizeSerialHint(savedSerialSelection(keyFor(target))) ||
+      parsed.playlist.current;
+    const selection = seasons.length ? chooseSerialSelection(seasons, requested) : null;
+    const episode = selection ? findSerialEpisode(seasons, selection) : null;
+    const sources = episode?.sources || parsed.sources;
+    const media = bestLiftwSource(sources);
+    if (!media) throw new Error("LiftW не отдал dash/hls для этого тайтла");
+
+    if (selection) {
+      target.season = selection.season;
+      target.episode = selection.episode;
+      target.isSeries = true;
+      persistSerialSelection(target, selection);
+      replaceHash(hashFor(target));
+    }
+
+    state.sources = sources;
+    state.audioNames = (episode?.audioNames?.length ? episode.audioNames : parsed.audioNames) || [];
+    const histKey = keyFor(target);
+    const serial = selection
+      ? { provider: "liftw", liftId: String(safeId), histKey, seasons, selection, switching: false }
+      : null;
+
+    await shakaTask;
+    if (isStale(token)) return;
+    try {
+      await playShaka(media.url, media.kind, token, {
+        resume: opts.resume ?? resumePosition(histKey),
+        audioLang: opts.audioLang || savedAudioLang(histKey),
+        textTracks: episode?.textTracks?.length ? episode.textTracks : parsed.textTracks,
+        serial,
+      });
+    } catch (error) {
+      // The only thing a cached parse can get wrong is a signature that rotated
+      // between the resolve and the click. Re-mint once, then let it stand.
+      if (opts.force || isStale(token)) throw error;
+      log("liftw-source-refresh", { id: safeId, message: error.message });
+      await playLiftw(safeId, token, { ...opts, force: true, meta });
+      return;
+    }
+    if (isStale(token)) return;
+    startTracking(histKey, target);
+  }
+
+  async function switchLiftwSelection(nextSelection) {
+    const context = state.serial;
+    const target = state.currentTarget;
+    if (!context || context.provider !== "liftw" || !target || context.switching) return;
+    const selection = chooseSerialSelection(context.seasons, nextSelection);
+    if (!selection || sameSerialSelection(selection, context.selection)) return;
+    const episode = findSerialEpisode(context.seasons, selection);
+    const media = bestLiftwSource(episode?.sources);
+    if (!media) return;
+
+    const token = resolveToken;
+    const audioLang = audioTag(state.player?.getVariantTracks?.().find((track) => track.active))
+      || savedAudioLang(keyFor(target));
+    context.switching = true;
+    renderTracks();
+    await teardownPlayer();
+    showPlayerLoading();
+    target.season = selection.season;
+    target.episode = selection.episode;
+    persistSerialSelection(target, selection, true);
+    replaceHash(hashFor(target));
+
+    try {
+      if (isStale(token) || keyFor(state.currentTarget) !== context.histKey) return;
+      state.sources = episode.sources;
+      state.audioNames = episode.audioNames?.length ? episode.audioNames : state.audioNames;
+      await playShaka(media.url, media.kind, token, {
+        resume: 0,
+        audioLang,
+        textTracks: episode.textTracks || [],
+        serial: { ...context, selection, switching: false },
+      });
+      if (isStale(token)) return;
+      startTracking(context.histKey, target);
+    } catch (error) {
+      if (isStale(token)) return;
+      log("liftw-episode-refresh", { selection, message: error.message });
+      try {
+        await playLiftw(context.liftId, token, { serialSelection: selection, resume: 0, audioLang, force: true });
+      } catch (refreshError) {
+        if (isStale(token)) return;
+        showError(new Error("Не удалось загрузить выбранную серию"));
+        log("liftw-episode-switch-error", { selection, message: refreshError.message });
       }
     }
   }
@@ -4713,7 +5083,16 @@
       }
     }
     // Restore saved озвучка (audio language) and resume position from history.
-    if (opts.audioLang) { try { player.selectAudioLanguage(opts.audioLang); } catch { /* ignore */ } }
+    // A saved tag can be a label ("rus1") rather than a language, so match it
+    // against the manifest before falling back to the language API.
+    if (opts.audioLang) {
+      try {
+        const saved = String(opts.audioLang);
+        const match = (player.getVariantTracks?.() || []).find((track) => audioTag(track) === saved);
+        if (match) selectShakaAudio(player, match);
+        else player.selectAudioLanguage(saved);
+      } catch { /* ignore */ }
+    }
     if (opts.resume > 5) { try { video.currentTime = opts.resume; } catch { /* ignore */ } }
     video.playbackRate = state.playbackRate;
     renderTracks();
@@ -4744,6 +5123,30 @@
     player.configure({ abr: { enabled: false } });
     player.selectVariantTrack(best, true);
     return best;
+  }
+
+  // The stable identity of a dub. LiftW's DASH puts the suffixed name straight
+  // into lang= ("rus1"), while its HLS puts the same string in NAME/label and
+  // leaves LANGUAGE a plain "ru" — so preferring the label makes a remembered
+  // choice survive a switch between the two ladders.
+  function audioTag(track) {
+    return track?.label || track?.language || "";
+  }
+
+  // selectAudioLanguage() cannot express *which* dub was clicked when several
+  // share a language, so switch by label where one exists. selectVariantsByLabel
+  // re-picks the variant with ABR still enabled, unlike selectVariantTrack.
+  function selectShakaAudio(player, track) {
+    const label = track?.label || "";
+    if (label && typeof player?.selectVariantsByLabel === "function") {
+      try {
+        player.selectVariantsByLabel(label);
+        return;
+      } catch { /* fall through to the language API */ }
+    }
+    const keepAuto = shakaAbrEnabled(player);
+    player.selectAudioLanguage(track.language, (track.roles || [])[0]);
+    if (!keepAuto) selectHighestShakaVariant(player, track.language);
   }
 
   function shakaAbrEnabled(player) {
@@ -4944,17 +5347,21 @@
     if (state.opravar) {
       renderOpravarControls(state.opravar);
     } else {
-      if (state.serial?.provider === "zenith") renderZenithSerialControls(state.serial);
-      const audioChoices = groupBy(variants, (track) => `${track.language || ""}|${(track.roles || []).join(",")}`);
+      if (state.serial?.provider === "zenith") renderSerialControls(state.serial, switchZenithSelection);
+      else if (state.serial?.provider === "liftw") renderSerialControls(state.serial, switchLiftwSelection);
+      // Group on the label as well as the language: LiftW's HLS master gives all
+      // three Russian dubs LANGUAGE="ru" and only tells them apart by NAME
+      // (rus0/rus1/rus2), which Shaka surfaces as `label`. Keying on language
+      // alone collapsed five dubs into three buttons under the wrong names.
+      // Providers that ship no labels group exactly as before.
+      const audioChoices = groupBy(variants, (track) => `${track.language || ""}|${track.label || ""}|${(track.roles || []).join(",")}`);
       addTrackGroup("Озвучка", audioChoices, (track, index) => {
         const btn = document.createElement("button");
-        btn.textContent = audioNameFor(track.language, index);
+        btn.textContent = audioNameFor(track, index);
         if (track.active) btn.className = "active";
         btn.addEventListener("click", () => {
-          const keepAuto = shakaAbrEnabled(player);
-          player.selectAudioLanguage(track.language, (track.roles || [])[0]);
-          if (!keepAuto) selectHighestShakaVariant(player, track.language);
-          persistAudio(track.language);
+          selectShakaAudio(player, track);
+          persistAudio(audioTag(track));
           setTimeout(renderTracks, 250);
         });
         return btn;
@@ -5674,7 +6081,9 @@ LIMIT 1`;
     });
   }
 
-  function renderZenithSerialControls(context) {
+  // Shared by every provider whose playlist is a preloaded seasons[].episodes[]
+  // (Zenith, LiftW); `onSelect` is the provider's episode switcher.
+  function renderSerialControls(context, onSelect) {
     const seasons = context.seasons || [];
     const current = chooseSerialSelection(seasons, context.selection);
     const season = seasons.find((item) => item.season === current?.season);
@@ -5687,7 +6096,7 @@ LIMIT 1`;
       btn.addEventListener("click", () => {
         const sameEpisode = item.episodes.find((value) => value.episode === current?.episode);
         const episode = sameEpisode || item.episodes[0];
-        switchZenithSelection({ season: item.season, episode: episode?.episode });
+        onSelect({ season: item.season, episode: episode?.episode });
       });
       return btn;
     }, { panel: el.serialPanel, hideLabel: true, className: "serial-seasons" });
@@ -5699,7 +6108,7 @@ LIMIT 1`;
       if (item.title) btn.title = item.title;
       if (item.episode === current?.episode) btn.className = "active";
       btn.addEventListener("click", () => {
-        switchZenithSelection({ season: current?.season, episode: item.episode });
+        onSelect({ season: current?.season, episode: item.episode });
       });
       return btn;
     }, { panel: el.serialPanel, hideLabel: true, className: "serial-episodes" });
@@ -5910,7 +6319,8 @@ addEventListener('message', async (event) => {
     const host = target.hostname.toLowerCase();
     const allowed = target.protocol === 'https:' && (
       host === 'plapi.cdnvideohub.com' ||
-      (host === 'api.liftw.ws' && target.pathname === '/search') ||
+      (host === 'api.liftw.ws' && (target.pathname === '/search' || /^\\/info\\/\\d+$/.test(target.pathname))) ||
+      (host === 'embed.liftw.ws' && /^\\/embed\\/movie\\/\\d+$/.test(target.pathname)) ||
       host === 'api.ortified.ws' ||
       host === 'api.zenithjs.ws' ||
       host === 'newdeaf.co' || host.endsWith('.newdeaf.co')
@@ -5935,7 +6345,8 @@ addEventListener('message', async (event) => {
       const host = url.hostname.toLowerCase();
       return url.protocol === "https:" && (
         host === "plapi.cdnvideohub.com" ||
-        (host === "api.liftw.ws" && url.pathname === "/search") ||
+        (host === "api.liftw.ws" && (url.pathname === "/search" || /^\/info\/\d+$/.test(url.pathname))) ||
+        (host === "embed.liftw.ws" && /^\/embed\/movie\/\d+$/.test(url.pathname)) ||
         host === "api.ortified.ws" ||
         host === "api.zenithjs.ws" ||
         host === "newdeaf.co" || host.endsWith(".newdeaf.co")
@@ -6623,7 +7034,7 @@ addEventListener('message', async (event) => {
     return Object.keys(selection).length ? selection : null;
   }
 
-  function collapsSelectionFromEpisodeKey(value) {
+  function serialSelectionFromEpisodeKey(value) {
     const match = String(value || "").match(/^s(\d+)e(\d+)$/i);
     return match ? { season: Number(match[1]), episode: Number(match[2]) } : null;
   }
@@ -6678,6 +7089,12 @@ addEventListener('message', async (event) => {
             id: positiveInt(episode?.id),
             videoKey: positiveInt(episode?.videoKey),
             sources: zenithEpisodeSources(episode?.sources || episode),
+            // Озвучка names and .vtt tracks are per-episode on LiftW (a season
+            // can change studios mid-run). Zenith simply has neither and gets
+            // empty arrays. Read both the raw and the already-normalized shape:
+            // chooseSerialSelection re-normalizes lists it was handed earlier.
+            audioNames: embedAudioNames(episode),
+            textTracks: embedTextTracks(episode),
           }))
           .filter((episode) => episode.episode && Object.keys(episode.sources).length)
           .sort((a, b) => a.episode - b.episode),
@@ -6761,6 +7178,26 @@ addEventListener('message', async (event) => {
       if (/^https:\/\//i.test(url)) sources[key] = url;
     }
     return sources;
+  }
+
+  function embedAudioNames(episode) {
+    const names = Array.isArray(episode?.audioNames) ? episode.audioNames : episode?.audio?.names;
+    return (Array.isArray(names) ? names : [])
+      .map((name) => compact(name).slice(0, 60))
+      .filter(Boolean)
+      .slice(0, 24);
+  }
+
+  function embedTextTracks(episode) {
+    const raw = Array.isArray(episode?.textTracks) ? episode.textTracks : episode?.cc;
+    return (Array.isArray(raw) ? raw : [])
+      .map((track) => {
+        const url = String(track?.url || "").replace(/&amp;/g, "&");
+        const label = compact(track?.label || track?.name).slice(0, 60);
+        return { url, label, language: track?.language || liftwSubtitleLanguage(label) };
+      })
+      .filter((track) => /^https:\/\/[a-z0-9-]+\.interkh\.com\//i.test(track.url))
+      .slice(0, 12);
   }
 
   function findSerialEpisode(seasons, selection) {
@@ -6927,12 +7364,19 @@ addEventListener('message', async (event) => {
   function normalizeTitle(value) {
     return cleanMovieTitle(value).toLowerCase().replace(/ё/g, "е").replace(/[^a-zа-я0-9]+/gi, "");
   }
-  function audioNameFor(language, fallbackIndex) {
+  // The embed ships the human dub names ("HDRezka Studio"); the manifest only
+  // ships positional ones ("rus1"). The trailing digit is the index that joins
+  // them. Read it from the label first, because on an HLS ladder the language is
+  // the bare "ru" for every Russian dub and would map them all to names[0].
+  function audioNameFor(track, fallbackIndex) {
     const names = state.audioNames || [];
-    const suffix = String(language || "").match(/(\d+)$/);
-    if (suffix && names[Number(suffix[1])]) return names[Number(suffix[1])];
+    const language = typeof track === "string" ? track : track?.language;
+    for (const candidate of [typeof track === "string" ? "" : track?.label, language]) {
+      const suffix = String(candidate || "").match(/(\d+)$/);
+      if (suffix && names[Number(suffix[1])]) return names[Number(suffix[1])];
+    }
     if (names[fallbackIndex]) return names[fallbackIndex];
-    return language || "unknown";
+    return (typeof track === "string" ? track : track?.label || language) || "unknown";
   }
   function bitrateLabel(track) {
     return track.bandwidth ? `${(track.bandwidth / 1000000).toFixed(1)} Mbps` : "";
@@ -7369,7 +7813,23 @@ addEventListener('message', async (event) => {
       newdeafSerialHint,
       resolveRecommendationTarget,
       normalizeLiftwSearchPayload,
-      liftwDetailsUrl,
+      liftwEmbedUrl,
+      liftwMeta,
+      liftwTextTracks,
+      liftwTarget,
+      bestLiftwSource,
+      audioTag,
+      audioNameFor,
+      selectShakaAudio,
+      // audioNameFor joins manifest tracks to the embed's dub names, which live
+      // on state; tests need to seed them.
+      setAudioNames: (names) => { state.audioNames = names; },
+      parseZenithEmbed,
+      normalizeSerialSeasons,
+      chooseSerialSelection,
+      parsePathRoute,
+      hashFor,
+      keyFor,
       normalizeCollapsSources,
       isCollapsControlUrl,
       isOpaqueFetchUrl,

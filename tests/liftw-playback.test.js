@@ -1,0 +1,252 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { makeSandbox, sleep } from "./helpers/app-sandbox.js";
+
+// LiftW ships the same player-venom `makePlayer({...})` embed Zenith does, which
+// is the whole reason the integration reuses parseZenithEmbed/normalizeSerialSeasons
+// instead of adding a second parser. These tests pin that against the real thing:
+// the fixtures are captured api.liftw.ws responses with only the CDN signatures
+// replaced by placeholders, so a shape change upstream fails here rather than in
+// the player.
+
+const fixture = (name) => readFile(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+// The app runs in a vm, so its objects and arrays carry that realm's prototypes
+// and deepEqual would compare identities rather than values.
+const plain = (value) => JSON.parse(JSON.stringify(value));
+const fixtureJson = async (name) => JSON.parse(await fixture(name));
+
+async function liftwSandbox({ mediaSource } = {}) {
+  const ctx = makeSandbox();
+  // canPlayLiftwCodec reads window.MediaSource, which a vm has no business
+  // providing. Stub it per-test to drive each ladder branch.
+  if (mediaSource !== undefined) ctx.sandbox.MediaSource = mediaSource;
+  ctx.run();
+  await sleep(80);
+  return ctx.sandbox.window.alphyBridge._test;
+}
+
+const supports = (...types) => ({ isTypeSupported: (t) => types.some((x) => t.startsWith(x)) });
+const AV1 = "video/webm; codecs=\"av01";
+const VP9 = "video/webm; codecs=\"vp09";
+const OPUS = "audio/webm; codecs=\"opus";
+
+test("a real LiftW movie embed yields all three ladders, dub names and subtitles", async () => {
+  const helpers = await liftwSandbox();
+  const html = await fixture("liftw-embed-movie.html");
+  const parsed = helpers.parseZenithEmbed(html);
+
+  assert.deepEqual(plain(Object.keys(parsed.sources)).sort(), ["dash", "dasha", "hls"]);
+  assert.match(parsed.sources.hls, /^https:\/\/hye1eaipby4w\.interkh\.com\/.*\/master\.m3u8\?/);
+  assert.match(parsed.sources.dash, /^https:\/\/hye1eaipby4w\.interkh\.com\/.*\.mpd\?/);
+  assert.match(parsed.sources.dasha, /^https:\/\/hye1eaipby4w\.interkh\.com\/.*\.mpd\?/);
+  assert.notEqual(parsed.sources.dash, parsed.sources.dasha, "VP9 and AV1 are distinct manifests");
+
+  assert.deepEqual(plain(parsed.meta.audioNames), [
+    "Рус. Дублированный", "HDRezka Studio", "JASKIER", "LeDoyen (укр)", "Eng.Original",
+  ]);
+  assert.equal(parsed.playlist.seasons.length, 0, "a movie must not look like a serial");
+
+  const tracks = helpers.liftwTextTracks(html);
+  assert.equal(tracks.length, 6);
+  assert.deepEqual(plain(tracks).map((t) => t.language), ["en", "uk", "uk", "ru", "ru", "en"]);
+  assert.ok(tracks.every((t) => /^https:\/\/[a-z0-9-]+\.interkh\.com\/.*\.vtt\?/.test(t.url)));
+});
+
+test("a real LiftW series embed carries every episode, sorted, with per-episode audio and subs", async () => {
+  const helpers = await liftwSandbox();
+  const parsed = helpers.parseZenithEmbed(await fixture("liftw-embed-series.html"));
+
+  // The fixture stores seasons as LiftW emits them — out of order (1, 4, 2).
+  assert.deepEqual(plain(parsed.playlist.seasons).map((s) => s.season), [1, 2, 4]);
+  assert.deepEqual(plain(parsed.playlist.current), { season: 1, episode: 1 });
+
+  const episode = parsed.playlist.seasons[0].episodes[0];
+  assert.deepEqual(plain(Object.keys(episode.sources)).sort(), ["dash", "dasha", "hls"]);
+  // Озвучка differs per episode on LiftW — a season can change studios mid-run —
+  // so it must ride on the episode, not on the document.
+  assert.ok(episode.audioNames.includes("Дмитрий \"Goblin\" Пучков"));
+  assert.equal(episode.textTracks.length, 2);
+  assert.deepEqual(plain(episode.textTracks).map((t) => t.language), ["en", "ru"]);
+  assert.ok(episode.textTracks.every((t) => t.url.startsWith("https://hye1eaipby4w.interkh.com/")));
+
+  // Every episode is fully resolved in this one fetch, which is what makes
+  // switching episodes cost zero network.
+  for (const season of parsed.playlist.seasons) {
+    for (const ep of season.episodes) assert.ok(ep.sources.hls, `s${season.season}e${ep.episode} has no stream`);
+  }
+
+  const picked = helpers.chooseSerialSelection(parsed.playlist.seasons, { season: 4, episode: 2 });
+  assert.deepEqual(plain({ season: picked.season, episode: picked.episode }), { season: 4, episode: 2 });
+});
+
+test("the ladder chooser prefers the cheapest codec the browser can actually decode", async () => {
+  const sources = { hls: "h", dash: "v", dasha: "a" };
+
+  const av1 = await liftwSandbox({ mediaSource: supports(AV1, VP9, OPUS) });
+  assert.deepEqual(plain(av1.bestLiftwSource(sources)), { url: "a", kind: "dasha" });
+
+  const vp9 = await liftwSandbox({ mediaSource: supports(VP9, OPUS) });
+  assert.deepEqual(plain(vp9.bestLiftwSource(sources)), { url: "v", kind: "dash" });
+
+  // Both WebM ladders are Opus-only, so a browser without Opus in MSE gets HLS
+  // even though it claims to decode the video codecs.
+  const noOpus = await liftwSandbox({ mediaSource: supports(AV1, VP9) });
+  assert.deepEqual(plain(noOpus.bestLiftwSource(sources)), { url: "h", kind: "hls" });
+
+  // No MediaSource at all (or a throwing one) must fail safe onto HLS, never crash.
+  const bare = await liftwSandbox({ mediaSource: undefined });
+  assert.deepEqual(plain(bare.bestLiftwSource(sources)), { url: "h", kind: "hls" });
+  const angry = await liftwSandbox({ mediaSource: { isTypeSupported: () => { throw new Error("nope"); } } });
+  assert.deepEqual(plain(angry.bestLiftwSource(sources)), { url: "h", kind: "hls" });
+
+  assert.equal(bare.bestLiftwSource({}), null);
+  assert.equal(bare.bestLiftwSource(null), null);
+  // A title with only a WebM ladder still plays rather than being dropped.
+  assert.deepEqual(plain(bare.bestLiftwSource({ dasha: "a" })), { url: "a", kind: "dasha" });
+});
+
+test("only the signed iframe_uri is accepted as an embed URL", async () => {
+  const helpers = await liftwSandbox();
+  const info = await fixtureJson("liftw-info-movie.json");
+
+  assert.equal(helpers.liftwEmbedUrl(info.iframe_uri), info.iframe_uri);
+  // The bare path answers 410 Gone in production, so nothing may synthesise it —
+  // but even if a caller tries, only embed.liftw.ws/embed/movie/<digits> passes.
+  assert.equal(helpers.liftwEmbedUrl("https://embed.liftw.ws/embed/movie/51984"), "https://embed.liftw.ws/embed/movie/51984");
+  assert.equal(helpers.liftwEmbedUrl("http://embed.liftw.ws/embed/movie/51984"), "");
+  assert.equal(helpers.liftwEmbedUrl("https://embed.liftw.ws.evil.example/embed/movie/51984"), "");
+  assert.equal(helpers.liftwEmbedUrl("https://embed.liftw.ws/embed/movie/../../etc"), "");
+  assert.equal(helpers.liftwEmbedUrl("javascript:alert(1)"), "");
+  assert.equal(helpers.liftwEmbedUrl(""), "");
+  assert.equal(helpers.liftwEmbedUrl(null), "");
+});
+
+test("LiftW /info alone is rich enough to render a watch page", async () => {
+  const helpers = await liftwSandbox();
+
+  const movie = helpers.liftwMeta(await fixtureJson("liftw-info-movie.json"));
+  assert.equal(movie.title, "Человек-паук: Нет пути домой");
+  assert.equal(movie.originalTitle, "Spider-Man: No Way Home");
+  assert.equal(movie.year, 2021);
+  assert.equal(movie.isSeries, false);
+  assert.equal(movie.movieLength, 148, "\"148 мин. / 02:28\" must become minutes");
+  assert.equal(movie.ageRating, 12);
+  assert.equal(movie.ratingMpaa, "pg-13");
+  assert.deepEqual(plain(movie.countries), ["США"]);
+  assert.deepEqual(plain(movie.rating), { kp: 8.8, imdb: 9.4 });
+  assert.deepEqual(plain(movie.people.directors), [{ name: "Джон Уоттс" }]);
+  // kpId comes free, so a LiftW watch page never spends a Kinopoisk key.
+  assert.equal(movie.kpId, "1309570");
+
+  const series = helpers.liftwMeta(await fixtureJson("liftw-info-series.json"));
+  assert.equal(series.title, "Клан Сопрано");
+  assert.equal(series.isSeries, true);
+  assert.equal(series.kpId, "79848");
+  assert.ok(series.description.startsWith("Повседневная жизнь"));
+  assert.deepEqual(plain(series.people.cast).slice(0, 2), [{ name: "Джеймс Гандольфини" }, { name: "Лоррейн Бракко" }]);
+
+  // A junk payload must degrade to an empty shape, not throw on the watch path.
+  assert.equal(helpers.liftwMeta(null).title, "");
+  assert.equal(helpers.liftwMeta({ info: null }).movieLength, null);
+  assert.deepEqual(plain(helpers.liftwMeta({}).rating), { kp: null, imdb: null });
+});
+
+test("LiftW routes round-trip through the hash router for movies and episodes", async () => {
+  const helpers = await liftwSandbox();
+
+  const movie = helpers.liftwTarget("51984");
+  assert.equal(helpers.keyFor(movie), "lift:51984");
+  assert.equal(helpers.hashFor(movie), "/l/51984");
+  assert.deepEqual(plain(helpers.parsePathRoute("/l/51984")), {
+    view: "watch", kind: "lift", raw: "51984", selection: null,
+  });
+
+  const episode = helpers.liftwTarget("2625", { season: 2, episode: 5 });
+  assert.equal(helpers.hashFor(episode), "/l/2625/s2e5");
+  assert.equal(helpers.keyFor(episode), "lift:2625", "history must key on the title, not the episode");
+  assert.deepEqual(plain(helpers.parsePathRoute("/l/2625/s2e5")), {
+    view: "watch", kind: "lift", raw: "2625", selection: { season: 2, episode: 5 },
+  });
+
+  // Ids are numeric upstream; anything else falls back to home rather than
+  // opening a watch page that can never resolve.
+  assert.deepEqual(plain(helpers.parsePathRoute("/l/not-an-id")), { view: "home" });
+  assert.deepEqual(plain(helpers.parsePathRoute("/l/")), { view: "home" });
+  // A malformed episode suffix still opens the title, at its default episode.
+  assert.equal(plain(helpers.parsePathRoute("/l/51984/junk")).selection, null);
+});
+
+test("every dub is offered under its real name on both ladders", async () => {
+  const helpers = await liftwSandbox();
+  // The five names the movie embed ships, in the order the manifests index them.
+  const names = ["Рус. Дублированный", "HDRezka Studio", "JASKIER", "LeDoyen (укр)", "Eng.Original"];
+  helpers.setAudioNames(names);
+
+  // DASH puts the positional name straight into lang=.
+  const dash = ["rus0", "rus1", "rus2", "ukr3", "eng4"].map((language) => ({ language, label: null }));
+  assert.deepEqual(dash.map((t, i) => helpers.audioNameFor(t, i)), names);
+
+  // HLS gives every Russian dub LANGUAGE="ru" and only distinguishes them by
+  // NAME, which Shaka reports as `label`. Reading the label is what stops all
+  // three from being labelled "Рус. Дублированный".
+  const hls = [
+    { language: "ru", label: "rus0" }, { language: "ru", label: "rus1" }, { language: "ru", label: "rus2" },
+    { language: "uk", label: "ukr3" }, { language: "en", label: "eng4" },
+  ];
+  assert.deepEqual(hls.map((t, i) => helpers.audioNameFor(t, i)), names);
+
+  // A provider with neither (Zenith's plain manifests) still falls back to the
+  // positional name, and then to whatever the manifest called the track.
+  assert.equal(helpers.audioNameFor({ language: "ru" }, 1), "HDRezka Studio");
+  helpers.setAudioNames([]);
+  assert.equal(helpers.audioNameFor({ language: "ru" }, 0), "ru");
+  assert.equal(helpers.audioNameFor({}, 0), "unknown");
+});
+
+test("clicking a dub selects that dub, not merely its language", async () => {
+  const helpers = await liftwSandbox();
+  const calls = [];
+  const player = {
+    selectVariantsByLabel: (label) => calls.push(["label", label]),
+    selectAudioLanguage: (language, role) => calls.push(["language", language, role]),
+    getConfiguration: () => ({ abr: { enabled: true } }),
+    configure: () => {},
+    getVariantTracks: () => [],
+    selectVariantTrack: () => {},
+  };
+
+  // Three tracks share LANGUAGE="ru"; selectAudioLanguage("ru") would always
+  // land on the first, so the label API must be used instead.
+  helpers.selectShakaAudio(player, { language: "ru", label: "rus2" });
+  assert.deepEqual(calls, [["label", "rus2"]]);
+
+  // Without a label there is nothing to disambiguate, so the language API stays.
+  calls.length = 0;
+  helpers.selectShakaAudio(player, { language: "rus1", label: "", roles: ["main"] });
+  assert.deepEqual(calls, [["language", "rus1", "main"]]);
+
+  // An older Shaka without the label API must still switch, not throw.
+  calls.length = 0;
+  helpers.selectShakaAudio({ ...player, selectVariantsByLabel: undefined }, { language: "ru", label: "rus2" });
+  assert.deepEqual(calls, [["language", "ru", undefined]]);
+
+  // The remembered tag prefers the label, so a dub chosen on the HLS fallback is
+  // still the dub restored on DASH — the two ladders spell it the same way.
+  assert.equal(helpers.audioTag({ language: "ru", label: "rus1" }), "rus1");
+  assert.equal(helpers.audioTag({ language: "rus1" }), "rus1");
+  assert.equal(helpers.audioTag(null), "");
+});
+
+test("the LiftW control plane stays sandboxed and fail-closed", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const start = source.indexOf("async function fetchLiftwTitle");
+  const end = source.indexOf("function liftwEmbedUrl", start);
+  const block = source.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  // Both hops — /info and the embed — must run inside the null-origin sandbox and
+  // must NOT fall back to a direct fetch, which would leak alphy.tv to LiftW.
+  assert.equal(block.match(/preferSandbox:\s*true/g)?.length, 2);
+  assert.equal(block.match(/directFallback:\s*false/g)?.length, 2);
+  assert.doesNotMatch(block, /resolverJson|\/api\//);
+});
