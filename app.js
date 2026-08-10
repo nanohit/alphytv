@@ -26,6 +26,18 @@
   const ND_SEARCH_CACHE_NS = "ndsearch.v2";
   const LIFTW_SEARCH_CACHE_NS = "liftwsearch.v1";
   const LIFTW_SEARCH_URL = "https://api.liftw.ws/search";
+  // Letterboxd publishes no API and sends no CORS header, so the lookup runs on
+  // Supabase Edge. Three separate free projects, 500k invocations each: the
+  // film's own IMDb id picks which one, so a title always lands on the same
+  // project and can hit its week-long edge cache, while ids being effectively
+  // random splits the load evenly. The rest of the ring is the failover order.
+  const LETTERBOXD_ENDPOINTS = [
+    "https://lcldjrphnkufymdhevyx.supabase.co/functions/v1/letterboxd",
+    "https://icmjgvlsyfqwyewvsuje.supabase.co/functions/v1/letterboxd",
+    "https://gzwynsvcydynqidwxjru.supabase.co/functions/v1/letterboxd",
+  ];
+  const LETTERBOXD_CACHE_NS = "letterboxd.v1";
+  const LETTERBOXD_COOLDOWN_MS = 5 * 60e3;
   const LIFTW_TITLE_CACHE_NS = "liftwtitle.v1";
   const LIFTW_KP_OF_CACHE_NS = "liftwkpof.v1";
   const LIFTW_BY_KP_CACHE_NS = "liftwbykp.v1";
@@ -88,6 +100,11 @@
     // go stale. A miss can (the catalogue grows), so it expires much sooner.
     liftwkp: 30 * 24 * 3600e3,
     liftwkpmiss: 24 * 3600e3,
+    // A Letterboxd score moves in the second decimal over months, not hours.
+    // A miss is almost always a series — which Letterboxd, being a film site,
+    // will never carry — so it is worth remembering too, just not as long.
+    letterboxd: 30 * 24 * 3600e3,
+    letterboxdmiss: 7 * 24 * 3600e3,
     ndrecommend: 24 * 3600e3,
     ndrecommendMiss: 60 * 60e3,
     ndpage: 24 * 3600e3,
@@ -1673,6 +1690,68 @@
       return Number(hours[1]) * 60 + rest;
     }
     return positiveInt(/(\d+)\s*мин/i.exec(text)?.[1]);
+  }
+
+  // =====================================================================
+  // Letterboxd rating
+  //
+  // One hop to our own Supabase Edge function, which resolves
+  // letterboxd.com/imdb/<id> and reads the score out of the page. Exact match on
+  // an id we already hold, never on a title. Every film is asked for once per
+  // browser and then answered from localStorage.
+  // =====================================================================
+  const letterboxdCooldown = new Map();
+  const letterboxdInflight = new Map();
+
+  // Deterministic first pick, then the rest of the ring. Keeping a film pinned
+  // to one project is what makes the function's own Cache-Control worth having.
+  function letterboxdEndpointOrder(imdbId) {
+    let hash = 0;
+    for (const char of String(imdbId)) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0;
+    const start = hash % LETTERBOXD_ENDPOINTS.length;
+    return LETTERBOXD_ENDPOINTS.map((_, index) =>
+      LETTERBOXD_ENDPOINTS[(start + index) % LETTERBOXD_ENDPOINTS.length]);
+  }
+
+  async function letterboxdRating(imdbId) {
+    const id = String(imdbId || "").trim();
+    if (!/^tt\d{6,10}$/.test(id)) return null;
+    const cached = cacheGet(LETTERBOXD_CACHE_NS, id);
+    if (cached) return cached.r > 0 ? cached : null;
+    const inflight = letterboxdInflight.get(id);
+    if (inflight) return inflight;
+    const pending = fetchLetterboxdRating(id).finally(() => letterboxdInflight.delete(id));
+    letterboxdInflight.set(id, pending);
+    return pending;
+  }
+
+  async function fetchLetterboxdRating(id) {
+    const now = Date.now();
+    for (const endpoint of letterboxdEndpointOrder(id)) {
+      if ((letterboxdCooldown.get(endpoint) || 0) > now) continue;
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 6000);
+        const response = await fetch(`${endpoint}?imdb=${encodeURIComponent(id)}`, {
+          signal: controller.signal,
+          referrerPolicy: "no-referrer",
+        });
+        clearTimeout(timer);
+        if (!response.ok) throw new Error(`http ${response.status}`);
+        const payload = await response.json();
+        const rating = Number(payload?.r);
+        const found = payload?.found && Number.isFinite(rating) && rating > 0 && rating <= 5;
+        const value = found ? { r: rating, n: positiveInt(payload.n) } : null;
+        cacheSet(LETTERBOXD_CACHE_NS, id, value || { r: 0 }, found ? TTL.letterboxd : TTL.letterboxdmiss);
+        return value;
+      } catch (error) {
+        // One project being paused or over quota must not make every later
+        // caller wait out the same timeout, so it sits out and the ring moves on.
+        letterboxdCooldown.set(endpoint, now + LETTERBOXD_COOLDOWN_MS);
+        log("letterboxd-warn", { endpoint, message: error.message });
+      }
+    }
+    return null;
   }
 
   // =====================================================================
@@ -4978,7 +5057,28 @@
       });
     }
     el.metaPanel.classList.remove("hidden");
+    fillLetterboxdBadge(view, target);
     scheduleWatchExtras(target);
+  }
+
+  // Appended after the panel is already on screen: the score is a network hop
+  // and must never hold the sidebar back. Rendered on Letterboxd's own 0-5
+  // scale — rescaling it to look like Кинопоиск would just misquote the source.
+  function fillLetterboxdBadge(meta, target) {
+    const imdbId = String(meta?.externalId?.imdb || "");
+    if (!/^tt\d{6,10}$/.test(imdbId) || meta?.isSeries) return;
+    const token = resolveToken;
+    letterboxdRating(imdbId).then((rating) => {
+      if (!rating || isStale(token) || !state.currentTarget) return;
+      if (keyFor(state.currentTarget) !== keyFor(target)) return;
+      const host = el.metaPanel.querySelector(".meta-ratings");
+      if (!host || host.querySelector(".rt-lb")) return;
+      const node = document.createElement("div");
+      node.className = "rt rt-lb";
+      node.title = `${rating.r.toFixed(2)} из 5 на Letterboxd`;
+      node.innerHTML = `<b>${escapeHtml(rating.r.toFixed(2))}</b><span>Letterboxd</span>`;
+      host.appendChild(node);
+    }).catch((error) => log("letterboxd-badge-warn", error.message));
   }
 
   // =====================================================================
@@ -8144,6 +8244,9 @@ addEventListener('message', async (event) => {
       liftwRuntimeMinutes,
       liftwCandidateScore,
       findLiftwByKpId,
+      letterboxdEndpointOrder,
+      letterboxdRating,
+      LETTERBOXD_ENDPOINTS,
       isPlaceholderTitle,
       mergeMetadata,
       formatDuration,
