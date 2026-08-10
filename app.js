@@ -5065,20 +5065,40 @@
   // and must never hold the sidebar back. Rendered on Letterboxd's own 0-5
   // scale — rescaling it to look like Кинопоиск would just misquote the source.
   function fillLetterboxdBadge(meta, target) {
-    const imdbId = String(meta?.externalId?.imdb || "");
-    if (!/^tt\d{6,10}$/.test(imdbId) || meta?.isSeries) return;
+    if (meta?.isSeries) return;
     const token = resolveToken;
-    letterboxdRating(imdbId).then((rating) => {
-      if (!rating || isStale(token) || !state.currentTarget) return;
-      if (keyFor(state.currentTarget) !== keyFor(target)) return;
-      const host = el.metaPanel.querySelector(".meta-ratings");
-      if (!host || host.querySelector(".rt-lb")) return;
-      const node = document.createElement("div");
-      node.className = "rt rt-lb";
-      node.title = `${rating.r.toFixed(2)} из 5 на Letterboxd`;
-      node.innerHTML = `<b>${escapeHtml(rating.r.toFixed(2))}</b><span>Letterboxd</span>`;
-      host.appendChild(node);
-    }).catch((error) => log("letterboxd-badge-warn", error.message));
+    letterboxdImdbId(meta)
+      .then((imdbId) => (imdbId && !isStale(token) ? letterboxdRating(imdbId) : null))
+      .then((rating) => {
+        if (!rating || isStale(token) || !state.currentTarget) return;
+        if (keyFor(state.currentTarget) !== keyFor(target)) return;
+        const host = el.metaPanel.querySelector(".meta-ratings");
+        if (!host || host.querySelector(".rt-lb")) return;
+        const node = document.createElement("div");
+        node.className = "rt rt-lb";
+        node.title = `${rating.r.toFixed(2)} из 5 на Letterboxd`;
+        node.innerHTML = `<b>${escapeHtml(rating.r.toFixed(2))}</b><span>Letterboxd</span>`;
+        host.appendChild(node);
+      })
+      .catch((error) => log("letterboxd-badge-warn", error.message));
+  }
+
+  // Only the Kinopoisk path carries externalId. Every other source (lift:, zen:,
+  // ort:, clps:) arrives with a kpId instead, and the resolver already answers
+  // the id-to-id question — from the same "meta" cache the watch page fills
+  // anyway, so a warm title costs nothing.
+  async function letterboxdImdbId(meta) {
+    const direct = String(meta?.externalId?.imdb || "");
+    if (/^tt\d{6,10}$/.test(direct)) return direct;
+    const kpId = String(positiveInt(meta?.kpId) || "");
+    if (!kpId) return "";
+    try {
+      const movie = cacheGet("meta", kpId) || await fetchMovieMeta(kpId);
+      const imdb = String(movie?.externalId?.imdb || "");
+      return /^tt\d{6,10}$/.test(imdb) ? imdb : "";
+    } catch {
+      return "";
+    }
   }
 
   // =====================================================================

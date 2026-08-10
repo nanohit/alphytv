@@ -111,7 +111,7 @@ test("the badge is appended, never rendered inline, and is skipped for series", 
   const block = source.slice(start, start + 1100);
   assert.ok(start > 0);
   // It must not be able to hold up the sidebar.
-  assert.match(block, /letterboxdRating\([\s\S]*\)\.then\(/);
+  assert.match(block, /letterboxdImdbId\(meta\)[\s\S]*\.then\(/);
   assert.match(block, /meta\?\.isSeries/);
   // A late answer must not land on a page the user has already navigated away from.
   assert.match(block, /isStale\(token\)/);
