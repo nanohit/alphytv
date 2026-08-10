@@ -5,10 +5,9 @@
   // AlphyTV — static client. The browser does everything except the two
   // things it can't: PoiskKino (token must stay server-side) and the Zona
   // kpId->Zenith resolve (needs a trusted non-RU egress IP). Both live on the
-  // Deno resolver. newdeaf is scraped from THIS browser (per-user IP), never
-  // from a server, so newdeaf only ever sees organic-looking residential RU
-  // traffic. Everything resolved is cached in localStorage so a returning
-  // user re-opening a title hits neither Deno nor newdeaf again.
+  // Deno resolver. Newdeaf and LiftW search are fetched from THIS browser
+  // (per-user IP), never from a server. Everything resolved is cached in
+  // localStorage so returning users do not repeat the same provider requests.
   // =====================================================================
 
   // Keep in sync with the <title> in index.html — that one covers the first paint
@@ -25,6 +24,8 @@
   // Older builds cached a transient empty Newdeaf result for six hours. Keep
   // this namespace versioned so those false misses cannot survive an upgrade.
   const ND_SEARCH_CACHE_NS = "ndsearch.v2";
+  const LIFTW_SEARCH_CACHE_NS = "liftwsearch.v1";
+  const LIFTW_SEARCH_URL = "https://api.liftw.ws/search";
   // v1 may contain fuzzy Batman->Lego Batman metadata written by older builds.
   const ND_ENRICHED_CACHE_NS = "ndenriched.v2";
   const ND_RECOMMEND_CACHE_NS = "ndrecommend.v1";
@@ -68,6 +69,7 @@
   const TTL = {
     search: 6 * 3600e3,
     ndsearch: 6 * 3600e3,
+    liftwsearch: 60 * 60e3,
     ndrecommend: 24 * 3600e3,
     ndrecommendMiss: 60 * 60e3,
     ndpage: 24 * 3600e3,
@@ -1331,6 +1333,103 @@
     });
   }
 
+  async function searchLiftw(query) {
+    const normalizedQuery = compact(query).slice(0, 120);
+    if (!normalizedQuery) return [];
+    const cacheKey = normalizedQuery.toLowerCase().replace(/ё/g, "е");
+    const cached = cacheGet(LIFTW_SEARCH_CACHE_NS, cacheKey);
+    if (Array.isArray(cached)) return cached;
+
+    const url = new URL(LIFTW_SEARCH_URL);
+    url.searchParams.set("q", normalizedQuery);
+    // LiftW explicitly permits Origin:null. Keep this search inside the opaque
+    // client sandbox and fail closed so alphy.tv is never exposed as Origin.
+    const text = await fetchThirdPartyText(url.href, {
+      preferSandbox: true,
+      directFallback: false,
+      label: "liftw-search",
+      timeoutMs: 9000,
+      sandboxTimeoutMs: 9000,
+    });
+    let payload;
+    try { payload = JSON.parse(text); }
+    catch { throw new Error("LiftW вернул некорректный ответ"); }
+    const results = normalizeLiftwSearchPayload(payload);
+    cacheSet(LIFTW_SEARCH_CACHE_NS, cacheKey, results, TTL.liftwsearch);
+    return results;
+  }
+
+  function normalizeLiftwSearchPayload(payload) {
+    const items = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.items)
+        ? payload.items
+        : Array.isArray(payload?.data)
+          ? payload.data
+          : Array.isArray(payload?.results)
+            ? payload.results
+            : null;
+    if (!items) throw new Error("LiftW вернул неизвестный формат поиска");
+    return items.slice(0, 30).map(normalizeLiftwItem).filter(Boolean);
+  }
+
+  function normalizeLiftwItem(item) {
+    const id = positiveInt(item?.id);
+    const title = compact(item?.name || item?.origin_name).slice(0, 180);
+    if (!id || !title) return null;
+    const type = positiveInt(item?.type);
+    const typeInfo = liftwTypeInfo(type);
+    const yearValue = positiveInt(item?.year);
+    const maxYear = new Date().getFullYear() + 2;
+    const ratingNumber = (value) => {
+      const number = Number(value);
+      return Number.isFinite(number) && number > 0 && number <= 10 ? number : null;
+    };
+    return {
+      id: String(id),
+      title,
+      originalTitle: compact(item?.origin_name).slice(0, 180),
+      year: yearValue >= 1880 && yearValue <= maxYear ? yearValue : null,
+      poster: liftwPosterUrl(item?.poster),
+      quality: compact(item?.quality).slice(0, 16),
+      serialStatus: compact(item?.serial_status).slice(0, 48),
+      rating: {
+        kp: ratingNumber(item?.kp_rating),
+        imdb: ratingNumber(item?.imdb_rating),
+      },
+      type: typeInfo.type,
+      typeLabel: typeInfo.label,
+      isSeries: typeInfo.isSeries,
+      url: liftwDetailsUrl(id),
+    };
+  }
+
+  function liftwTypeInfo(value) {
+    return ({
+      1: { type: 1, label: "фильм", isSeries: false },
+      2: { type: 2, label: "мультфильм", isSeries: false },
+      3: { type: 3, label: "сериал", isSeries: true },
+      4: { type: 4, label: "ТВ-шоу", isSeries: true },
+      5: { type: 5, label: "мультсериал", isSeries: true },
+      6: { type: 6, label: "аниме-фильм", isSeries: false },
+      7: { type: 7, label: "аниме-сериал", isSeries: true },
+    })[Number(value)] || { type: null, label: "тайтл", isSeries: false };
+  }
+
+  function liftwPosterUrl(value) {
+    try {
+      const url = new URL(String(value || ""));
+      return url.protocol === "https:" && url.hostname === "img.niteface.ws" ? url.href : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function liftwDetailsUrl(id) {
+    const safeId = positiveInt(id);
+    return safeId ? `https://liftw.ws/details.html?id=${safeId}` : "";
+  }
+
   async function resolveNewdeafPage(pageUrl) {
     const cached = cacheGet("ndpage", pageUrl);
     if (cached) return cached;
@@ -1714,13 +1813,22 @@
 
     let pk = [];
     let nd = [];
+    let liftw = [];
     let clps = [];
     let rezka = [];
     let newdeafUnavailable = false;
+    let liftwUnavailable = false;
     let collapsProbeKey = "";
     let collapsScheduledKey = "";
     let rezkaProbeKey = "";
     let rezkaScheduledKey = "";
+    const renderCurrent = () => renderResults(nd, pk, query, {
+      newdeafUnavailable,
+      liftwUnavailable,
+      liftwHits: liftw,
+      collapsHits: clps,
+      rezkaHits: rezka,
+    });
     const startRezkaProbe = (movies, { immediate = false } = {}) => {
       const candidates = (movies || []).filter((m) => !m?.isSeries).slice(0, REZKA_PREVIEW_LIMIT);
       const ids = candidates.map((m) => m.kpId).filter(Boolean).join(",");
@@ -1733,11 +1841,7 @@
         probeRezkaSearch(candidates, token)
           .then((hits) => {
             rezka = hits;
-            if (!isStale(token)) renderResults(nd, pk, query, {
-              newdeafUnavailable,
-              collapsHits: clps,
-              rezkaHits: rezka,
-            });
+            if (!isStale(token)) renderCurrent();
           })
           .catch((error) => log("rezka-probe-warn", error.message));
       };
@@ -1766,11 +1870,7 @@
             clps = hits;
             const topId = String((movies || []).find((m) => !m?.isSeries)?.kpId || "");
             if (!hits.some((hit) => String(hit.kpId) === topId)) startRezkaProbe(movies, { immediate: true });
-            if (!isStale(token)) renderResults(nd, pk, query, {
-              newdeafUnavailable,
-              collapsHits: clps,
-              rezkaHits: rezka,
-            });
+            if (!isStale(token)) renderCurrent();
           })
           .catch((error) => {
             log("collaps-probe-warn", error.message);
@@ -1778,6 +1878,18 @@
           });
       }, COLLAPS_PREVIEW_IDLE_TIMEOUT);
     };
+    const liftwTask = searchLiftw(query)
+      .then((results) => {
+        liftw = results;
+        if (!isStale(token)) renderCurrent();
+        return results;
+      })
+      .catch((error) => {
+        liftwUnavailable = true;
+        log("liftw-error", error.message);
+        if (!isStale(token)) renderCurrent();
+        return [];
+      });
     const canStartNewdeafNow = /[а-яё]/i.test(query);
     const newdeafTask = canStartNewdeafNow
       ? searchNewdeaf(query)
@@ -1800,7 +1912,7 @@
         newdeafUnavailable = first.unavailable;
       }
       if (pk.length) startCollapsProbe(pk);
-      renderResults(nd, pk, query, { newdeafUnavailable, collapsHits: clps, rezkaHits: rezka });
+      renderCurrent();
 
       const [poisk, newdeaf] = await Promise.all([poiskTask, newdeafTask]);
       pk = poisk.results;
@@ -1812,7 +1924,7 @@
       if (isStale(token)) return;
       pk = poisk.results;
       startCollapsProbe(pk);
-      renderResults([], pk, query, { collapsHits: clps, rezkaHits: rezka });
+      renderCurrent();
 
       // newdeaf indexes Russian titles only. If the query has no Cyrillic, search
       // newdeaf with the Russian name from the top PoiskKino hit so English queries
@@ -1826,10 +1938,10 @@
       }
     }
     if (isStale(token)) return;
-    await soapTask;
+    await Promise.all([soapTask, liftwTask]);
     if (isStale(token)) return;
-    renderResults(nd, pk, query, { newdeafUnavailable, collapsHits: clps, rezkaHits: rezka });
-    if (!pk.length && !nd.length && !clps.length && !rezka.length && !soapSearch(query, { limit: 1 }).length) {
+    renderCurrent();
+    if (!pk.length && !nd.length && !liftw.length && !clps.length && !rezka.length && !soapSearch(query, { limit: 1 }).length) {
       el.resultsTitle.textContent = "Ничего не найдено";
     }
   }
@@ -1847,6 +1959,7 @@
     const frag = document.createDocumentFragment();
     el.resultsTitle.textContent = "Результаты";
     if (ndCandidates.length) prefetchTopNewdeafPage(ndCandidates);
+    const liftwHits = Array.isArray(options.liftwHits) ? options.liftwHits : [];
     const collapsHits = Array.isArray(options.collapsHits) ? options.collapsHits : [];
     const rezkaHits = Array.isArray(options.rezkaHits) ? options.rezkaHits : [];
     const highCollapsHits = collapsHits.filter((hit) => Number(hit.qualityHeight) >= 1440);
@@ -1889,6 +2002,7 @@
       });
       frag.appendChild(card);
     }
+    for (const item of liftwHits) frag.appendChild(makeLiftwCard(item));
     for (const hit of regularCollapsHits) frag.appendChild(makeCollapsCard(hit));
     for (const hit of rezkaHits) frag.appendChild(makeRezkaCard(hit));
     for (const movie of pkResults) {
@@ -1943,7 +2057,13 @@
       note.textContent = "Newdeaf не ответил этому браузеру — показаны остальные результаты.";
       frag.appendChild(note);
     }
-    if (!pkResults.length && !ndCandidates.length && !collapsHits.length && !rezkaHits.length && !soapHits.length) {
+    if (options.liftwUnavailable) {
+      const note = document.createElement("p");
+      note.className = "muted search-note";
+      note.textContent = "LiftW не ответил этому браузеру — показаны остальные результаты.";
+      frag.appendChild(note);
+    }
+    if (!pkResults.length && !ndCandidates.length && !liftwHits.length && !collapsHits.length && !rezkaHits.length && !soapHits.length) {
       const p = document.createElement("p");
       p.className = "muted";
       p.textContent = `Ничего не найдено по «${query}».`;
@@ -1951,6 +2071,47 @@
     }
     el.resultsGrid.replaceChildren(frag);
     layoutMobileGrid(el.resultsGrid);
+  }
+
+  function makeLiftwCard(item) {
+    const card = makeCard({
+      title: item.title,
+      sub: [item.year, item.typeLabel, item.quality].filter(Boolean).join(" · "),
+      poster: item.poster,
+      ratingPill: "LIFT",
+      rating: item.rating,
+      isSeries: item.isSeries,
+      onClick: () => openExternalNoReferrer(item.url),
+    });
+    card.classList.add("liftw-card");
+    card.title = "Открыть на LiftW";
+    const ratings = [
+      item.rating?.kp ? `КП ${formatRating(item.rating.kp)}` : "",
+      item.rating?.imdb ? `IMDb ${formatRating(item.rating.imdb)}` : "",
+      item.serialStatus || "",
+    ].filter(Boolean);
+    if (ratings.length) {
+      const meta = document.createElement("div");
+      meta.className = "cmeta liftw-ratings";
+      meta.textContent = ratings.join(" · ");
+      card.appendChild(meta);
+    }
+    return card;
+  }
+
+  function openExternalNoReferrer(url) {
+    let parsed;
+    try { parsed = new URL(String(url || "")); }
+    catch { return; }
+    if (parsed.protocol !== "https:" || parsed.hostname !== "liftw.ws" || parsed.pathname !== "/details.html") return;
+    const link = document.createElement("a");
+    link.href = parsed.href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.referrerPolicy = "no-referrer";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
   }
 
   function makeCollapsCard(hit) {
@@ -2032,6 +2193,7 @@
       img.className = "poster";
       img.loading = "lazy";
       img.decoding = "async";
+      img.referrerPolicy = "no-referrer";
       img.src = imageUrl;
       img.alt = "";
       img.addEventListener("error", () => { img.replaceWith(blankPoster()); });
@@ -5748,6 +5910,7 @@ addEventListener('message', async (event) => {
     const host = target.hostname.toLowerCase();
     const allowed = target.protocol === 'https:' && (
       host === 'plapi.cdnvideohub.com' ||
+      (host === 'api.liftw.ws' && target.pathname === '/search') ||
       host === 'api.ortified.ws' ||
       host === 'api.zenithjs.ws' ||
       host === 'newdeaf.co' || host.endsWith('.newdeaf.co')
@@ -5772,6 +5935,7 @@ addEventListener('message', async (event) => {
       const host = url.hostname.toLowerCase();
       return url.protocol === "https:" && (
         host === "plapi.cdnvideohub.com" ||
+        (host === "api.liftw.ws" && url.pathname === "/search") ||
         host === "api.ortified.ws" ||
         host === "api.zenithjs.ws" ||
         host === "newdeaf.co" || host.endsWith(".newdeaf.co")
@@ -7204,6 +7368,8 @@ addEventListener('message', async (event) => {
       normalizeTitle,
       newdeafSerialHint,
       resolveRecommendationTarget,
+      normalizeLiftwSearchPayload,
+      liftwDetailsUrl,
       normalizeCollapsSources,
       isCollapsControlUrl,
       isOpaqueFetchUrl,

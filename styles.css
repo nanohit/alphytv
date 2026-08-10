@@ -218,6 +218,10 @@ header {
   font-size: 9px; color: var(--muted-strong); margin: 0 2px;
   text-align: left;
 }
+.card .liftw-ratings {
+  margin-top: 2px; color: #aaa; line-height: 1.25;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
 .card-hover-meta {
   position: absolute; inset: 0; z-index: 1;
   display: grid; place-content: center; justify-items: center; gap: 12px;

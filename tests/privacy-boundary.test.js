@@ -13,11 +13,14 @@ async function privacyHelpers() {
 test("opaque fetch allowlist accepts only the intended HTTPS provider hosts", async () => {
   const helpers = await privacyHelpers();
   assert.equal(helpers.isOpaqueFetchUrl("https://plapi.cdnvideohub.com/api/v1/player/sv/video/1"), true);
+  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/search?q=test"), true);
+  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/info/1"), false);
   assert.equal(helpers.isOpaqueFetchUrl("https://api.ortified.ws/embed/movie/1"), true);
   assert.equal(helpers.isOpaqueFetchUrl("https://api.zenithjs.ws/embed/movie/1"), true);
   assert.equal(helpers.isOpaqueFetchUrl("https://22jul.newdeaf.co/search/test"), true);
   assert.equal(helpers.isOpaqueFetchUrl("http://api.ortified.ws/embed/movie/1"), false);
   assert.equal(helpers.isOpaqueFetchUrl("https://api.ortified.ws.evil.example/embed/movie/1"), false);
+  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws.evil.example/search?q=test"), false);
 });
 
 test("Collaps broker is limited to its control-plane path", async () => {
