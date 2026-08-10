@@ -27,6 +27,8 @@
   const LIFTW_SEARCH_CACHE_NS = "liftwsearch.v1";
   const LIFTW_SEARCH_URL = "https://api.liftw.ws/search";
   const LIFTW_TITLE_CACHE_NS = "liftwtitle.v1";
+  const LIFTW_KP_OF_CACHE_NS = "liftwkpof.v1";
+  const LIFTW_BY_KP_CACHE_NS = "liftwbykp.v1";
   const LIFTW_INFO_URL = "https://api.liftw.ws/info/";
   const LIFTW_EMBED_HOST = "embed.liftw.ws";
   const LIFTW_CDN_ORIGINS = [
@@ -82,6 +84,10 @@
     // reopened title costs zero network before Shaka. A load failure still
     // re-resolves with { force: true }.
     liftwtitle: 6 * 3600e3,
+    // A LiftW id <-> Kinopoisk id pairing is an identity, not content: it cannot
+    // go stale. A miss can (the catalogue grows), so it expires much sooner.
+    liftwkp: 30 * 24 * 3600e3,
+    liftwkpmiss: 24 * 3600e3,
     ndrecommend: 24 * 3600e3,
     ndrecommendMiss: 60 * 60e3,
     ndpage: 24 * 3600e3,
@@ -1527,12 +1533,17 @@
 
   // Hover warming. Costs a speculative token and stays silent on failure — a
   // cold click still resolves normally, it just pays the two round trips itself.
+  // Returns the in-flight parse when one was actually started, so a caller can
+  // hang cosmetic work (the card's runtime) off it. Null means "not warmed" —
+  // either already cached, already running, or over the speculative budget.
   function prefetchLiftwTitle(id) {
     const key = String(positiveInt(id) || "");
-    if (!key || liftwTitleInflight.has(key) || cacheGet(LIFTW_TITLE_CACHE_NS, key)) return;
-    if (!claimSpeculativeIntent()) return;
+    if (!key || liftwTitleInflight.has(key) || cacheGet(LIFTW_TITLE_CACHE_NS, key)) return null;
+    if (!claimSpeculativeIntent()) return null;
     warmLiftwConnections();
-    resolveLiftwTitle(key).catch((error) => log("liftw-prefetch-warn", error.message));
+    const pending = resolveLiftwTitle(key);
+    pending.catch((error) => log("liftw-prefetch-warn", error.message));
+    return pending;
   }
 
   async function fetchLiftwTitle(id) {
@@ -1619,7 +1630,7 @@
       .map((entry) => compact(entry).slice(0, 60))
       .filter(Boolean)
       .slice(0, limit);
-    const minutes = positiveInt(String(details.time || "").match(/(\d+)\s*мин/i)?.[1]);
+    const minutes = liftwRuntimeMinutes(details.time);
     return {
       title: compact(info?.name || info?.origin_name).slice(0, 180),
       originalTitle: compact(info?.origin_name).slice(0, 180),
@@ -1642,6 +1653,115 @@
       },
       kpId: String(positiveInt(details.id) || ""),
     };
+  }
+
+  // `info.time` comes in four shapes: "121 мин. / 02:01", "2 ч 25 мин", "30 мин"
+  // and, for a series, "55 мин. серия (5160 мин. всего)" — where the leading
+  // number is the per-episode runtime we want. Reading the first "N мин" alone
+  // turned "2 ч 25 мин" into a 25-minute feature, so the hours are matched first.
+  function liftwRuntimeMinutes(value) {
+    const text = String(value || "");
+    const hours = /(\d+)\s*ч(?![а-яё])/i.exec(text);
+    if (hours) {
+      const rest = positiveInt(/(\d+)\s*мин/i.exec(text.slice(hours.index + hours[0].length))?.[1]) || 0;
+      return Number(hours[1]) * 60 + rest;
+    }
+    return positiveInt(/(\d+)\s*мин/i.exec(text)?.[1]);
+  }
+
+  // =====================================================================
+  // Kinopoisk id -> LiftW id
+  //
+  // LiftW publishes the mapping in one direction only: /info reports the
+  // Kinopoisk id in info.id, and there is no lookup that takes one (probed:
+  // /kp/<id>, /info?kp_id=, /find?kp= are all 404, and /info/<kp> resolves in
+  // LiftW's own id space, silently returning a different film).
+  //
+  // So the reverse is a search followed by a CONFIRMATION. Candidates are found
+  // by title, but one is only ever accepted when its own /info reports exactly
+  // the Kinopoisk id we asked for. A title/year match is never enough by itself
+  // — that check is the whole reason this is safe to run automatically.
+  // =====================================================================
+  async function liftwKpIdFor(liftId) {
+    const key = String(positiveInt(liftId) || "");
+    if (!key) return "";
+    const warm = cacheGet(LIFTW_TITLE_CACHE_NS, key);
+    if (warm?.meta) return String(warm.meta.kpId || "");
+    const cached = cacheGet(LIFTW_KP_OF_CACHE_NS, key);
+    if (typeof cached === "string") return cached;
+    const text = await fetchThirdPartyText(`${LIFTW_INFO_URL}${encodeURIComponent(key)}`, {
+      preferSandbox: true,
+      directFallback: false,
+      label: "liftw-kp-confirm",
+      timeoutMs: 9000,
+      sandboxTimeoutMs: 9000,
+    });
+    let kpId = "";
+    try { kpId = String(positiveInt(JSON.parse(text)?.info?.id) || ""); }
+    catch { kpId = ""; }
+    cacheSet(LIFTW_KP_OF_CACHE_NS, key, kpId, TTL.liftwkp);
+    return kpId;
+  }
+
+  // At most CONFIRM_LIMIT confirmations, cheapest-looking candidate first, and
+  // the whole verdict — hit or miss — is cached so a retry never re-runs the
+  // fan-out. Cost when it misses: one search plus three small JSON fetches.
+  const LIFTW_CONFIRM_LIMIT = 3;
+
+  async function findLiftwByKpId(kpId, hints = {}) {
+    const wanted = String(positiveInt(kpId) || "");
+    if (!wanted) return "";
+    const cached = cacheGet(LIFTW_BY_KP_CACHE_NS, wanted);
+    if (typeof cached === "string") return cached;
+
+    const queries = [hints.title, hints.originalTitle]
+      .map((value) => compact(value))
+      .filter((value) => value && !isPlaceholderTitle(value));
+    if (!queries.length) return "";
+
+    const seen = new Set();
+    const candidates = [];
+    for (const query of queries) {
+      const hits = await searchLiftw(query).catch(() => []);
+      for (const hit of hits) {
+        if (seen.has(hit.id)) continue;
+        seen.add(hit.id);
+        candidates.push(hit);
+      }
+    }
+    const ranked = candidates
+      .map((hit) => ({ hit, score: liftwCandidateScore(hit, hints) }))
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, LIFTW_CONFIRM_LIMIT);
+
+    let found = "";
+    for (const entry of ranked) {
+      const confirmed = await liftwKpIdFor(entry.hit.id).catch(() => "");
+      if (confirmed && confirmed === wanted) {
+        found = String(entry.hit.id);
+        break;
+      }
+    }
+    cacheSet(LIFTW_BY_KP_CACHE_NS, wanted, found, found ? TTL.liftwkp : TTL.liftwkpmiss);
+    return found;
+  }
+
+  // Ranking only decides *what to confirm first*; it can never admit a wrong
+  // title on its own. A mismatched year or format is dropped outright, because
+  // confirming it would spend a request that can only fail.
+  function liftwCandidateScore(hit, hints = {}) {
+    if (hints.isSeries != null && hit.isSeries !== !!hints.isSeries) return 0;
+    const year = positiveInt(hints.year);
+    if (year && hit.year && Math.abs(hit.year - year) > 1) return 0;
+    const norm = (value) => compact(value).toLowerCase().replace(/ё/g, "е").replace(/[^a-zа-я0-9]+/gi, " ").trim();
+    const names = [norm(hit.title), norm(hit.originalTitle)].filter(Boolean);
+    const wants = [norm(hints.title), norm(hints.originalTitle)].filter(Boolean);
+    let score = 1;
+    if (names.some((name) => wants.includes(name))) score += 4;
+    else if (names.some((name) => wants.some((want) => name.startsWith(want) || want.startsWith(name)))) score += 2;
+    if (year && hit.year === year) score += 2;
+    return score;
   }
 
   // Three complete ladders arrive in the same embed and cost nothing to choose
@@ -2329,11 +2449,18 @@
       rating: item.rating || {},
       isSeries: !!item.isSeries,
     };
+    // "TS" is a cam rip and the one quality worth warning about up front, so it
+    // takes the corner pill; anything else is just another caption field.
+    const isTelesync = /^ts$/i.test(item.quality || "");
+    // 92% of LiftW's serial_status values are a flat "Все серии", which the type
+    // label already implies. The rest name the latest episode of a running show,
+    // which is the only case worth the space.
+    const status = /^все серии$/i.test(item.serialStatus || "") ? "" : item.serialStatus;
     const card = makeCard({
       title: item.title,
-      sub: [item.year, item.typeLabel, item.quality].filter(Boolean).join(" · "),
+      sub: [item.year, item.typeLabel, status, isTelesync ? "" : item.quality, "LFT"].filter(Boolean).join(" · "),
       poster: item.poster,
-      ratingPill: "LIFT",
+      flag: isTelesync ? "TS" : "",
       rating: item.rating,
       isSeries: item.isSeries,
       bookmark: { target, details },
@@ -2341,21 +2468,21 @@
       onAdd: () => window.alphyCatalog?.addToList?.(liftwListItem(item, details)),
     });
     card.classList.add("liftw-card");
+    // The search payload carries no runtime — only /info does. Rather than fan a
+    // request out per result, ride the hover warm-up that already fetches it (and
+    // a cache hit from an earlier visit) and fill the duration in when it lands.
+    applyLiftwDuration(card, cacheGet(LIFTW_TITLE_CACHE_NS, String(item.id)));
     // One hovered card warms the whole title: /info + embed land in the TTL cache
     // and the click then goes straight to Shaka.
-    card.addEventListener("pointerenter", () => prefetchLiftwTitle(item.id), { once: true });
-    const ratings = [
-      item.rating?.kp ? `КП ${formatRating(item.rating.kp)}` : "",
-      item.rating?.imdb ? `IMDb ${formatRating(item.rating.imdb)}` : "",
-      item.serialStatus || "",
-    ].filter(Boolean);
-    if (ratings.length) {
-      const meta = document.createElement("div");
-      meta.className = "cmeta liftw-ratings";
-      meta.textContent = ratings.join(" · ");
-      card.appendChild(meta);
-    }
+    card.addEventListener("pointerenter", () => {
+      prefetchLiftwTitle(item.id)?.then((parsed) => applyLiftwDuration(card, parsed), () => {});
+    }, { once: true });
     return card;
+  }
+
+  function applyLiftwDuration(card, parsed) {
+    if (!parsed?.meta) return;
+    setCardDuration(card, parsed.meta.movieLength, parsed.meta.isSeries);
   }
 
   function makeCollapsCard(hit) {
@@ -2374,7 +2501,6 @@
       title: details.title,
       sub: [quality, details.isSeries ? "сериал" : "фильм", "CLPS"].filter(Boolean).join(" · "),
       poster: details.poster,
-      ratingPill: "CLPS",
       rating: details.rating,
       movieLength: details.movieLength,
       isSeries: details.isSeries,
@@ -2397,9 +2523,8 @@
     };
     return makeCard({
       title: details.title,
-      sub: ["720p", "фильм"].join(" · "),
+      sub: ["720p", "фильм", "RZK"].join(" · "),
       poster: details.poster,
-      ratingPill: "720p",
       rating: details.rating,
       movieLength: details.movieLength,
       isSeries: false,
@@ -2413,7 +2538,7 @@
     title,
     sub,
     poster,
-    ratingPill,
+    flag,
     rating,
     movieLength,
     isSeries,
@@ -2445,10 +2570,13 @@
     } else {
       media.appendChild(blankPoster());
     }
-    if (ratingPill) {
+    // The corner pill is a warning, not a label: it exists to call out a release
+    // you probably do not want (a TS cam rip, a 720p-only last resort). The source
+    // itself rides in the caption line under the poster like every other field.
+    if (flag) {
       const pill = document.createElement("div");
-      pill.className = "rating-pill";
-      pill.textContent = ratingPill;
+      pill.className = "card-flag";
+      pill.textContent = flag;
       media.appendChild(pill);
     }
     const hover = document.createElement("div");
@@ -2466,8 +2594,8 @@
           <b class="hover-rating-value">${formatRating(rating?.kp)}</b>
         </div>
       </div>
-      <div class="hover-duration">${formatDuration(movieLength, isSeries)}</div>
     `;
+    renderHoverDuration(hover, movieLength, isSeries);
     media.appendChild(hover);
     if (bookmark?.target) {
       addCardBookmark(media, bookmark.target, bookmark.details, onBookmarkChange);
@@ -2549,7 +2677,32 @@
       }
       return `${minutes} мин`;
     }
-    return isSeries ? "СЕРИАЛ" : "—";
+    // Not every source ships a runtime. A bare dash under the ratings reads like
+    // a broken field, so an unknown duration renders as nothing at all.
+    return isSeries ? "СЕРИАЛ" : "";
+  }
+
+  // The slot is created only when there is something to put in it, and can be
+  // filled in later — LiftW learns a runtime only once the title itself is
+  // fetched, which happens on hover rather than for every search result.
+  function renderHoverDuration(hover, movieLength, isSeries) {
+    if (!hover) return;
+    const text = formatDuration(movieLength, isSeries);
+    let node = hover.querySelector(".hover-duration");
+    if (!text) {
+      node?.remove();
+      return;
+    }
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "hover-duration";
+      hover.appendChild(node);
+    }
+    node.textContent = text;
+  }
+
+  function setCardDuration(card, movieLength, isSeries) {
+    renderHoverDuration(card?.querySelector?.(".card-hover-meta"), movieLength, isSeries);
   }
 
   // =====================================================================
@@ -3558,12 +3711,14 @@
       setWatchHead(target.title || `kpId ${id}`, target);
       if (meta) renderMeta(meta, target);
       replaceHash(`/watch/kp/${encodeURIComponent(id)}`);
-      const played = await tryRezkaLastResort(target, meta, token, {
+      const fallbackOpts = {
         kpId: id,
         histKey: `kp:${id}`,
         resume: resumePosition(`kp:${id}`),
         serialSelection: requestedSelection,
-      });
+      };
+      const played = await tryLiftwLastResort(target, meta, token, fallbackOpts)
+        || await tryRezkaLastResort(target, meta, token, fallbackOpts);
       if (!played && !isStale(token)) throw error;
     }
   }
@@ -4422,6 +4577,37 @@
   // The last-resort entry point: resolve HDRezka for a title and play it. Returns
   // true if playback started, false if HDRezka could not deliver (so the caller
   // surfaces the ORIGINAL, more familiar error instead of a Rezka-specific one).
+  // Tried before HDRezka: LiftW carries series as well as films, plays natively
+  // through Shaka off its own CDN, and costs the resolver nothing. It is a
+  // fallback rather than a preferred rung because reaching it from a Kinopoisk id
+  // needs a search plus a confirmation, which the warm kp path does not.
+  async function tryLiftwLastResort(target, meta, token, opts = {}) {
+    const kpId = String(positiveInt(opts.kpId || target?.kpId || meta?.kpId) || "");
+    if (!kpId) return false;
+    try {
+      const liftId = await findLiftwByKpId(kpId, {
+        title: movieTitle(meta) || target?.title || "",
+        originalTitle: meta?.alternativeName || meta?.enName || "",
+        year: meta?.year || target?.year || null,
+        isSeries: !!(meta?.isSeries ?? target?.isSeries),
+      });
+      if (isStale(token)) return true;
+      if (!liftId) return false;
+      log("liftw-last-resort", { kpId, liftId });
+      await playLiftw(liftId, token, {
+        meta,
+        serialSelection: opts.serialSelection,
+        resume: opts.resume || 0,
+      });
+      if (!isStale(token)) replaceHash(hashFor(state.currentTarget));
+      return true;
+    } catch (error) {
+      if (isStale(token)) return true;
+      log("liftw-last-resort-fail", { kpId, message: error.message });
+      return false;
+    }
+  }
+
   async function tryRezkaLastResort(target, meta, token, opts = {}) {
     if (!rezkaLastResortEnabled()) return false;
     const kpId = opts.kpId || (target?.kind === "kp" ? target.kpId : null) || meta?.kpId || null;
@@ -4502,6 +4688,11 @@
       backdrop: left.backdrop || right.backdrop || "",
       description: left.description || left.shortDescription || right.description || right.shortDescription || "",
       isSeries: left.isSeries ?? right.isSeries ?? false,
+      // A Kinopoisk id is an identity, never a value to clear. Leaving it to the
+      // plain spread let the empty kpId of a first, placeholder render mask the
+      // real one that arrived with the source payload a moment later — which is
+      // exactly how LiftW pages ended up with no credits and no «Похожее».
+      kpId: left.kpId || right.kpId || "",
       movieLength: left.movieLength || right.movieLength || null,
       ageRating: left.ageRating ?? right.ageRating ?? null,
       ratingMpaa: left.ratingMpaa || right.ratingMpaa || null,
@@ -4703,6 +4894,15 @@
   // =====================================================================
   let watchExtrasKey = "";
 
+  // Every play* path seeds the watch head with a synthetic label so the page is
+  // never blank while the source resolves. These are ids, not names, and must
+  // never reach a title-based lookup.
+  const PLACEHOLDER_TITLE_RE = /^(liftw|zenith|фильм|kpid)\s+\d+$/i;
+
+  function isPlaceholderTitle(title) {
+    return PLACEHOLDER_TITLE_RE.test(compact(title));
+  }
+
   function scheduleWatchExtras(target) {
     const kpId = String(state.currentMeta?.kpId || target?.kpId || "");
     const key = `${keyFor(target)}|${kpId}`;
@@ -4722,6 +4922,10 @@
       // metadata in. Resolving it by title once (cached 30 days) is what lets
       // those titles show credits and «Похожее» at all.
       const title = state.currentMeta?.title || target?.title || "";
+      // The watch head carries a synthetic label ("LiftW 1143") until the source
+      // answers. Searching Kinopoisk for it can only miss, and each miss spends a
+      // call from the shared daily key-pool budget.
+      if (!title || isPlaceholderTitle(title)) return;
       kpId = String(await window.alphyForYou?.resolveKpId?.(title, state.currentMeta?.year || target?.year) || "");
       if (isStale(token) || !/^\d+$/.test(kpId)) return;
       attachHistoryKpId(keyFor(target), kpId);
@@ -7818,6 +8022,12 @@ addEventListener('message', async (event) => {
       liftwTextTracks,
       liftwTarget,
       bestLiftwSource,
+      liftwRuntimeMinutes,
+      liftwCandidateScore,
+      findLiftwByKpId,
+      isPlaceholderTitle,
+      mergeMetadata,
+      formatDuration,
       audioTag,
       audioNameFor,
       selectShakaAudio,
