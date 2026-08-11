@@ -1107,17 +1107,13 @@ body.admin-mode .meta-info { display: flex; }
   transition: color .15s, text-decoration-color .15s;
 }
 .kp-meta-link:hover { color: var(--accent); text-decoration: underline; text-decoration-color: currentColor; }
-/* Letterboxd is a 0-5 score, so it carries two decimals and needs a hair less
-   size than the 0-10 badges beside it to keep the row on one line. */
-.meta-ratings .rt-lb b { font-size: 16px; }
-/* A third figure on a cover: the row tightens rather than the card widening. */
-.hover-ratings.has-three {
-  grid-template-columns: minmax(0,1fr) 1px minmax(0,1fr) 1px minmax(0,1fr);
-  max-width: 100%;
-  column-gap: 5px;
-}
-.hover-ratings.has-three .hover-rating-value { font-size: clamp(13px, 1.25vw, 18px); }
-.hover-ratings.has-three .hover-rating-name { font-size: 7px; }
+/* Doubled to a 0-10 scale for display, so it needs no size concession to sit
+   beside the Кинопоиск and IMDb badges. */
+/* Letterboxd sits on its own centred line under IMDb and КП. Three figures
+   across one row crowded the cover and shrank all of them; stacking keeps every
+   number at the size a two-rating card uses. The gap is tighter than the one
+   above the runtime so the three scores still read as one group. */
+.hover-rating-lb { margin-top: -4px; }
 .meta-ratings .kp-rating-link { color: inherit; text-decoration: none; }
 .meta-ratings .kp-rating-link:hover span { color: var(--accent); }
 

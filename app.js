@@ -37,6 +37,11 @@
     "https://gzwynsvcydynqidwxjru.supabase.co/functions/v1/letterboxd",
   ];
   const LETTERBOXD_CACHE_NS = "letterboxd.v1";
+  // Letterboxd scores out of 5. It is stored and linked out at its true scale,
+  // and only ever doubled for display, so it reads on the same 0-10 footing as
+  // the Кинопоиск and IMDb figures it sits beside. Doubling is exact, so this
+  // loses nothing; one decimal is all a 0-5 score with two decimals can carry.
+  const letterboxdOutOfTen = (score) => (Number(score) * 2).toFixed(1);
   const LETTERBOXD_COOLDOWN_MS = 5 * 60e3;
   const LIFTW_TITLE_CACHE_NS = "liftwtitle.v1";
   const LIFTW_KP_OF_CACHE_NS = "liftwkpof.v1";
@@ -2962,20 +2967,21 @@
     renderHoverDuration(card?.querySelector?.(".card-hover-meta"), movieLength, isSeries);
   }
 
-  // Letterboxd is a 0-5 score, so it gets its own column rather than being
-  // mixed in with the two 0-10 ones. The row shrinks to fit a third figure
-  // instead of the card growing to accommodate it.
+  // Letterboxd gets a centred row of its own beneath IMDb and КП, rather than a
+  // third column squeezed in beside them: three figures across a cover crowded
+  // the row and forced every number smaller. Stacking keeps all three at the
+  // size a two-rating card has always used.
   function setCardLetterboxd(card, rating) {
-    const host = card?.querySelector?.(".hover-ratings");
-    if (!host || !rating?.r || host.querySelector(".hover-rating-lb")) return;
-    const divider = document.createElement("i");
-    divider.className = "hover-rating-divider";
-    const cell = document.createElement("div");
-    cell.className = "hover-rating hover-rating-lb";
-    cell.innerHTML = `<span class="hover-rating-name">LB</span>` +
-      `<b class="hover-rating-value">${escapeHtml(rating.r.toFixed(2))}</b>`;
-    host.append(divider, cell);
-    host.classList.add("has-three");
+    const hover = card?.querySelector?.(".card-hover-meta");
+    if (!hover || !rating?.r || hover.querySelector(".hover-rating-lb")) return;
+    const row = document.createElement("div");
+    row.className = "hover-rating hover-rating-lb";
+    row.innerHTML = `<span class="hover-rating-name">LB</span>` +
+      `<b class="hover-rating-value">${escapeHtml(letterboxdOutOfTen(rating.r))}</b>`;
+    // The runtime keeps the bottom of the stack, whichever arrives first.
+    const runtime = hover.querySelector(".hover-duration");
+    if (runtime) hover.insertBefore(row, runtime);
+    else hover.appendChild(row);
   }
 
   // Called once per rendered grid: collect what the cards declared, ask the
@@ -5228,13 +5234,14 @@
         const href = rating.slug ? `https://letterboxd.com/film/${encodeURIComponent(rating.slug)}/` : "";
         const node = document.createElement(href ? "a" : "div");
         node.className = href ? "rt rt-lb kp-rating-link" : "rt rt-lb";
+        // The tooltip keeps the true scale, since that is what the link opens.
         node.title = `${rating.r.toFixed(2)} из 5 на Letterboxd`;
         if (href) {
           node.href = href;
           node.target = "_blank";
           node.rel = "noopener noreferrer";
         }
-        node.innerHTML = `<b>${escapeHtml(rating.r.toFixed(2))}</b><span>Letterboxd</span>`;
+        node.innerHTML = `<b>${escapeHtml(letterboxdOutOfTen(rating.r))}</b><span>Letterboxd</span>`;
         host.appendChild(node);
       })
       .catch((error) => log("letterboxd-badge-warn", error.message));

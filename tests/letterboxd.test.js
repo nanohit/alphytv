@@ -206,3 +206,43 @@ test("a shard still on the old single-film shape is still understood", async () 
   assert.equal(cached.r, 3.91);
   assert.equal(cached.slug, "drive-2011");
 });
+
+test("the score is doubled for display but stored and linked at its true scale", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  // Doubling lives in exactly one place, so the card and the sidebar can never
+  // disagree about what scale the number is on.
+  const helper = source.match(/const letterboxdOutOfTen = [^;]+;/);
+  assert.ok(helper, "letterboxdOutOfTen must exist");
+  assert.match(helper[0], /\* 2\)\.toFixed\(1\)/);
+
+  // Two call sites: the cover card and the sidebar badge.
+  const uses = source.match(/letterboxdOutOfTen\(/g) ?? [];
+  assert.equal(uses.length, 2, `expected the card and the sidebar to use it, saw ${uses.length}`);
+
+  // 3.65 out of 5 is 7.3 out of 10 — one decimal, same width as the badges beside it.
+  const outOfTen = (score) => (Number(score) * 2).toFixed(1);
+  assert.equal(outOfTen(3.65), "7.3");
+  assert.equal(outOfTen(4.46), "8.9");
+  assert.equal(outOfTen(4), "8.0");
+
+  // The link and the tooltip must still quote Letterboxd's own 0-5 scale.
+  const badge = source.slice(source.indexOf("function fillLetterboxdBadge"));
+  assert.match(badge.slice(0, 1400), /rating\.r\.toFixed\(2\)\} из 5 на Letterboxd/);
+});
+
+test("the card puts the score on its own line above the runtime, not in the ratings row", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const start = source.indexOf("function setCardLetterboxd");
+  const block = source.slice(start, start + 1200);
+  assert.ok(start > 0);
+  // Three figures across one row forced all of them smaller; the score is now a
+  // row of its own, so nothing shrinks.
+  assert.doesNotMatch(block, /has-three/);
+  assert.doesNotMatch(block, /hover-rating-divider/);
+  assert.match(block, /querySelector\?\.\("\.card-hover-meta"\)/);
+  // Whichever lands first, the runtime stays at the bottom of the stack.
+  assert.match(block, /insertBefore\(row, runtime\)/);
+
+  const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  assert.doesNotMatch(css, /hover-ratings\.has-three/, "the shrinking rule must be gone");
+});
