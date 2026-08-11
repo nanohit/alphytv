@@ -1784,13 +1784,22 @@
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 7000);
-        const response = await fetch(`${endpoint}?imdb=${ids.slice(0, 60).join(",")}`, {
+        // mode=batch is explicit: a shard can legitimately receive a single id,
+        // and the shape of the reply must not depend on how many that happened
+        // to be. Inferring it from a comma is what silently broke narrow grids.
+        const response = await fetch(`${endpoint}?mode=batch&imdb=${ids.slice(0, 60).join(",")}`, {
           signal: controller.signal,
           referrerPolicy: "no-referrer",
         });
         clearTimeout(timer);
         if (!response.ok) throw new Error(`http ${response.status}`);
-        const items = (await response.json())?.items || {};
+        const payload = await response.json();
+        // Shards are deployed independently, so one can be a version behind and
+        // still answer in the older single-film shape. Reading both means a
+        // stale shard costs its own films, not the whole grid.
+        const items = payload?.items || (/^tt\d{6,10}$/.test(String(payload?.imdb || ""))
+          ? { [payload.imdb]: payload.found ? { r: payload.r, n: payload.n, slug: payload.slug } : null }
+          : {});
         for (const id of ids) {
           const hit = items[id];
           const rating = Number(hit?.r);
@@ -2585,6 +2594,8 @@
         rating: match?.rating,
         movieLength: match?.movieLength,
         isSeries: match?.isSeries,
+        originalTitle: match ? (match.originalTitle || match.alternativeName || "") : "",
+        year: details.year || match?.year || "",
         bookmark: { target, details },
         intent: { target: ready?.target || target, details },
         onClick: ready
@@ -2614,6 +2625,8 @@
         sub: [movie.year, movie.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · "),
         poster: movie.poster,
         imdb: movie.isSeries ? "" : movie.externalId?.imdb,
+        originalTitle: movie.originalTitle || movie.alternativeName || "",
+        year: movie.year || "",
         rating: movie.rating,
         movieLength: movie.movieLength,
         isSeries: movie.isSeries,
@@ -2689,6 +2702,8 @@
       flag: isTelesync ? "TS" : "",
       rating: item.rating,
       isSeries: item.isSeries,
+      originalTitle: item.originalTitle || "",
+      year: item.year || "",
       bookmark: { target, details },
       onClick: () => go(hashFor(target)),
       onAdd: () => window.alphyCatalog?.addToList?.(liftwListItem(item, details)),
@@ -2730,6 +2745,8 @@
       rating: details.rating,
       movieLength: details.movieLength,
       isSeries: details.isSeries,
+      originalTitle: hit.originalTitle || hit.alternativeName || "",
+      year: details.year || "",
       bookmark: { target, details },
       onClick: () => go(hashFor(target)),
       onAdd: () => window.alphyCatalog?.addToList?.(collapsListItem(hit, details)),
@@ -2754,6 +2771,8 @@
       rating: details.rating,
       movieLength: details.movieLength,
       isSeries: false,
+      originalTitle: hit.originalTitle || "",
+      year: details.year || "",
       bookmark: { target, details },
       onClick: () => openRezkaHit(hit, details),
       onAdd: () => window.alphyCatalog?.addToList?.(rezkaListItem(hit, details)),
@@ -2769,6 +2788,8 @@
     rating,
     movieLength,
     isSeries,
+    originalTitle,
+    year,
     bookmark,
     intent,
     recommendation,
@@ -2781,7 +2802,15 @@
     card.className = "card";
     card.tabIndex = 0;
     card.setAttribute("role", "button");
+    // A card declares who it is, not just what it scored. Only the Kinopoisk
+    // path arrives with an id; every other source (lift:, zen:, ort:, clps:,
+    // the curated catalogue) gets one resolved from these, off the metered API.
     if (/^tt\d{6,10}$/.test(String(imdb || ""))) card.dataset.imdb = imdb;
+    if (title) card.dataset.title = title;
+    if (originalTitle) card.dataset.originalTitle = originalTitle;
+    const declaredYear = String(year || "").slice(0, 4);
+    if (declaredYear) card.dataset.year = declaredYear;
+    if (isSeries) card.dataset.series = "1";
     const media = document.createElement("div");
     media.className = "card-media";
     const imageUrl = poster;
@@ -2951,17 +2980,42 @@
 
   // Called once per rendered grid: collect what the cards declared, ask the
   // shards for whatever is not already known, then paint from the cache.
-  function fillGridLetterboxd(grid) {
-    const cards = [...(grid?.querySelectorAll?.("[data-imdb]") || [])];
-    if (!cards.length) return;
+  async function fillGridLetterboxd(grid) {
+    const all = [...(grid?.querySelectorAll?.(".card") || [])];
+    if (!all.length) return;
+
     const paint = () => {
-      for (const card of cards) {
-        const cached = cacheGet(LETTERBOXD_CACHE_NS, card.dataset.imdb);
+      for (const card of all) {
+        const id = card.dataset.imdb;
+        if (!id) continue;
+        const cached = cacheGet(LETTERBOXD_CACHE_NS, id);
         if (cached?.r > 0) setCardLetterboxd(card, cached);
       }
     };
     paint();
-    letterboxdBatch(cards.map((card) => card.dataset.imdb)).then(paint).catch(() => {});
+
+    // Letterboxd has no page for a series, so a series is never worth an
+    // identity lookup here — it would spend a request to learn nothing.
+    const nameless = all.filter((card) => (
+      !card.dataset.imdb && card.dataset.title && card.dataset.year && !card.dataset.series
+    ));
+    if (nameless.length && window.alphyIdentity) {
+      const resolved = await window.alphyIdentity.resolveMany(nameless.map((card) => ({
+        title: card.dataset.title,
+        originalTitle: card.dataset.originalTitle || "",
+        year: card.dataset.year,
+        isSeries: false,
+        card,
+      })));
+      for (const [item, id] of resolved) item.card.dataset.imdb = id;
+    }
+
+    const ids = all.map((card) => card.dataset.imdb).filter(Boolean);
+    if (!ids.length) return;
+    try {
+      await letterboxdBatch(ids);
+    } catch { /* a shard being down must not cost the grid its other numbers */ }
+    paint();
   }
 
   // =====================================================================
@@ -5187,18 +5241,30 @@
   }
 
   // Only the Kinopoisk path carries externalId. Every other source (lift:, zen:,
-  // ort:, clps:) arrives with a kpId instead, and the resolver already answers
-  // the id-to-id question — from the same "meta" cache the watch page fills
-  // anyway, so a warm title costs nothing.
+  // ort:, clps:) arrives with a kpId instead.
+  //
+  // A warm "meta" entry is read because the watch page fills it anyway, but a
+  // cold one is deliberately not fetched: a rating badge is not worth spending
+  // metered quota on, and spending it here is what made a spent quota take the
+  // badge down along with search. Anything still unknown goes to the identity
+  // layer, which is free.
   async function letterboxdImdbId(meta) {
     const direct = String(meta?.externalId?.imdb || "");
     if (/^tt\d{6,10}$/.test(direct)) return direct;
+
     const kpId = String(positiveInt(meta?.kpId) || "");
-    if (!kpId) return "";
+    if (kpId) {
+      const warm = String(cacheGet("meta", kpId)?.externalId?.imdb || "");
+      if (/^tt\d{6,10}$/.test(warm)) return warm;
+    }
+
     try {
-      const movie = cacheGet("meta", kpId) || await fetchMovieMeta(kpId);
-      const imdb = String(movie?.externalId?.imdb || "");
-      return /^tt\d{6,10}$/.test(imdb) ? imdb : "";
+      return await window.alphyIdentity?.resolve({
+        title: movieTitle(meta) || meta?.title || "",
+        originalTitle: meta?.originalTitle || meta?.alternativeName || "",
+        year: meta?.year || "",
+        isSeries: !!meta?.isSeries,
+      }) || "";
     } catch {
       return "";
     }
@@ -8346,6 +8412,7 @@ addEventListener('message', async (event) => {
     resolvePosterByTitle,
     resolveCardMeta,
     resolverJson,
+    fillGridLetterboxd,
     _test: {
       ageBadge,
       matchNewdeafMetadata,

@@ -194,3 +194,15 @@ test("a second render pass waits for the first request instead of painting early
   assert.equal(JSON.parse(storage.get("alphy.cache.letterboxd.v1:tt0111161")).v.r, 4.6,
     "and it must not return before the cache is filled");
 });
+
+test("a shard still on the old single-film shape is still understood", async () => {
+  // Shards deploy independently. One lagging must cost its own films at worst,
+  // never the whole grid's numbers.
+  const { helpers, storage } = await boot({
+    handler: () => ok({ imdb: "tt0780504", found: true, slug: "drive-2011", r: 3.91, n: 2034887 }),
+  });
+  await helpers.letterboxdBatch(["tt0780504"]);
+  const cached = JSON.parse(storage.get("alphy.cache.letterboxd.v1:tt0780504")).v;
+  assert.equal(cached.r, 3.91);
+  assert.equal(cached.slug, "drive-2011");
+});

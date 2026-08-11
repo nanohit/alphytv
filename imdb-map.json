@@ -1,0 +1,392 @@
+{
+  "note": "Собрано scripts/build-imdb-map.mjs из curated-fallback.json. Руками не править.",
+  "builtFrom": "curated-fallback.json@75",
+  "count": 77,
+  "entries": {
+    "500 дней лета|2009": {
+      "imdb": "tt1022603",
+      "name": "500 Days of Summer",
+      "year": 2009
+    },
+    "американский психопат|2000": {
+      "imdb": "tt0144084",
+      "name": "American Psycho",
+      "year": 2000
+    },
+    "андор|2022": {
+      "imdb": "tt9253284",
+      "name": "Andor",
+      "year": 2022
+    },
+    "аркейн|2021": {
+      "imdb": "tt11126994",
+      "name": "Arcane",
+      "year": 2021
+    },
+    "бедные несчастные|2023": {
+      "imdb": "tt14230458",
+      "name": "Poor Things",
+      "year": 2023
+    },
+    "бердмэн|2014": {
+      "imdb": "tt2562232",
+      "name": "Birdman or (The Unexpected Virtue of Ignorance)",
+      "year": 2014
+    },
+    "большой куш|2000": {
+      "imdb": "tt0208092",
+      "name": "Snatch",
+      "year": 2000
+    },
+    "бугония|2025": {
+      "imdb": "tt12300742",
+      "name": "Bugonia",
+      "year": 2025
+    },
+    "бухта вдов|2026": {
+      "imdb": "tt33332385",
+      "name": "Widow's Bay",
+      "year": 2026
+    },
+    "варвар|2022": {
+      "imdb": "tt15791034",
+      "name": "Barbarian",
+      "year": 2022
+    },
+    "верни ее из мертвых|2025": {
+      "imdb": "tt32246771",
+      "name": "Bring Her Back",
+      "year": 2025
+    },
+    "воспитанные волками|2020": {
+      "imdb": "tt9170108",
+      "name": "Raised by Wolves",
+      "year": 2020
+    },
+    "вот это драма|2026": {
+      "imdb": "tt33071426",
+      "name": "The Drama",
+      "year": 2026
+    },
+    "враг|2013": {
+      "imdb": "tt2316411",
+      "name": "Enemy",
+      "year": 2013
+    },
+    "все везде и сразу|2022": {
+      "imdb": "tt6710474",
+      "name": "Everything Everywhere All at Once",
+      "year": 2022
+    },
+    "донни дарко|2001": {
+      "imdb": "tt0246578",
+      "name": "Donnie Darko",
+      "year": 2001
+    },
+    "драйв|2011": {
+      "imdb": "tt0780504",
+      "name": "Drive",
+      "year": 2011
+    },
+    "евангелион|1995": {
+      "imdb": "tt0112159",
+      "name": "Neon Genesis Evangelion",
+      "year": 1995
+    },
+    "зависнуть в палм спрингс|2020": {
+      "imdb": "tt9484998",
+      "name": "Palm Springs",
+      "year": 2020
+    },
+    "задача трех тел|2023": {
+      "imdb": "tt13016388",
+      "name": "3 Body Problem",
+      "year": 2024
+    },
+    "задорные друзья|2020": {
+      "imdb": "tt12074628",
+      "name": "Smiling Friends",
+      "year": 2020
+    },
+    "звездный крейсер галактика|2003": {
+      "imdb": "tt0314979",
+      "name": "Battlestar Galactica",
+      "year": 2003
+    },
+    "история о супружестве|2019": {
+      "imdb": "tt7653254",
+      "name": "Marriage Story",
+      "year": 2019
+    },
+    "конь боджек|2014": {
+      "imdb": "tt3398228",
+      "name": "BoJack Horseman",
+      "year": 2014
+    },
+    "крайний космос|2018": {
+      "imdb": "tt6317068",
+      "name": "Final Space",
+      "year": 2018
+    },
+    "леди берд|2017": {
+      "imdb": "tt4925292",
+      "name": "Lady Bird",
+      "year": 2017
+    },
+    "локи|2021": {
+      "imdb": "tt9140554",
+      "name": "Loki",
+      "year": 2021
+    },
+    "любовь смерть роботы|2019": {
+      "imdb": "tt9561862",
+      "name": "Love, Death & Robots",
+      "year": 2019
+    },
+    "магнолия|1999": {
+      "imdb": "tt0175880",
+      "name": "Magnolia",
+      "year": 1999
+    },
+    "майкл|2026": {
+      "imdb": "tt11378946",
+      "name": "Michael",
+      "year": 2026
+    },
+    "малхолланд драйв|2001": {
+      "imdb": "tt0166924",
+      "name": "Mulholland Drive",
+      "year": 2001
+    },
+    "мальчишник в вегасе|2009": {
+      "imdb": "tt1119646",
+      "name": "The Hangover",
+      "year": 2009
+    },
+    "марти великолепный|2025": {
+      "imdb": "tt32916440",
+      "name": "Marty Supreme",
+      "year": 2025
+    },
+    "маяк|2019": {
+      "imdb": "tt7984734",
+      "name": "The Lighthouse",
+      "year": 2019
+    },
+    "мистер робот|2015": {
+      "imdb": "tt4158110",
+      "name": "Mr. Robot",
+      "year": 2015
+    },
+    "мортал комбат|2021": {
+      "imdb": "tt0293429",
+      "name": "Mortal Kombat",
+      "year": 2021
+    },
+    "неограненные алмазы|2019": {
+      "imdb": "tt5727208",
+      "name": "Uncut Gems",
+      "year": 2019
+    },
+    "непобедимый|2021": {
+      "imdb": "tt6741278",
+      "name": "Invincible",
+      "year": 2021
+    },
+    "нормальные люди|2020": {
+      "imdb": "tt9059760",
+      "name": "Normal People",
+      "year": 2020
+    },
+    "области тьмы|2011": {
+      "imdb": "tt1219289",
+      "name": "Limitless",
+      "year": 2011
+    },
+    "олдбой|2003": {
+      "imdb": "tt0364569",
+      "name": "Oldboy",
+      "year": 2003
+    },
+    "оно добро пожаловать в дерри|2025": {
+      "imdb": "tt19244304",
+      "name": "It: Welcome to Derry",
+      "year": 2025
+    },
+    "останься|2005": {
+      "imdb": "tt0371257",
+      "name": "Stay",
+      "year": 2005
+    },
+    "паук нуар|2026": {
+      "imdb": "tt30460310",
+      "name": "Spider-Noir",
+      "year": 2026
+    },
+    "плохая девочка|2024": {
+      "imdb": "tt30057084",
+      "name": "Babygirl",
+      "year": 2024
+    },
+    "по ту сторону изгороди|2014": {
+      "imdb": "tt3718778",
+      "name": "Over the Garden Wall",
+      "year": 2014
+    },
+    "подземелья и драконы честь среди воров|2023": {
+      "imdb": "tt2906216",
+      "name": "Dungeons & Dragons: Honor Among Thieves",
+      "year": 2023
+    },
+    "полутон|2025": {
+      "imdb": "tt35892608",
+      "name": "Undertone",
+      "year": 2025
+    },
+    "портрет девушки в огне|2019": {
+      "imdb": "tt8613070",
+      "name": "Portrait of a Lady on Fire",
+      "year": 2019
+    },
+    "программисты|2020": {
+      "imdb": "tt8134186",
+      "name": "Devs",
+      "year": 2020
+    },
+    "проект конец света|2026": {
+      "imdb": "tt12042730",
+      "name": "Project Hail Mary",
+      "year": 2026
+    },
+    "пространство|2015": {
+      "imdb": "tt3230854",
+      "name": "The Expanse",
+      "year": 2015
+    },
+    "прошлые жизни|2023": {
+      "imdb": "tt13238346",
+      "name": "Past Lives",
+      "year": 2023
+    },
+    "ради всего человечества|2019": {
+      "imdb": "tt7772588",
+      "name": "For All Mankind",
+      "year": 2019
+    },
+    "рик и морти|2013": {
+      "imdb": "tt2861424",
+      "name": "Rick and Morty",
+      "year": 2013
+    },
+    "с меня хватит|1992": {
+      "imdb": "tt0106856",
+      "name": "Falling Down",
+      "year": 1993
+    },
+    "светлячок|2002": {
+      "imdb": "tt0303461",
+      "name": "Firefly",
+      "year": 2002
+    },
+    "силиконовая долина|2014": {
+      "imdb": "tt2575988",
+      "name": "Silicon Valley",
+      "year": 2014
+    },
+    "скотт пилигрим жмет на газ|2023": {
+      "imdb": "tt16969708",
+      "name": "Scott Pilgrim Takes Off",
+      "year": 2023
+    },
+    "следствие ведут овечки|2026": {
+      "imdb": "tt32565993",
+      "name": "The Sheep Detectives",
+      "year": 2026
+    },
+    "солтберн|2023": {
+      "imdb": "tt17351924",
+      "name": "Saltburn",
+      "year": 2023
+    },
+    "старикам тут не место|2007": {
+      "imdb": "tt0477348",
+      "name": "No Country for Old Men",
+      "year": 2007
+    },
+    "стартрек возмездие|2013": {
+      "imdb": "tt1408101",
+      "name": "Star Trek Into Darkness",
+      "year": 2013
+    },
+    "стрингер|2013": {
+      "imdb": "tt2872718",
+      "name": "Nightcrawler",
+      "year": 2014
+    },
+    "супер марио галактическое кино|2026": {
+      "imdb": "tt28650488",
+      "name": "The Super Mario Galaxy Movie",
+      "year": 2026
+    },
+    "сцены из супружеской жизни|2021": {
+      "imdb": "tt12682218",
+      "name": "Scenes from a Marriage",
+      "year": 2021
+    },
+    "таксист|1976": {
+      "imdb": "tt0075314",
+      "name": "Taxi Driver",
+      "year": 1976
+    },
+    "темная материя|2024": {
+      "imdb": "tt19231492",
+      "name": "Dark Matter",
+      "year": 2024
+    },
+    "трансформеры начало|2024": {
+      "imdb": "tt8864596",
+      "name": "Transformers One",
+      "year": 2024
+    },
+    "третий лишний|2024": {
+      "imdb": "tt14824792",
+      "name": "Ted",
+      "year": 2024
+    },
+    "у марго проблемы с деньгами|2026": {
+      "imdb": "tt31137273",
+      "name": "Margo's Got Money Troubles",
+      "year": 2026
+    },
+    "фонтан|2006": {
+      "imdb": "tt0414993",
+      "name": "The Fountain",
+      "year": 2006
+    },
+    "хорошее время|2017": {
+      "imdb": "tt4846232",
+      "name": "Good Time",
+      "year": 2017
+    },
+    "хулиганы и ботаны|1999": {
+      "imdb": "tt0193676",
+      "name": "Freaks and Geeks",
+      "year": 1999
+    },
+    "царство падальщиков|2023": {
+      "imdb": "tt21056886",
+      "name": "Scavengers Reign",
+      "year": 2023
+    },
+    "частые побочные явления|2024": {
+      "imdb": "tt28093628",
+      "name": "Common Side Effects",
+      "year": 2024
+    },
+    "юный детектив|2020": {
+      "imdb": "tt8980602",
+      "name": "The Kid Detective",
+      "year": 2020
+    }
+  }
+}

@@ -528,6 +528,15 @@
     card.tabIndex = 0;
     card.setAttribute("role", "button");
     card.dataset.key = item.key;
+    // The curated key is a Zona/embed id, never an IMDb one, so these are what
+    // the identity layer has to work from. imdb-map.json answers the committed
+    // catalogue outright; anything added since resolves through Cinemeta.
+    if (item.title) card.dataset.title = item.title;
+    const cardYear = String(item.year || "").slice(0, 4);
+    if (cardYear) card.dataset.year = cardYear;
+    if (item.isSeries) card.dataset.series = "1";
+    const carried = String(item.imdb || item.imdbId || "");
+    if (/^tt\d{6,10}$/.test(carried)) card.dataset.imdb = carried;
 
     const media = document.createElement("div");
     media.className = "card-media";
@@ -1367,6 +1376,7 @@
         wrap.appendChild(row);
         block.appendChild(wrap);
         setupCuratedRow(wrap, row);
+        window.alphyBridge?.fillGridLetterboxd?.(row);
       }
       el.lists.appendChild(block);
       if (list.items.length) quickItems.push({ id: block.id, title: list.title });
