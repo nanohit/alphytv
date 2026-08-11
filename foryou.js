@@ -33,7 +33,7 @@
   const LOOKUP_TTL = 30 * 24 * 3600e3;
   const NEGATIVE_TTL = 6 * 3600e3;
 
-  const MAX_SEEDS = 6;
+  const MAX_SEEDS = 8;
   const MAX_SIM_FETCH_PER_RUN = 6;
   const MAX_META_BATCH_SIZE = 18;
   const MAX_LOOKUP_PER_RUN = 3;
@@ -45,8 +45,8 @@
   const DAILY_FETCH_CAP = 220;
   const FETCH_CONCURRENCY = 3;
   const ROW_SIZE = 18;
-  const MIN_ROW = 6;
-  const MAX_PER_SEED = 5;
+  const MIN_ROW = 3;
+  const MAX_PER_SEED = 7;
   const RECOMPUTE_MIN_MS = 60e3;
 
   // «Похожее» (under the player)
@@ -376,7 +376,7 @@
     if (progress >= 0.4) return 0.85;
     if (progress >= 0.15) return 0.7;
     if (progress >= 0.05 || Number(entry.position) >= 300) return 0.55;
-    if (progress >= 0.015 || Number(entry.position) >= 90) return 0.25;
+    if (progress >= 0.005 || Number(entry.position) >= 30) return 0.2;
     // recordOpen writes history before playback begins. Treating that zero-second
     // entry as taste made an accidental click outrank an older completed film.
     return 0;
@@ -605,7 +605,7 @@
       similars.forEach((candidate, index) => {
         if (excludeKp.has(candidate.id)) return;
         if (excludeTitles.has(normTitle(candidate.ru))) return;
-        const contribution = seed.weight / (3 + index);
+        const contribution = seed.weight / (2.5 + index * 0.8);
         let entry = candidates.get(candidate.id);
         if (!entry) {
           entry = { ...candidate, score: 0, hits: 0, primarySeed: seed.kpId, primaryContribution: 0 };
@@ -622,7 +622,7 @@
     const ranked = [...candidates.values()]
       .map((entry) => ({
         ...entry,
-        final: entry.score * (1 + 0.08 * Math.min(2, entry.hits - 1)),
+        final: entry.score * (1 + 0.10 * Math.min(3, entry.hits - 1)),
       }))
       .sort((a, b) => b.final - a.final);
 

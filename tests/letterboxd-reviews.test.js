@@ -197,3 +197,17 @@ test("the public batch path is cache-only and cannot bypass freshness", async ()
   assert.doesNotMatch(source, /searchParams\.get\("refresh"\)/);
   assert.doesNotMatch(source, /BATCH_FETCH_LIMIT/);
 });
+
+test("watch reviews use a compact numeric strip and link the heading", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const start = source.indexOf("function renderReview");
+  const end = source.indexOf("// =====================================================================\n  // Playback — Ortified", start);
+  const block = source.slice(start, end);
+  assert.match(block, /review-score/);
+  assert.match(block, /\/5`/);
+  assert.doesNotMatch(block, /review-stars|reviews-note|Все отзывы на Letterboxd/);
+  assert.match(block, /el\.reviewsLink\.href/);
+
+  const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
+  assert.match(html, /id="reviewsLink"[^>]*>Отзывы<\/a>/);
+});

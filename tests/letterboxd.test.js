@@ -253,8 +253,10 @@ test("the score is doubled for display but stored and linked at its true scale",
   assert.equal(outOfTen(4), "8.0");
 
   // The link and the tooltip must still quote Letterboxd's own 0-5 scale.
-  const badge = source.slice(source.indexOf("function fillLetterboxdBadge"));
-  assert.match(badge.slice(0, 1400), /rating\.r\.toFixed\(2\)\} из 5 на Letterboxd/);
+  const badgeStart = source.indexOf("function fillLetterboxdBadge");
+  const badgeEnd = source.indexOf("async function letterboxdImdbId", badgeStart);
+  const badge = source.slice(badgeStart, badgeEnd);
+  assert.match(badge, /rating\.r\.toFixed\(2\)\} из 5 на Letterboxd/);
 });
 
 test("the card puts the score on its own line above the runtime, not in the ratings row", async () => {

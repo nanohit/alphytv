@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { makeSandbox } from "./helpers/app-sandbox.js";
 
 function matcherApi() {
@@ -130,4 +131,25 @@ test("a recommendation upgrades from kp to a verified cached Ortified target", a
   assert.equal(cached.v.target.kind, "ort");
   assert.equal(cached.v.target.embedUrl, embedUrl);
   assert.ok(ctx.storage.has(`alphy.cache.ortmeta:${embedUrl}`));
+});
+
+test("a recommendation click navigates immediately while client sources race", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const clickStart = source.indexOf("function openRecommendationItem");
+  const clickEnd = source.indexOf("async function prepareTarget", clickStart);
+  const click = source.slice(clickStart, clickEnd);
+  assert.ok(clickStart > 0 && clickEnd > clickStart);
+  assert.doesNotMatch(click, /\bawait\b/, "navigation must not wait for a provider lookup");
+  assert.match(click, /recommendationContextByKp\.set/);
+  assert.match(click, /prepareRecommendation\(item\)\.catch/);
+  assert.match(click, /return openCuratedItem/);
+
+  const raceStart = source.indexOf("async function resolveRecommendationPlaybackSource");
+  const raceEnd = source.indexOf("async function prepareRecommendation", raceStart);
+  const race = source.slice(raceStart, raceEnd);
+  assert.match(race, /resolveRecommendationTarget/);
+  assert.match(race, /probeCollapsMovie/);
+  assert.match(race, /findLiftwByKpId/);
+  assert.match(race, /firstAvailable/);
+  assert.doesNotMatch(race, /resolveZona/, "hover/pointer warming must not spend shared resolver capacity");
 });

@@ -864,19 +864,19 @@ body.admin-mode .meta-info { display: flex; }
 .reviews-section { grid-column: 1; grid-row: 3; min-width: 0; margin-top: 17px; }
 .reviews-section.collapsed .reviews-list { display: none; }
 .reviews-list {
-  list-style: none; margin: 0; padding: 0;
-  display: flex; flex-direction: column;
+  list-style: none; margin: 0; padding: 2px 0 10px;
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(220px, 32%);
+  gap: 16px; overflow-x: auto; overscroll-behavior-inline: contain;
+  scrollbar-width: thin; scrollbar-color: #343434 transparent;
 }
-.review { padding: 11px 0; border-top: 1px solid var(--stroke); }
-.review:first-child { border-top: 0; padding-top: 2px; }
+.review { min-width: 0; padding: 0 16px 0 0; border-right: 1px solid var(--stroke); }
+.review:last-child { border-right: 0; }
 .review-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
 .review-author {
   font-size: 11px; font-weight: 600; color: #cfcfcf;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%;
 }
-/* Letterboxd's own idiom, and half-stars make it exact. Kept small so it reads
-   as one person's mark rather than competing with the aggregate badges. */
-.review-stars { font-size: 10px; letter-spacing: .06em; color: var(--accent); white-space: nowrap; }
+.review-score { font-size: 10px; color: var(--muted); white-space: nowrap; }
 /* The column is as wide as the player, which is far past a comfortable measure
    for prose; the covers above fill it, a paragraph should not. */
 .review-text { margin: 0; max-width: 74ch; font-size: 12px; line-height: 1.5; color: #cfcfcf; overflow-wrap: anywhere; }
@@ -887,12 +887,8 @@ body.admin-mode .meta-info { display: flex; }
   text-align: left;
 }
 .review-spoiler:hover { color: var(--accent); }
-.reviews-note {
-  margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--stroke);
-  font-size: 10px; letter-spacing: .04em; color: var(--muted);
-}
-.reviews-note a { color: var(--muted-strong); text-decoration: none; }
-.reviews-note a:hover { color: var(--accent); }
+.reviews-title { color: inherit; text-decoration: none; }
+.reviews-title[href]:hover { color: var(--accent); }
 .similar-row .card-remove { left: 7px; right: auto; }
 
 /* ---------- track / quality controls (Shaka) ---------- */
@@ -1106,6 +1102,7 @@ body.admin-mode .meta-info { display: flex; }
   .similar-row { grid-auto-columns: var(--mobile-card-width); gap: 6px; }
   .similar-row > .card { width: var(--mobile-card-width); }
   .similar-row .card-remove { opacity: .82; }
+  .reviews-list { grid-auto-columns: minmax(230px, 82vw); gap: 12px; }
   .meta-poster .card-bookmark {
     right: 5px; width: 30px; height: 39px;
   }

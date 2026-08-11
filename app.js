@@ -180,6 +180,7 @@
     similarRow: document.getElementById("similarRow"),
     similarToggle: document.getElementById("similarToggle"),
     reviewsSection: document.getElementById("reviewsSection"),
+    reviewsLink: document.getElementById("reviewsLink"),
     reviewsList: document.getElementById("reviewsList"),
     reviewsToggle: document.getElementById("reviewsToggle"),
     loading: document.getElementById("loading"),
@@ -236,6 +237,8 @@
   const newdeafPagePrefetches = new Set();
   const newdeafPageInflight = new Map();
   const newdeafRecommendationInflight = new Map();
+  const liftwByKpInflight = new Map();
+  const recommendationContextByKp = new Map();
   const soapWarmOrigins = new Set();
   const soapManifestPrefetches = new Set();
   const collapsWarmOrigins = new Set();
@@ -262,11 +265,10 @@
   const SPECULATIVE_REFILL_MS = 15e3;
   let speculativeIntentBudget = SPECULATIVE_BUDGET_MAX;
   let speculativeRefillAt = Date.now();
-  // The top «Для вас» card is already warmed during idle. Allow just one extra
-  // hover-driven Newdeaf lookup per tab; every other title resolves only when the
-  // user actually presses it, avoiding a two-request crawl across the whole row.
-  let speculativeNewdeafRecommendationBudget = 1;
-  let recommendationOpenToken = 0;
+  // A recommendation warm-up races three client-side catalogues. Allow it for
+  // one hover per tab; pointer-down is never budgeted. This prevents a casual
+  // mouse sweep from crawling every provider while still warming a likely click.
+  let speculativeRecommendationBudget = 1;
 
   function claimSpeculativeIntent() {
     const now = Date.now();
@@ -2162,37 +2164,44 @@ parent.postMessage({
     const cached = cacheGet(LIFTW_BY_KP_CACHE_NS, wanted);
     if (typeof cached === "string") return cached;
 
-    const queries = [hints.title, hints.originalTitle]
-      .map((value) => compact(value))
-      .filter((value) => value && !isPlaceholderTitle(value));
-    if (!queries.length) return "";
+    const inflight = liftwByKpInflight.get(wanted);
+    if (inflight) return inflight;
 
-    const seen = new Set();
-    const candidates = [];
-    for (const query of queries) {
-      const hits = await searchLiftw(query).catch(() => []);
-      for (const hit of hits) {
-        if (seen.has(hit.id)) continue;
-        seen.add(hit.id);
-        candidates.push(hit);
-      }
-    }
-    const ranked = candidates
-      .map((hit) => ({ hit, score: liftwCandidateScore(hit, hints) }))
-      .filter((entry) => entry.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, LIFTW_CONFIRM_LIMIT);
+    const pending = (async () => {
+      const queries = [hints.title, hints.originalTitle]
+        .map((value) => compact(value))
+        .filter((value) => value && !isPlaceholderTitle(value));
+      if (!queries.length) return "";
 
-    let found = "";
-    for (const entry of ranked) {
-      const confirmed = await liftwKpIdFor(entry.hit.id).catch(() => "");
-      if (confirmed && confirmed === wanted) {
-        found = String(entry.hit.id);
-        break;
+      const seen = new Set();
+      const candidates = [];
+      for (const query of queries) {
+        const hits = await searchLiftw(query).catch(() => []);
+        for (const hit of hits) {
+          if (seen.has(hit.id)) continue;
+          seen.add(hit.id);
+          candidates.push(hit);
+        }
       }
-    }
-    cacheSet(LIFTW_BY_KP_CACHE_NS, wanted, found, found ? TTL.liftwkp : TTL.liftwkpmiss);
-    return found;
+      const ranked = candidates
+        .map((hit) => ({ hit, score: liftwCandidateScore(hit, hints) }))
+        .filter((entry) => entry.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, LIFTW_CONFIRM_LIMIT);
+
+      let found = "";
+      for (const entry of ranked) {
+        const confirmed = await liftwKpIdFor(entry.hit.id).catch(() => "");
+        if (confirmed && confirmed === wanted) {
+          found = String(entry.hit.id);
+          break;
+        }
+      }
+      cacheSet(LIFTW_BY_KP_CACHE_NS, wanted, found, found ? TTL.liftwkp : TTL.liftwkpmiss);
+      return found;
+    })().finally(() => liftwByKpInflight.delete(wanted));
+    liftwByKpInflight.set(wanted, pending);
+    return pending;
   }
 
   // Ranking only decides *what to confirm first*; it can never admit a wrong
@@ -3374,6 +3383,7 @@ parent.postMessage({
     setView("watch");
     state.playerReady = false;
     state.currentMeta = null;
+    lastMetaRenderSignature = "";
     state.zenithEmbedUrl = "";
     window.dispatchEvent(new CustomEvent("alphy:player-ready", { detail: { ready: false } }));
     el.metaPanel.classList.add("hidden");
@@ -4245,7 +4255,30 @@ parent.postMessage({
     });
   }
 
-  async function resolveKpPlaybackSource(kpId, meta, selection) {
+  function firstAvailable(promises) {
+    const jobs = (promises || []).filter(Boolean);
+    if (!jobs.length) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      let remaining = jobs.length;
+      let done = false;
+      const settle = (value) => {
+        if (done) return;
+        if (value) {
+          done = true;
+          resolve(value);
+          return;
+        }
+        remaining -= 1;
+        if (!remaining) {
+          done = true;
+          resolve(null);
+        }
+      };
+      jobs.forEach((job) => Promise.resolve(job).then(settle, () => settle(null)));
+    });
+  }
+
+  async function resolveStandardKpPlaybackSource(kpId, meta, selection, shouldContinue = () => true) {
     const cachedZona = cacheGet("zona", kpId);
     // A mid-watch Zenith title keeps its player: resume position and озвучка
     // live under the kp: history key and do not transfer to Collaps.
@@ -4272,10 +4305,23 @@ parent.postMessage({
       }
     }
 
+    if (!shouldContinue()) return null;
     // Loading the player library overlaps the only server-side stage. If Zona is
     // cold, its several seconds are now useful work instead of dead spinner time.
     ensureShaka().catch((error) => log("shaka-preload-warn", error.message));
     return { kind: "zen", resolved: await resolveZona(kpId) };
+  }
+
+  async function resolveKpPlaybackSource(kpId, meta, selection) {
+    const recommendation = recommendationContextByKp.get(String(kpId));
+    if (!recommendation) return resolveStandardKpPlaybackSource(kpId, meta, selection);
+
+    let selected = false;
+    const browserTask = resolveRecommendationPlaybackSource(recommendation, selection);
+    const standardTask = resolveStandardKpPlaybackSource(kpId, meta, selection, () => !selected);
+    const source = await firstAvailable([browserTask, standardTask]);
+    selected = !!source;
+    return source;
   }
 
   async function playKp(kpId, token, opts = {}) {
@@ -4330,6 +4376,50 @@ parent.postMessage({
     try {
       let source = await sourceTask;
       if (isStale(token)) return;
+      if (!source) throw new Error("Источники не вернули плеер");
+
+      if (source.kind === "ort") {
+        try {
+          const embedUrl = source.target.embedUrl;
+          cacheSet("ortmeta", embedUrl, { ...(meta || {}), kpId: id }, TTL.enriched);
+          await playOrt(embedUrl, token, { ...(meta || {}), kpId: id });
+          if (!isStale(token)) replaceHash(hashFor(state.currentTarget));
+          return;
+        } catch (error) {
+          if (isStale(token)) return;
+          log("ortified-recommend-fallback", { kpId: id, message: error.message });
+          showPlayerLoading();
+          const recommendation = recommendationContextByKp.get(id);
+          const liftwFallback = recommendation
+            ? findLiftwByKpId(id, recommendationLiftwHints(recommendation))
+              .then((liftId) => liftId ? { kind: "lift", liftId } : null)
+            : null;
+          source = await firstAvailable([
+            liftwFallback,
+            resolveStandardKpPlaybackSource(id, meta, requestedSelection),
+          ]);
+          if (!source || isStale(token)) throw error;
+        }
+      }
+
+      if (source.kind === "lift") {
+        try {
+          await playLiftw(source.liftId, token, {
+            meta: { ...(meta || {}), kpId: id },
+            serialSelection: requestedSelection,
+            resume: resumePosition(`kp:${id}`),
+          });
+          if (!isStale(token)) replaceHash(hashFor(state.currentTarget));
+          return;
+        } catch (error) {
+          if (isStale(token)) return;
+          log("liftw-recommend-fallback", { kpId: id, message: error.message });
+          showPlayerLoading();
+          source = await resolveStandardKpPlaybackSource(id, meta, requestedSelection);
+          if (!source || isStale(token)) throw error;
+        }
+      }
+
       if (source.kind === "clps") {
         try {
           await playCollaps(id, token, { meta, selection: requestedSelection || source.hit.selection });
@@ -4343,6 +4433,32 @@ parent.postMessage({
           setWatchHead(target.title || `kpId ${id}`, target);
           if (meta) renderMeta(meta, target);
           ensureShaka().catch(() => {});
+          const recommendation = recommendationContextByKp.get(id);
+          const liftwFallback = recommendation
+            ? findLiftwByKpId(id, recommendationLiftwHints(recommendation))
+              .then((liftId) => liftId ? { kind: "lift", liftId } : null)
+            : null;
+          source = await firstAvailable([
+            liftwFallback,
+            resolveZona(id).then((resolved) => ({ kind: "zen", resolved })),
+          ]);
+          if (isStale(token)) return;
+        }
+      }
+
+      if (source.kind === "lift") {
+        try {
+          await playLiftw(source.liftId, token, {
+            meta: { ...(meta || {}), kpId: id },
+            serialSelection: requestedSelection,
+            resume: resumePosition(`kp:${id}`),
+          });
+          if (!isStale(token)) replaceHash(hashFor(state.currentTarget));
+          return;
+        } catch (error) {
+          if (isStale(token)) return;
+          log("liftw-after-collaps-fallback", { kpId: id, message: error.message });
+          showPlayerLoading();
           source = { kind: "zen", resolved: await resolveZona(id) };
           if (isStale(token)) return;
         }
@@ -4625,14 +4741,23 @@ parent.postMessage({
     shakaTask.catch(() => {});
 
     const cachedMeta = cacheGet("curatedmeta", `lift:${safeId}`) || storedMeta(`lift:${safeId}`);
+    const initialMeta = mergeMetadata(opts.meta || {}, cachedMeta || {});
+    const initialTitle = movieTitle(initialMeta);
     const target = liftwTarget(safeId, opts.serialSelection || {});
-    target.title = opts.meta?.title || cachedMeta?.title || `LiftW ${safeId}`;
-    target.poster = opts.meta?.poster || cachedMeta?.poster || "";
-    target.year = opts.meta?.year || cachedMeta?.year || "";
-    target.isSeries = !!(opts.meta?.isSeries ?? cachedMeta?.isSeries);
+    target.title = isPlaceholderTitle(initialTitle) ? "" : initialTitle;
+    target.poster = initialMeta.poster || "";
+    target.year = initialMeta.year || "";
+    target.isSeries = !!initialMeta.isSeries;
     state.currentTarget = target;
-    setWatchHead(target.title, target);
-    renderMeta(mergeMetadata({ ...(opts.meta || {}) }, cachedMeta || {}), target);
+    if (target.title || target.poster) {
+      setWatchHead(target.title, target);
+      renderMeta(initialMeta, target);
+    } else {
+      el.watchTitle.textContent = "";
+      document.title = SITE_TITLE;
+      el.metaPanel.classList.add("hidden");
+      updateBookmarkBtn(target);
+    }
 
     const parsed = await resolveLiftwTitle(safeId, { force: !!opts.force });
     if (isStale(token)) return;
@@ -5441,6 +5566,11 @@ parent.postMessage({
       : "";
   }
 
+  function imdbTitleUrl(imdbId) {
+    const id = String(imdbId || "");
+    return /^tt\d{6,10}$/.test(id) ? `https://www.imdb.com/title/${encodeURIComponent(id)}/` : "";
+  }
+
   function kinopoiskPersonUrl(personId) {
     return /^\d+$/.test(String(personId || ""))
       ? `https://www.kinopoisk.ru/name/${encodeURIComponent(personId)}/`
@@ -5460,6 +5590,8 @@ parent.postMessage({
     }).join(", ");
     return `<div class="mf-row"><dt>${escapeHtml(label)}</dt><dd>${html}</dd></div>`;
   }
+
+  let lastMetaRenderSignature = "";
 
   function renderMeta(meta, target) {
     if (!meta) {
@@ -5496,6 +5628,20 @@ parent.postMessage({
       isSeries ? "сериал" : "фильм",
       view.movieLength ? formatDuration(view.movieLength, isSeries) : "",
     ].filter(Boolean).join(" · ");
+    const signature = JSON.stringify({
+      target: keyFor(target), title, year, poster, desc, sub, age,
+      rating: view.rating || {}, genres: view.genres || [], countries: view.countries || [],
+      directors: view.directors || [], cast: view.cast || [], people: view.people || {},
+      externalId: view.externalId || {},
+    });
+    if (signature === lastMetaRenderSignature) {
+      scheduleWatchExtras(target);
+      return;
+    }
+    lastMetaRenderSignature = signature;
+
+    const preservedPoster = el.metaPanel.querySelector(".meta-poster img");
+    const preservedLetterboxd = el.metaPanel.querySelector(".rt-lb");
 
     // Two children only — poster and body. Narrow layouts put them side by side,
     // and a fixed pair survives the fact that ratings/description/credits are each
@@ -5513,7 +5659,12 @@ parent.postMessage({
       if (kp) body += kpUrl
         ? `<a class="rt kp-rating-link" href="${escapeAttr(kpUrl)}" target="_blank" rel="noopener noreferrer"><b>${escapeHtml(Number(kp).toFixed(1))}</b><span>Кинопоиск</span></a>`
         : `<div class="rt"><b>${escapeHtml(Number(kp).toFixed(1))}</b><span>Кинопоиск</span></div>`;
-      if (imdb) body += `<div class="rt"><b>${escapeHtml(Number(imdb).toFixed(1))}</b><span>IMDb</span></div>`;
+      if (imdb) {
+        const imdbUrl = imdbTitleUrl(view.externalId?.imdb);
+        body += imdbUrl
+          ? `<a class="rt rt-imdb kp-rating-link" href="${escapeAttr(imdbUrl)}" target="_blank" rel="noopener noreferrer"><b>${escapeHtml(Number(imdb).toFixed(1))}</b><span>IMDb</span></a>`
+          : `<div class="rt rt-imdb"><b>${escapeHtml(Number(imdb).toFixed(1))}</b><span>IMDb</span></div>`;
+      }
       body += `</div>`;
     }
     if (desc) {
@@ -5536,6 +5687,14 @@ parent.postMessage({
       ? `<div class="meta-poster"><img src="${escapeAttr(poster)}" alt=""></div>`
       : "";
     el.metaPanel.innerHTML = `${posterHtml}<div class="meta-body">${body}</div>`;
+    const nextPoster = el.metaPanel.querySelector(".meta-poster img");
+    if (preservedPoster && nextPoster && preservedPoster.getAttribute("src") === nextPoster.getAttribute("src")) {
+      nextPoster.replaceWith(preservedPoster);
+    }
+    const ratingsHost = el.metaPanel.querySelector(".meta-ratings");
+    if (preservedLetterboxd && ratingsHost && !ratingsHost.querySelector(".rt-lb")) {
+      ratingsHost.appendChild(preservedLetterboxd);
+    }
     const posterHost = el.metaPanel.querySelector(".meta-poster");
     if (posterHost) {
       addCardBookmark(posterHost, target, {
@@ -5564,6 +5723,20 @@ parent.postMessage({
     scheduleWatchExtras(target);
   }
 
+  function linkImdbBadge(imdbId, target, token) {
+    if (!imdbTitleUrl(imdbId) || isStale(token) || !state.currentTarget) return;
+    if (keyFor(state.currentTarget) !== keyFor(target)) return;
+    const imdbNode = el.metaPanel.querySelector(".rt-imdb");
+    if (!imdbNode || imdbNode.tagName === "A") return;
+    const link = document.createElement("a");
+    link.className = `${imdbNode.className} kp-rating-link`;
+    link.href = imdbTitleUrl(imdbId);
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.innerHTML = imdbNode.innerHTML;
+    imdbNode.replaceWith(link);
+  }
+
   // Appended after the panel is already on screen: the score is a network hop
   // and must never hold the sidebar back. Rendered on Letterboxd's own 0-5
   // scale — rescaling it to look like Кинопоиск would just misquote the source.
@@ -5573,6 +5746,7 @@ parent.postMessage({
     letterboxdImdbId(meta)
       .then(async (imdbId) => {
         if (!imdbId || isStale(token)) return null;
+        linkImdbBadge(imdbId, target, token);
         const rating = await letterboxdRating(imdbId);
         return rating ? { ...rating, imdb: imdbId } : null;
       })
@@ -5580,7 +5754,11 @@ parent.postMessage({
         if (!rating || isStale(token) || !state.currentTarget) return;
         if (keyFor(state.currentTarget) !== keyFor(target)) return;
         const host = el.metaPanel.querySelector(".meta-ratings");
-        if (!host || host.querySelector(".rt-lb")) return;
+        if (!host) return;
+        if (host.querySelector(".rt-lb")) {
+          renderReviews(rating.imdb, rating.slug, token).catch((error) => log("reviews-warn", error.message));
+          return;
+        }
         const href = rating.slug ? `https://letterboxd.com/film/${encodeURIComponent(rating.slug)}/` : "";
         const node = document.createElement(href ? "a" : "div");
         node.className = href ? "rt rt-lb kp-rating-link" : "rt rt-lb";
@@ -5704,18 +5882,18 @@ parent.postMessage({
 
   async function renderSimilarRow(kpId, token) {
     if (!el.similarSection || !el.similarRow) return;
-    hideSimilarRow();
-    hideReviews();
     if (!/^\d+$/.test(kpId)) return;
     const items = await window.alphyForYou?.similarRow?.(kpId);
     if (!items?.length || isStale(token)) return;
-    paintSimilarRow(items, token);
 
-    // Paint immediately from the similars payload, then fill year/type/ratings
-    // with one optional batch request for the whole strip. There is no per-card
-    // request fanout and a warm row does not touch the network at all.
-    const enriched = await window.alphyForYou?.enrichSimilarRow?.(kpId);
-    if (enriched?.length && !isStale(token)) paintSimilarRow(enriched, token);
+    // Give the one batch enrichment a short head start and paint exactly once.
+    // If it is cold or slow, the already useful cards win after 220 ms; the
+    // request still fills cache for next time but never replaces a visible row.
+    const enrichTask = window.alphyForYou?.enrichSimilarRow?.(kpId);
+    const enriched = enrichTask
+      ? await settleWithin(Promise.resolve(enrichTask).catch(() => null), 220)
+      : null;
+    if (!isStale(token)) paintSimilarRow(enriched?.length ? enriched : items, token);
   }
 
   function paintSimilarRow(items, token) {
@@ -5774,9 +5952,12 @@ parent.postMessage({
   function hideReviews() {
     el.reviewsSection?.classList.add("hidden");
     el.reviewsList?.replaceChildren();
+    if (el.reviewsLink) {
+      el.reviewsLink.removeAttribute("href");
+      el.reviewsLink.removeAttribute("target");
+      el.reviewsLink.removeAttribute("rel");
+    }
   }
-
-  const STARS = (score) => "★".repeat(Math.floor(score)) + (score % 1 >= 0.5 ? "½" : "");
 
   // Text arrives already stripped of markup and control characters by the
   // resolver, but it is still someone's prose from the open internet, so it only
@@ -5793,11 +5974,10 @@ parent.postMessage({
       top.appendChild(author);
     }
     if (item.r > 0) {
-      const stars = document.createElement("span");
-      stars.className = "review-stars";
-      stars.textContent = STARS(item.r);
-      stars.title = `${item.r} из 5`;
-      top.appendChild(stars);
+      const score = document.createElement("span");
+      score.className = "review-score";
+      score.textContent = `${Number(item.r).toFixed(Number(item.r) % 1 ? 1 : 0)}/5`;
+      top.appendChild(score);
     }
     if (top.childNodes.length) row.appendChild(top);
 
@@ -5835,19 +6015,11 @@ parent.postMessage({
     const frag = document.createDocumentFragment();
     for (const item of list) frag.appendChild(renderReview(item));
     el.reviewsList.replaceChildren(frag);
-    const note = document.createElement("li");
-    note.className = "reviews-note";
-    if (slug) {
-      const link = document.createElement("a");
-      link.href = `https://letterboxd.com/film/${encodeURIComponent(slug)}/reviews/by/activity/`;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.textContent = "Все отзывы на Letterboxd";
-      note.append("Популярные отзывы с Letterboxd, на английском · ", link);
-    } else {
-      note.textContent = "Популярные отзывы с Letterboxd, на английском";
+    if (slug && el.reviewsLink) {
+      el.reviewsLink.href = `https://letterboxd.com/film/${encodeURIComponent(slug)}/reviews/by/activity/`;
+      el.reviewsLink.target = "_blank";
+      el.reviewsLink.rel = "noopener noreferrer";
     }
-    el.reviewsList.appendChild(note);
     el.reviewsSection.classList.remove("hidden");
   }
 
@@ -7582,28 +7754,67 @@ addEventListener('message', async (event) => {
     return pending;
   }
 
-  async function prepareRecommendation(item) {
-    if (!item?.target?.kind) return;
-    let target = null;
-    try { target = await resolveRecommendationTarget(item); }
-    catch (error) { log("newdeaf-recommend-warn", error.message); }
-    return prepareTarget(target || item.target, item);
+  function recommendationLiftwHints(item) {
+    return {
+      title: movieTitle(item) || item?.title || "",
+      originalTitle: item?.originalTitle || item?.alternativeName || item?.enName || "",
+      year: item?.year || null,
+      isSeries: !!item?.isSeries,
+    };
   }
 
-  async function openRecommendationItem(item) {
+  // Newdeaf, Collaps and LiftW are all reached from the viewer's browser. For a
+  // recommendation click they can therefore race without spending shared
+  // resolver capacity; the first verified source wins and every slower result
+  // merely warms its own cache for a later retry.
+  async function resolveRecommendationPlaybackSource(item, selection) {
+    const kpId = String(item?.kpId || item?.target?.kpId || "");
+    if (!/^\d+$/.test(kpId)) return null;
+    const ort = resolveRecommendationTarget(item)
+      .then((target) => target ? { kind: "ort", target } : null)
+      .catch((error) => { log("newdeaf-recommend-warn", error.message); return null; });
+    const collaps = (collapsPreviewOnCooldown()
+      ? Promise.resolve(null)
+      : probeCollapsMovie({ ...item, kpId, selection, rank: 0 }))
+      .then((hit) => hit ? { kind: "clps", hit } : null)
+      .catch((error) => {
+        if (shouldCooldownCollapsPreview(error)) setCollapsPreviewCooldown(error);
+        log("collaps-recommend-warn", error.message);
+        return null;
+      });
+    const liftw = findLiftwByKpId(kpId, recommendationLiftwHints(item))
+      .then((liftId) => liftId ? { kind: "lift", liftId } : null)
+      .catch((error) => { log("liftw-recommend-warn", error.message); return null; });
+    return firstAvailable([ort, collaps, liftw]);
+  }
+
+  async function prepareRecommendation(item) {
+    if (!item?.target?.kind) return;
+    const source = await resolveRecommendationPlaybackSource(item, item?.selection);
+    if (source?.kind === "ort") return prepareTarget(source.target, item);
+    if (source?.kind === "clps") return prepareTarget({ kind: "clps", kpId: item.target.kpId }, item);
+    if (source?.kind === "lift") {
+      warmLiftwConnections();
+      return resolveLiftwTitle(source.liftId);
+    }
+    return null;
+  }
+
+  function openRecommendationItem(item) {
     if (!item?.target?.kind || item.target.kind !== "kp") return openCuratedItem(item);
-    const openToken = ++recommendationOpenToken;
-    const routeToken = resolveToken;
-    let target = null;
-    try { target = await resolveRecommendationTarget(item); }
-    catch (error) { log("newdeaf-recommend-warn", error.message); }
-    if (openToken !== recommendationOpenToken || isStale(routeToken)) return;
     const kpId = String(item.kpId || item.target.kpId || "");
-    return openCuratedItem({
-      ...item,
-      kpId: /^\d+$/.test(kpId) ? kpId : item.kpId,
-      target: target || item.target,
-    });
+    if (/^\d+$/.test(kpId)) {
+      recommendationContextByKp.set(kpId, { ...item, kpId });
+      if (recommendationContextByKp.size > 40) {
+        recommendationContextByKp.delete(recommendationContextByKp.keys().next().value);
+      }
+    }
+    // Pointer-down normally started this already. Calling it again is free: all
+    // three provider helpers dedupe their in-flight work. Navigation itself is
+    // synchronous, so the old page disappears immediately instead of waiting on
+    // Newdeaf before even showing the new poster/player shell.
+    prepareRecommendation(item).catch((error) => log("recommendation-open-warm-warn", error.message));
+    return openCuratedItem({ ...item, kpId: /^\d+$/.test(kpId) ? kpId : item.kpId });
   }
 
   async function prepareTarget(target, details = {}) {
@@ -7693,8 +7904,8 @@ addEventListener('message', async (event) => {
     if (!item?.target?.kind) return;
     armIntent(card, (speculative) => {
       if (speculative) {
-        if (speculativeNewdeafRecommendationBudget <= 0) return Promise.resolve();
-        speculativeNewdeafRecommendationBudget -= 1;
+        if (speculativeRecommendationBudget <= 0) return Promise.resolve();
+        speculativeRecommendationBudget -= 1;
       }
       return prepareRecommendation(item);
     }, "recommendation-prefetch-warn");

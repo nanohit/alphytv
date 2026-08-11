@@ -183,7 +183,7 @@ test("scoreCandidates: excludes watched kpIds and watched titles", async () => {
   assert.deepEqual(JSON.parse(JSON.stringify(picked.map((p) => p.id))), ["20"]);
 });
 
-test("scoreCandidates: one seed cannot own more than 5 slots", async () => {
+test("scoreCandidates: one seed can fill a useful row but not own all 18 slots", async () => {
   const { api } = await loadForYou();
   const hot = { kpId: "1", weight: 10 };
   const other = { kpId: "2", weight: 0.2 };
@@ -193,7 +193,7 @@ test("scoreCandidates: one seed cannot own more than 5 slots", async () => {
     { seed: other, similars: [{ id: "o1", ru: "Тихий" }] },
   ], new Set(), new Set());
   const fromHot = picked.filter((p) => p.primarySeed === "1").length;
-  assert.ok(fromHot <= 5, `diversity cap holds (got ${fromHot})`);
+  assert.ok(fromHot <= 7, `diversity cap holds (got ${fromHot})`);
   assert.ok(picked.some((p) => p.id === "o1"), "weak seed still contributes");
 });
 
@@ -254,6 +254,24 @@ test("cached row paints instantly; mode off empties it", async () => {
   assert.equal(api.getItems().length, 7, "last row paints instantly before mode arrives");
   api.setMode("off");
   assert.equal(api.getItems().length, 0, "off hides the row everywhere");
+});
+
+test("one strong seed publishes a useful row instead of hiding five valid titles", async () => {
+  const storage = new Map();
+  const now = Date.now();
+  storage.set("alphy.history", JSON.stringify([
+    historyEntry({ kpId: "100", title: "Любимое", progress: 0.95, updatedAt: now }),
+  ]));
+  storage.set("alphy.bookmarks", JSON.stringify([]));
+  storage.set("alphy.foryou.sim.100", JSON.stringify({
+    v: Array.from({ length: 7 }, (_, i) => ({ id: String(200 + i), ru: `Фильм ${i}` })),
+    exp: now + 86400e3,
+  }));
+
+  const { api } = await loadForYou(storage);
+  api.setMode("frozen");
+  await api.refresh();
+  assert.equal(api.getItems().length, 7);
 });
 
 // --- «Похожее» -------------------------------------------------------------
