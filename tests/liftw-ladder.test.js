@@ -28,12 +28,13 @@ async function ladderSandbox({ manifest, fail = false } = {}) {
   ctx.run();
   await sleep(80);
   const calls = [];
-  ctx.sandbox.fetch = async (url) => {
+  const helpers = ctx.sandbox.window.alphyBridge._test;
+  helpers.setLiftwManifestFetcher(async (url) => {
     calls.push(String(url));
     if (fail) throw new Error("network down");
-    return { ok: true, status: 200, headers: { get: () => "" }, text: async () => manifest };
-  };
-  return { helpers: ctx.sandbox.window.alphyBridge._test, calls, storage: ctx.storage };
+    return manifest;
+  });
+  return { helpers, calls, storage: ctx.storage };
 }
 
 test("the top rung is the biggest frame's fattest rung, and audio is not a rung", async () => {
@@ -81,8 +82,9 @@ test("nothing is fetched when the answer cannot change", async () => {
   ctx.sandbox.MediaSource = supports(VP9, OPUS);
   ctx.run();
   await sleep(80);
-  ctx.sandbox.fetch = async () => { throw new Error("must not be called"); };
-  assert.equal((await ctx.sandbox.window.alphyBridge._test.pickLiftwLadder(SOURCES)).kind, "dash");
+  const helpers = ctx.sandbox.window.alphyBridge._test;
+  helpers.setLiftwManifestFetcher(async () => { throw new Error("must not be called"); });
+  assert.equal((await helpers.pickLiftwLadder(SOURCES)).kind, "dash");
 });
 
 test("the probe fails safe and is paid for only once", async () => {

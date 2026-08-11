@@ -27,10 +27,8 @@
   const LIFTW_SEARCH_CACHE_NS = "liftwsearch.v1";
   const LIFTW_SEARCH_URL = "https://api.liftw.ws/search";
   // Letterboxd publishes no API and sends no CORS header, so the lookup runs on
-  // Supabase Edge. Three separate free projects, 500k invocations each: the
-  // film's own IMDb id picks which one, so a title always lands on the same
-  // project and can hit its week-long edge cache, while ids being effectively
-  // random splits the load evenly. The rest of the ring is the failover order.
+  // three independently deployed Supabase Edge shards. The film's IMDb id picks
+  // its primary shard for stable cache locality; the rest form its failover ring.
   const LETTERBOXD_ENDPOINTS = [
     "https://lcldjrphnkufymdhevyx.supabase.co/functions/v1/letterboxd",
     "https://icmjgvlsyfqwyewvsuje.supabase.co/functions/v1/letterboxd",
@@ -52,6 +50,7 @@
   const LIFTW_CDN_ORIGINS = [
     "https://hye1eaipby4w.interkh.com",
     "https://ghzbfjzbazc.interkh.com",
+    "https://x-bc.interkh.com",
   ];
   // v1 may contain fuzzy Batman->Lego Batman metadata written by older builds.
   const ND_ENRICHED_CACHE_NS = "ndenriched.v2";
@@ -246,7 +245,9 @@
   const zenithParsedCache = new Map();
   const zenithParsedInflight = new Map();
   const liftwTitleInflight = new Map();
-  const liftwWarmOrigins = new Set();
+  let liftwMediaBridge = null;
+  let liftwOpaqueSchemeRegistered = false;
+  let liftwManifestFetcher = null;
   const externalScriptPromises = new Map();
   const preparedTargets = new Set();
   // Hover prefetch budget. This used to be a plain countdown that, once spent,
@@ -1485,11 +1486,10 @@
   // so parseZenithEmbed/normalizeSerialSeasons read it verbatim and the entire
   // serial + Shaka stack below is reused rather than duplicated.
   //
-  // Privacy: the control plane (api.liftw.ws/info, embed.liftw.ws/embed) runs
-  // inside the opaque sandbox and fails closed, so LiftW's own servers only ever
-  // see Origin: null with no referrer — never alphy.tv. Media lives on
-  // *.interkh.com, a third-party CDN that reflects whatever Origin it is given,
-  // and is played natively like every other source.
+  // Privacy: both the control plane and media plane run through opaque browser
+  // sandboxes and fail closed. The CDN still talks directly to the viewer's IP,
+  // but receives Origin: null and no referrer instead of alphy.tv. A persistent
+  // media sandbox transfers ArrayBuffers to Shaka without involving our backend.
   //
   // Latency: one /info + one embed fetch carry EVERY season/episode with signed
   // CDN URLs valid ~10 days. A whole series therefore costs two requests, and
@@ -1522,15 +1522,291 @@
   }
 
   function warmLiftwConnections() {
-    for (const origin of LIFTW_CDN_ORIGINS) {
-      if (liftwWarmOrigins.has(origin)) continue;
-      liftwWarmOrigins.add(origin);
-      const link = document.createElement("link");
-      link.rel = "preconnect";
-      link.href = origin;
-      link.crossOrigin = "anonymous";
-      document.head.appendChild(link);
+    // Preconnects must live in the opaque document too. A top-level preconnect
+    // is not safely reusable by a null-origin CORS request and may itself expose
+    // alphy.tv while warming the connection.
+    liftwMediaBroker();
+  }
+
+  const LIFTW_OPAQUE_SCHEME = "alphy-liftw:";
+
+  function isLiftwMediaUrl(value) {
+    try {
+      const url = new URL(String(value || ""));
+      return url.protocol === "https:" &&
+        url.hostname.endsWith(".interkh.com") &&
+        url.hostname.length > ".interkh.com".length;
+    } catch {
+      return false;
     }
+  }
+
+  function liftwOpaqueUri(value) {
+    if (!isLiftwMediaUrl(value)) throw new Error("LiftW: blocked media URL");
+    return `${LIFTW_OPAQUE_SCHEME}${encodeURIComponent(String(value))}`;
+  }
+
+  function liftwUriFromOpaque(value) {
+    const raw = String(value || "");
+    if (!raw.startsWith(LIFTW_OPAQUE_SCHEME)) throw new Error("LiftW: invalid opaque URI");
+    const decoded = decodeURIComponent(raw.slice(LIFTW_OPAQUE_SCHEME.length));
+    if (!isLiftwMediaUrl(decoded)) throw new Error("LiftW: blocked opaque media URL");
+    return decoded;
+  }
+
+  function liftwMediaBroker() {
+    if (liftwMediaBridge) return liftwMediaBridge;
+
+    const iframe = document.createElement("iframe");
+    iframe.sandbox = "allow-scripts";
+    iframe.referrerPolicy = "no-referrer";
+    iframe.setAttribute("aria-hidden", "true");
+    iframe.style.cssText = "position:fixed;width:1px;height:1px;left:-9999px;top:-9999px;border:0;pointer-events:none";
+
+    const pending = new Map();
+    let sequence = 0;
+    let readyResolve;
+    let readyReject;
+    const ready = new Promise((resolve, reject) => {
+      readyResolve = resolve;
+      readyReject = reject;
+    });
+    const readyTimer = setTimeout(() => readyReject(new Error("LiftW media sandbox timeout")), 8000);
+
+    const finish = (id, error, value) => {
+      const job = pending.get(id);
+      if (!job) return;
+      pending.delete(id);
+      clearTimeout(job.timer);
+      if (error) job.reject(error);
+      else job.resolve(value);
+    };
+
+    const onMessage = (event) => {
+      if (event.source !== iframe.contentWindow || event.origin !== "null") return;
+      const data = event.data || {};
+      if (!data.alphyLiftwMedia) return;
+      if (data.ready) {
+        clearTimeout(readyTimer);
+        if (data.requestOrigin !== "null" || data.documentReferrer) {
+          readyReject(new Error("LiftW media sandbox privacy check failed"));
+        } else {
+          readyResolve();
+        }
+        return;
+      }
+      const job = pending.get(data.id);
+      if (!job) return;
+      if (data.phase === "headers") {
+        job.headers = data.headers || {};
+        job.status = Number(data.status) || 0;
+        job.responseUrl = data.responseUrl || job.url;
+        try { job.headersReceived(job.headers); } catch { /* Shaka callback is optional */ }
+        return;
+      }
+      if (data.phase === "progress") {
+        const bytes = Math.max(0, Number(data.bytes) || 0);
+        job.bytesReported += bytes;
+        try {
+          job.progressUpdated(
+            Math.max(1, Number(data.elapsedMs) || 1),
+            bytes,
+            Math.max(0, Number(data.remaining) || 0),
+          );
+        } catch { /* optional */ }
+        return;
+      }
+      if (!data.ok) {
+        finish(data.id, new Error(data.error || `LiftW media fetch ${data.status || "failed"}`));
+        return;
+      }
+      const bytes = data.buffer?.byteLength || 0;
+      if (bytes > job.bytesReported) {
+        try {
+          job.progressUpdated(Date.now() - job.startedAt, bytes - job.bytesReported, 0);
+        } catch { /* optional */ }
+      }
+      finish(data.id, null, {
+        uri: data.responseUrl || job.responseUrl || job.url,
+        originalUri: job.url,
+        data: data.buffer,
+        status: Number(data.status) || job.status || 200,
+        headers: data.headers || job.headers || {},
+        timeMs: Date.now() - job.startedAt,
+        fromCache: false,
+      });
+    };
+    window.addEventListener("message", onMessage);
+
+    const request = (url, requestConfig = {}, progressUpdated = () => {}, headersReceived = () => {}) => {
+      if (!isLiftwMediaUrl(url)) {
+        return { promise: Promise.reject(new Error("LiftW: blocked media URL")), abort: () => Promise.resolve() };
+      }
+      const id = `liftw-${Date.now()}-${sequence += 1}`;
+      let settled = false;
+      let rejectJob = () => {};
+      const promise = new Promise((resolve, reject) => {
+        rejectJob = reject;
+        const timer = setTimeout(() => {
+          iframe.contentWindow?.postMessage({ alphyLiftwMedia: true, cancel: true, id }, "*");
+          finish(id, new Error(`LiftW media timeout for ${url}`));
+        }, 60000);
+        pending.set(id, {
+          url,
+          resolve: (value) => { settled = true; resolve(value); },
+          reject: (error) => { settled = true; reject(error); },
+          timer,
+          startedAt: Date.now(),
+          progressUpdated,
+          headersReceived,
+          headers: {},
+          status: 0,
+          responseUrl: url,
+          bytesReported: 0,
+        });
+        ready.then(() => {
+          if (!pending.has(id)) return;
+          const range = Object.entries(requestConfig.headers || {})
+            .find(([name]) => name.toLowerCase() === "range")?.[1] || "";
+          iframe.contentWindow?.postMessage({ alphyLiftwMedia: true, id, url, range }, "*");
+        }).catch((error) => finish(id, error));
+      });
+      return {
+        promise,
+        abort: () => {
+          if (settled || !pending.has(id)) return Promise.resolve();
+          iframe.contentWindow?.postMessage({ alphyLiftwMedia: true, cancel: true, id }, "*");
+          finish(id, new Error("LiftW media request aborted"));
+          // Keep a direct reject reference only for the rare case where the job
+          // vanished between the checks above.
+          if (!settled) rejectJob(new Error("LiftW media request aborted"));
+          return Promise.resolve();
+        },
+      };
+    };
+
+    const preconnects = LIFTW_CDN_ORIGINS
+      .map((origin) => `<link rel="preconnect" href="${origin}" crossorigin>`)
+      .join("");
+    iframe.srcdoc = `<!doctype html><meta charset="utf-8">${preconnects}<script>
+const controllers = new Map();
+const allowed = (value) => {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname.endsWith('.interkh.com') && url.hostname.length > 12;
+  } catch { return false; }
+};
+addEventListener('message', async (event) => {
+  const data = event.data || {};
+  if (event.source !== parent || !data.alphyLiftwMedia) return;
+  if (data.cancel) { controllers.get(data.id)?.abort(); return; }
+  if (!allowed(data.url)) return;
+  const controller = new AbortController();
+  controllers.set(data.id, controller);
+  try {
+    const headers = data.range ? { Range: data.range } : {};
+    const response = await fetch(data.url, {
+      cache: 'default', credentials: 'omit', mode: 'cors', referrerPolicy: 'no-referrer',
+      headers, signal: controller.signal,
+    });
+    if (!allowed(response.url)) throw new Error('Blocked media redirect');
+    const responseHeaders = {};
+    response.headers.forEach((value, name) => { responseHeaders[name.toLowerCase()] = value; });
+    parent.postMessage({
+      alphyLiftwMedia: true, id: data.id, phase: 'headers', status: response.status,
+      responseUrl: response.url, headers: responseHeaders,
+    }, '*');
+    if (!response.ok) throw new Error('Fetch ' + response.status);
+    const declaredSize = Number(response.headers.get('content-length')) || 0;
+    let buffer;
+    if (response.body && typeof response.body.getReader === 'function') {
+      const reader = response.body.getReader();
+      const chunks = [];
+      let received = 0;
+      let reported = 0;
+      let reportedAt = performance.now();
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        chunks.push(part.value);
+        received += part.value.byteLength;
+        const now = performance.now();
+        if (now - reportedAt >= 250) {
+          parent.postMessage({
+            alphyLiftwMedia: true, id: data.id, phase: 'progress',
+            elapsedMs: now - reportedAt, bytes: received - reported,
+            remaining: Math.max(0, declaredSize - received),
+          }, '*');
+          reported = received;
+          reportedAt = now;
+        }
+      }
+      if (received > reported) {
+        parent.postMessage({
+          alphyLiftwMedia: true, id: data.id, phase: 'progress',
+          elapsedMs: performance.now() - reportedAt, bytes: received - reported,
+          remaining: 0,
+        }, '*');
+      }
+      const joined = new Uint8Array(received);
+      let offset = 0;
+      for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
+      buffer = joined.buffer;
+    } else {
+      buffer = await response.arrayBuffer();
+      parent.postMessage({
+        alphyLiftwMedia: true, id: data.id, phase: 'progress',
+        elapsedMs: 1, bytes: buffer.byteLength, remaining: 0,
+      }, '*');
+    }
+    parent.postMessage({
+      alphyLiftwMedia: true, id: data.id, ok: true, status: response.status,
+      responseUrl: response.url, headers: responseHeaders, buffer,
+    }, '*', [buffer]);
+  } catch (error) {
+    parent.postMessage({
+      alphyLiftwMedia: true, id: data.id, ok: false,
+      error: String(error && error.message || error),
+    }, '*');
+  } finally { controllers.delete(data.id); }
+});
+parent.postMessage({
+  alphyLiftwMedia: true, ready: true,
+  requestOrigin: location.origin, documentReferrer: document.referrer,
+}, '*');
+<\/script>`;
+    document.body.appendChild(iframe);
+
+    liftwMediaBridge = { ready, request, iframe };
+    return liftwMediaBridge;
+  }
+
+  function installLiftwOpaqueNetworking(player) {
+    if (!liftwOpaqueSchemeRegistered) {
+      shaka.net.NetworkingEngine.registerScheme(
+        "alphy-liftw",
+        (uri, request, requestType, progressUpdated, headersReceived) => {
+          const url = liftwUriFromOpaque(uri);
+          const operation = liftwMediaBroker().request(url, request, progressUpdated, headersReceived);
+          return new shaka.util.AbortableOperation(operation.promise, operation.abort);
+        },
+        shaka.net.NetworkingEngine.PluginPriority.APPLICATION,
+        true,
+      );
+      liftwOpaqueSchemeRegistered = true;
+    }
+    player.getNetworkingEngine().registerRequestFilter((_type, request) => {
+      request.uris = request.uris.map((uri) => (
+        isLiftwMediaUrl(uri) ? liftwOpaqueUri(uri) : uri
+      ));
+    });
+  }
+
+  async function fetchLiftwMediaText(url) {
+    if (liftwManifestFetcher) return liftwManifestFetcher(url);
+    const operation = liftwMediaBroker().request(url);
+    const response = await operation.promise;
+    return new TextDecoder().decode(response.data);
   }
 
   // memory-free by design: the parse is small (sources + seasons + meta) and the
@@ -1749,6 +2025,10 @@
         clearTimeout(timer);
         if (!response.ok) throw new Error(`http ${response.status}`);
         const payload = await response.json();
+        // The function could reach neither its table nor Letterboxd. That is an
+        // operational miss, not a verdict about the film: another shard may
+        // already have the row, and this result must never enter the 7-day cache.
+        if (payload?.unreachable === true) continue;
         const rating = Number(payload?.r);
         const found = payload?.found && Number.isFinite(rating) && rating > 0 && rating <= 5;
         const value = found
@@ -1984,12 +2264,7 @@
     if (typeof cached === "boolean") return cached;
     let healthy = true;
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 6000);
-      const response = await fetch(manifestUrl, { signal: controller.signal, referrerPolicy: "no-referrer" });
-      clearTimeout(timer);
-      if (!response.ok) return true;
-      const top = topDashRepresentation(await response.text());
+      const top = topDashRepresentation(await fetchLiftwMediaText(manifestUrl));
       if (top) healthy = top.bandwidth / (top.width * top.height * top.fps) >= LIFTW_AV1_MIN_BPP;
     } catch {
       return true;
@@ -2600,6 +2875,7 @@
         title,
         sub: [details.year, details.isSeries ? "сериал" : "Newdeaf"].filter(Boolean).join(" · "),
         poster: details.poster,
+        imdb: match?.externalId?.imdb || match?.imdbId || "",
         rating: match?.rating,
         movieLength: match?.movieLength,
         isSeries: match?.isSeries,
@@ -2708,6 +2984,7 @@
       title: item.title,
       sub: [item.year, item.typeLabel, status, isTelesync ? "" : item.quality, "LFT"].filter(Boolean).join(" · "),
       poster: item.poster,
+      imdb: item.externalId?.imdb || item.imdbId || "",
       flag: isTelesync ? "TS" : "",
       rating: item.rating,
       isSeries: item.isSeries,
@@ -2751,6 +3028,7 @@
       title: details.title,
       sub: [quality, details.isSeries ? "сериал" : "фильм", "CLPS"].filter(Boolean).join(" · "),
       poster: details.poster,
+      imdb: hit.externalId?.imdb || hit.imdbId || "",
       rating: details.rating,
       movieLength: details.movieLength,
       isSeries: details.isSeries,
@@ -2777,6 +3055,7 @@
       title: details.title,
       sub: ["720p", "фильм", "RZK"].join(" · "),
       poster: details.poster,
+      imdb: hit.externalId?.imdb || hit.imdbId || "",
       rating: details.rating,
       movieLength: details.movieLength,
       isSeries: false,
@@ -4400,6 +4679,7 @@
         audioLang: opts.audioLang || savedAudioLang(histKey),
         textTracks: episode?.textTracks?.length ? episode.textTracks : parsed.textTracks,
         serial,
+        opaqueMedia: "liftw",
       });
     } catch (error) {
       // The only thing a cached parse can get wrong is a signature that rotated
@@ -4455,6 +4735,7 @@
         audioLang,
         textTracks: episode.textTracks || [],
         serial: { ...context, selection, switching: false },
+        opaqueMedia: "liftw",
       });
       if (isStale(token)) return;
       startTracking(context.histKey, target);
@@ -5447,6 +5728,8 @@
         title: entry.title,
         sub: [entry.year, entry.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · "),
         poster: entry.poster,
+        imdb: entry.externalId?.imdb || entry.imdbId || "",
+        originalTitle: entry.originalTitle || "",
         rating: entry.rating,
         movieLength: entry.movieLength,
         isSeries: entry.isSeries,
@@ -5800,6 +6083,7 @@
     const player = new shaka.Player();
     state.player = player;
     await player.attach(video);
+    if (opts.opaqueMedia === "liftw") installLiftwOpaqueNetworking(player);
     player.configure({
       streaming: {
         bufferingGoal: 20,
@@ -8590,6 +8874,9 @@ addEventListener('message', async (event) => {
       liftwMeta,
       liftwTextTracks,
       liftwTarget,
+      isLiftwMediaUrl,
+      liftwOpaqueUri,
+      liftwUriFromOpaque,
       bestLiftwSource,
       pickLiftwLadder,
       topDashRepresentation,
@@ -8611,6 +8898,7 @@ addEventListener('message', async (event) => {
       // audioNameFor joins manifest tracks to the embed's dub names, which live
       // on state; tests need to seed them.
       setAudioNames: (names) => { state.audioNames = names; },
+      setLiftwManifestFetcher: (fetcher) => { liftwManifestFetcher = fetcher; },
       parseZenithEmbed,
       normalizeSerialSeasons,
       chooseSerialSelection,

@@ -21,6 +21,8 @@
     "collaps4k:discover:status": "node scripts/collaps-discover-candidates.mjs status",
     "collaps4k:discover:run": "node scripts/collaps-discover-candidates.mjs run",
     "sync:catalog": "node scripts/sync-curated-fallback.mjs",
+    "refresh:identity": "npm run sync:catalog && node scripts/build-imdb-map.mjs",
+    "check:identity": "node scripts/build-imdb-map.mjs --check",
     "test": "node --test tests/*.test.js",
     "deploy": "npx vercel@latest --prod"
   }

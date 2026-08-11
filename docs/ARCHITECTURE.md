@@ -6,9 +6,10 @@ Keep the user-visible flow simple while avoiding a bandwidth backend:
 
 ```text
 input title/Newdeaf URL
-  -> Newdeaf page probe
+  -> Kinopoisk + Newdeaf + LiftW search
   -> Ortified Cleanroom if available
   -> Gencit/Opravar custom player if available
+  -> native LiftW source when selected or identity-confirmed
   -> Zona/Zenith fallback otherwise
   -> browser-side playback
 ```
@@ -123,6 +124,25 @@ The browser then loads HLS and VTT directly in Shaka. Because the provider
 player bundle is never executed, its `adsConfig`/VAST preroll code is never
 initialized.
 
+### LiftW
+
+LiftW search, `/info`, and signed embed parsing all run in the viewer's browser.
+The control-plane requests use a null-origin sandbox and never fall back to a
+top-level fetch. `/info` supplies stable metadata and the signed embed URL; the
+embed supplies every movie or episode ladder, dub label, and subtitle URL.
+
+The media plane is also browser-only, but it does not run in the top document.
+One persistent `sandbox="allow-scripts"` iframe fetches only
+`https://*.interkh.com` resources and transfers their `ArrayBuffer`s to a custom
+Shaka scheme. Shaka still owns manifests, ABR, retries, track selection, and
+subtitles. The CDN sees the viewer IP plus `Origin: null` and no referrer;
+Alphy's Deno and Vercel deployments never carry manifests, segments, or VTT.
+The path fails closed if a URL or redirect leaves the allowlisted CDN suffix.
+
+AV1 ladder health probes use the same opaque transport. This matters because a
+seemingly harmless direct manifest probe would otherwise reveal `alphy.tv`
+before playback even started.
+
 ### Zona / Zenith
 
 Zona pages are not directly usable from the frontend:
@@ -224,6 +244,56 @@ Provider media URLs are generally avoided in curated targets because they
 expire. SOAP movies are the explicit exception: `soap-movies.json` ships
 rotating HLS masters and must be refreshed when they go stale. No video bytes
 go through Vercel, Blob, or Deno.
+
+## Identity, Ratings, and Recommendations
+
+Film identity is a separate non-metered layer. `identity.js` resolves an IMDb id
+in this order:
+
+1. an id already carried by the source;
+2. the build-time `imdb-map.json` for the finite curated catalog;
+3. the browser's long-lived identity cache;
+4. Cinemeta by exact title, year, and film/series type.
+
+Film and series keys are distinct even when title and year match. No identity
+path calls PoiskKino or Kinopoisk Unofficial, so an exhausted discovery quota
+cannot remove already-known IMDb or Letterboxd ratings.
+
+The map build is incremental and its `--check` mode is offline. Existing ids are
+reused; Cinemeta is queried only for newly curated identities. Rare titles that
+Cinemeta cannot find by the Russian catalog name live in the small reviewed
+`imdb-overrides.json`, not in runtime code. A daily GitHub Action snapshots the
+public live catalog, fills only new ids, verifies exact coverage, and commits a
+new fallback/map revision. Between snapshots, the browser's Cinemeta fallback
+still covers newly added cards immediately.
+
+Letterboxd is enrichment, not identity and not a recommendation source. The
+browser sends only IMDb ids to one of three deterministic Supabase shards.
+Catalog/search batches are table reads only: they never scrape unknown films.
+Opening a single film may warm exactly that one missing row and its bounded
+review sample. There is no public force-refresh switch. This caps a cold grid at
+three database reads instead of turning it into up to 36 upstream page loads.
+
+`Для вас` synthesizes a row locally from Kinopoisk's strong per-title
+`/similars` lists. The six strongest watched/bookmarked seeds are blended with
+weighted reciprocal-rank fusion, a small consensus bonus, and a per-seed
+diversity cap. A zero-second open is an exclusion, not a positive taste signal;
+an explicit bookmark remains positive. Candidate cards render immediately from
+the similars payload and local caches, then all missing display metadata is
+filled by at most one PoiskKino batch call. Similars and metadata are cached for
+30 days.
+
+Letterboxd's six title-only recommendations are deliberately not used here.
+They would require a separate identity lookup for every card before they become
+playable, while Kinopoisk's single response already carries stable ids, Russian
+names, and posters. Their nominally free input is therefore more expensive at
+the usable-card boundary.
+
+The Edge source and schema are kept under `supabase/functions/letterboxd/`.
+Deployment is the manual `Deploy Letterboxd shards` GitHub workflow, using one
+repository secret named `SUPABASE_ACCESS_TOKEN` with access to all three
+projects. This keeps the deployed function reproducible instead of editing an
+unversioned dashboard bundle.
 
 ## Backend Scope
 

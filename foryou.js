@@ -33,10 +33,10 @@
   const LOOKUP_TTL = 30 * 24 * 3600e3;
   const NEGATIVE_TTL = 6 * 3600e3;
 
-  const MAX_SEEDS = 12;
-  const MAX_SIM_FETCH_PER_RUN = 10;
+  const MAX_SEEDS = 6;
+  const MAX_SIM_FETCH_PER_RUN = 6;
   const MAX_META_BATCH_SIZE = 18;
-  const MAX_LOOKUP_PER_RUN = 5;
+  const MAX_LOOKUP_PER_RUN = 3;
   // The pool is ~500 calls/day per key of real capacity. The cap is the safety
   // rail, not the target: the pipeline is cache-first, so a normal day spends a
   // handful. It now also covers «Похожее» (≤1 call per newly opened title) and
@@ -374,8 +374,12 @@
     const progress = Number(entry.progress) || 0;
     if (progress >= 0.85) return 1;
     if (progress >= 0.4) return 0.85;
-    if (progress >= 0.08) return 0.6;
-    return 0.4;
+    if (progress >= 0.15) return 0.7;
+    if (progress >= 0.05 || Number(entry.position) >= 300) return 0.55;
+    if (progress >= 0.015 || Number(entry.position) >= 90) return 0.25;
+    // recordOpen writes history before playback begins. Treating that zero-second
+    // entry as taste made an accidental click outrank an older completed film.
+    return 0;
   }
 
   function entryKpId(entry) {
@@ -415,9 +419,22 @@
     };
 
     for (const entry of history) {
-      let weight = recencyWeight(entry.updatedAt, 45) * engagementWeight(entry);
-      if (bookmarkKeys.has(entry.key)) weight *= 1.15;
-      consider(entry, weight);
+      const engagement = engagementWeight(entry);
+      const bookmarked = bookmarkKeys.has(entry.key);
+      if (engagement > 0) {
+        let weight = recencyWeight(entry.updatedAt, 45) * engagement;
+        if (bookmarked) weight *= 1.15;
+        consider(entry, weight);
+      } else if (bookmarked) {
+        // A bookmark is an explicit positive signal even when playback never
+        // started. Preserve it when the same title also has a zero-second entry.
+        consider(entry, 0.5 * recencyWeight(entry.addedAt || entry.updatedAt, 90));
+      } else {
+        const title = normTitle(entry.title);
+        if (title) excludeTitles.add(title);
+        const kpId = entryKpId(entry);
+        if (kpId) excludeKp.add(kpId);
+      }
     }
     const historyKeys = new Set(history.map((h) => h.key));
     for (const entry of bookmarks) {
@@ -533,6 +550,10 @@
         : null,
       rating,
       poster: film?.poster || film?.posterUrl || film?.posterUrlPreview || "",
+      externalId: {
+        imdb: film?.externalId?.imdb || film?.externalIds?.imdb || film?.imdbId || "",
+        tmdb: film?.externalId?.tmdb || film?.externalIds?.tmdb || film?.tmdbId || "",
+      },
     };
   }
 
@@ -575,17 +596,16 @@
   }
 
   // --- scoring ---------------------------------------------------------------
-  // Every seed "votes" for its similars. A vote is worth
-  //   seedWeight × 1/(1 + rank×0.12)
-  // and candidates named by several seeds get a superlinear intersection boost —
-  // that is what turns 10 individual lists into taste-of-the-whole-history.
+  // Weighted reciprocal-rank fusion keeps each title's already-good ordering
+  // meaningful. Consensus still helps, but a generic film near the tail of
+  // several lists must not beat the first recommendation of a strong seed.
   function scoreCandidates(seedSimilars, excludeKp, excludeTitles) {
     const candidates = new Map();
     for (const { seed, similars } of seedSimilars) {
       similars.forEach((candidate, index) => {
         if (excludeKp.has(candidate.id)) return;
         if (excludeTitles.has(normTitle(candidate.ru))) return;
-        const contribution = seed.weight / (1 + index * 0.12);
+        const contribution = seed.weight / (3 + index);
         let entry = candidates.get(candidate.id);
         if (!entry) {
           entry = { ...candidate, score: 0, hits: 0, primarySeed: seed.kpId, primaryContribution: 0 };
@@ -600,7 +620,10 @@
       });
     }
     const ranked = [...candidates.values()]
-      .map((entry) => ({ ...entry, final: entry.score * (1 + 0.25 * (entry.hits - 1)) }))
+      .map((entry) => ({
+        ...entry,
+        final: entry.score * (1 + 0.08 * Math.min(2, entry.hits - 1)),
+      }))
       .sort((a, b) => b.final - a.final);
 
     // Diversity guard: one hot seed must not own the whole row.
@@ -621,11 +644,13 @@
       id: `fy-${candidate.id}`,
       key: `kp:${candidate.id}`,
       title: candidate.ru || candidate.orig || `KP ${candidate.id}`,
+      originalTitle: candidate.orig || "",
       year: meta?.year ? String(meta.year) : "",
       poster: meta?.poster || candidate.poster || "",
       isSeries: !!meta?.isSeries,
       movieLength: Number.isFinite(Number(meta?.movieLength)) ? Number(meta.movieLength) : null,
       rating: meta?.rating || {},
+      externalId: meta?.externalId || {},
       target: { kind: "kp", kpId: candidate.id },
     };
   }

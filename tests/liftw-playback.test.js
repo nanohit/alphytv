@@ -111,8 +111,9 @@ test("only the signed iframe_uri is accepted as an embed URL", async () => {
   const info = await fixtureJson("liftw-info-movie.json");
 
   assert.equal(helpers.liftwEmbedUrl(info.iframe_uri), info.iframe_uri);
-  // The bare path answers 410 Gone in production, so nothing may synthesise it —
-  // but even if a caller tries, only embed.liftw.ws/embed/movie/<digits> passes.
+  // Resolution still uses the signed iframe_uri supplied by /info. The validator
+  // only admits the exact embed host and numeric path even if a caller tries a
+  // hand-built URL.
   assert.equal(helpers.liftwEmbedUrl("https://embed.liftw.ws/embed/movie/51984"), "https://embed.liftw.ws/embed/movie/51984");
   assert.equal(helpers.liftwEmbedUrl("http://embed.liftw.ws/embed/movie/51984"), "");
   assert.equal(helpers.liftwEmbedUrl("https://embed.liftw.ws.evil.example/embed/movie/51984"), "");
@@ -249,4 +250,41 @@ test("the LiftW control plane stays sandboxed and fail-closed", async () => {
   assert.equal(block.match(/preferSandbox:\s*true/g)?.length, 2);
   assert.equal(block.match(/directFallback:\s*false/g)?.length, 2);
   assert.doesNotMatch(block, /resolverJson|\/api\//);
+});
+
+test("the LiftW media plane accepts only interkh and is wrapped for opaque Shaka fetches", async () => {
+  const helpers = await liftwSandbox();
+  const media = "https://hye1eaipby4w.interkh.com/a/master.m3u8?t=1&x=two";
+  const wrapped = helpers.liftwOpaqueUri(media);
+
+  assert.equal(helpers.isLiftwMediaUrl(media), true);
+  assert.equal(helpers.liftwUriFromOpaque(wrapped), media);
+  assert.match(wrapped, /^alphy-liftw:/);
+  assert.equal(helpers.isLiftwMediaUrl("https://interkh.com/a.mpd"), false);
+  assert.equal(helpers.isLiftwMediaUrl("https://evilinterkh.com/a.mpd"), false);
+  assert.equal(helpers.isLiftwMediaUrl("https://hye1eaipby4w.interkh.com.evil.example/a.mpd"), false);
+  assert.throws(() => helpers.liftwOpaqueUri("https://example.com/a.mpd"), /blocked media URL/);
+  assert.throws(() => helpers.liftwUriFromOpaque("alphy-liftw:https%3A%2F%2Fexample.com%2Fa.mpd"), /blocked/);
+});
+
+test("LiftW playback opts into the opaque media scheme for movies and episode switches", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const playStart = source.indexOf("async function playLiftw");
+  const playEnd = source.indexOf("function persistSerialSelection", playStart);
+  const block = source.slice(playStart, playEnd);
+
+  assert.ok(playStart >= 0 && playEnd > playStart);
+  assert.equal(block.match(/opaqueMedia:\s*"liftw"/g)?.length, 2);
+  const probeStart = source.indexOf("async function liftwAv1IsHealthy");
+  const probeEnd = source.indexOf("function topDashRepresentation", probeStart);
+  assert.doesNotMatch(source.slice(probeStart, probeEnd), /\bfetch\s*\(/,
+    "the speculative manifest probe must not leak the top-level Origin");
+  assert.match(source, /phase:\s*'progress'/,
+    "the opaque broker must keep Shaka's stall timer and ABR estimator informed");
+
+  const brokerStart = source.indexOf("const controllers = new Map();", source.indexOf("function liftwMediaBroker"));
+  const brokerEnd = source.indexOf("<\\/script>`", brokerStart);
+  assert.ok(brokerStart >= 0 && brokerEnd > brokerStart);
+  assert.doesNotThrow(() => new Function(source.slice(brokerStart, brokerEnd)),
+    "the JavaScript embedded in the opaque media iframe must compile independently");
 });

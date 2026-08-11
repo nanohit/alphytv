@@ -19,7 +19,7 @@
 
   const MAP_URL = "/imdb-map.json";
   const CINEMETA = "https://v3-cinemeta.strem.io/catalog";
-  const STORE_PREFIX = "alphy.imdbid.v1:";
+  const STORE_PREFIX = "alphy.imdbid.v2:";
   // An id is a permanent fact, so it is kept for a season. A miss is kept far
   // more briefly: it usually means Cinemeta has no such title, but it can also
   // mean the network was having a bad minute.
@@ -36,7 +36,8 @@
     .toLowerCase().replace(/ё/g, "е")
     .replace(/[^a-zа-я0-9]+/gi, " ").trim();
 
-  const mapKey = (title, year) => `${normalizeTitle(title)}|${String(year || "").slice(0, 4)}`;
+  const mapKey = (title, year, isSeries = false) =>
+    `${normalizeTitle(title)}|${String(year || "").slice(0, 4)}|${isSeries ? "s" : "f"}`;
 
   const yearOf = (value) => {
     const year = Number(String(value ?? "").slice(0, 4));
@@ -147,18 +148,21 @@
 
   /**
    * @param {{title?:string, originalTitle?:string, year?:string|number,
-   *          isSeries?:boolean, imdb?:string}} item
+   *          isSeries?:boolean, imdb?:string, imdbId?:string,
+   *          externalId?:{imdb?:string}, externalIds?:{imdb?:string}}} item
    * @returns {Promise<string>} an IMDb id, or "" when it cannot be known
    */
   async function resolve(item) {
-    const carried = String(item?.imdb || "");
+    const carried = String(
+      item?.imdb || item?.imdbId || item?.externalId?.imdb || item?.externalIds?.imdb || "",
+    ).toLowerCase();
     if (IMDB_RE.test(carried)) return carried;
 
     const title = String(item?.title || "").trim();
     const year = yearOf(item?.year);
     if (!title || year === null) return "";
 
-    const key = mapKey(title, year);
+    const key = mapKey(title, year, !!item?.isSeries);
 
     const map = await loadStaticMap();
     const baked = map[key]?.imdb;

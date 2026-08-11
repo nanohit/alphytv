@@ -16,6 +16,7 @@ const CATALOG = {
       title: "Обсессия", year: "2025", isSeries: false,
       poster: "https://static.cdnlbox.club/poster/web/2025/obsession.webp",
       rating: { kp: 7.2 },
+      externalId: { imdb: "tt3398228", tmdb: "12345" },
       target: { kind: "ort", embedUrl: "https://api.ortified.ws/embed/movie/88776" },
     },
     {
@@ -126,4 +127,20 @@ test("findReady matches curated titles by normalized title + year + type", async
     "Добавьте сайт в закладки",
     "older catalog snapshots receive the editable banner text default",
   );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(sandbox.window.alphyCatalog.getCatalog().lists[0].items[0].externalId)),
+    { imdb: "tt3398228", tmdb: "12345" },
+    "stable external identity must survive the browser catalog normalizer",
+  );
+});
+
+test("an admin metadata refresh persists IMDb identity into the catalog item", async () => {
+  const sandbox = await loadCatalog();
+  const item = { title: "Обсессия", rating: {} };
+  sandbox.window.alphyCatalog._test.applyItemMetadata(item, {
+    kpId: "123",
+    imdbId: "tt3398228",
+    externalId: { tmdb: "456" },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(item.externalId)), { imdb: "tt3398228", tmdb: "456" });
 });

@@ -141,6 +141,17 @@
     return out;
   }
 
+  function normalizeExternalId(...values) {
+    const out = {};
+    for (const value of values) {
+      const imdb = String(value?.imdb || value?.imdbId || "").trim();
+      const tmdb = String(value?.tmdb || value?.tmdbId || "").trim();
+      if (!out.imdb && /^tt\d{5,10}$/i.test(imdb)) out.imdb = imdb.toLowerCase();
+      if (!out.tmdb && /^\d+$/.test(tmdb)) out.tmdb = tmdb;
+    }
+    return Object.keys(out).length ? out : null;
+  }
+
   function normalizeItem(value) {
     const target = normalizeTarget(value?.target);
     const title = String(value?.title || "").trim();
@@ -164,6 +175,12 @@
       target,
       cachedAt: String(value?.cachedAt || new Date().toISOString()),
     };
+    const externalId = normalizeExternalId(
+      value?.externalId,
+      value?.externalIds,
+      { imdb: value?.imdb || value?.imdbId, tmdb: value?.tmdb || value?.tmdbId },
+    );
+    if (externalId) item.externalId = externalId;
     const kpId = String(value?.kpId || "");
     if (/^\d+$/.test(kpId)) item.kpId = kpId;
     const rawAge = value?.ageRating;
@@ -535,7 +552,7 @@
     const cardYear = String(item.year || "").slice(0, 4);
     if (cardYear) card.dataset.year = cardYear;
     if (item.isSeries) card.dataset.series = "1";
-    const carried = String(item.imdb || item.imdbId || "");
+    const carried = String(item.externalId?.imdb || item.imdb || item.imdbId || "");
     if (/^tt\d{6,10}$/.test(carried)) card.dataset.imdb = carried;
 
     const media = document.createElement("div");
@@ -663,6 +680,12 @@
   // field that a previous, better answer already filled in.
   function applyItemMetadata(item, meta) {
     if (/^\d+$/.test(String(meta?.kpId || ""))) item.kpId = String(meta.kpId);
+    const externalId = normalizeExternalId(
+      meta?.externalId,
+      meta?.externalIds,
+      { imdb: meta?.imdbId, tmdb: meta?.tmdbId },
+    );
+    if (externalId) item.externalId = { ...(item.externalId || {}), ...externalId };
     if (
       meta?.ageRating !== null && meta?.ageRating !== undefined && meta?.ageRating !== "" &&
       Number.isFinite(Number(meta.ageRating))
@@ -1518,6 +1541,7 @@
     // Search/recommendations consult this to open an already-curated title
     // through its resolved list target instead of the full kp resolve flow.
     findReady,
+    _test: { normalizeItem, applyItemMetadata },
   };
 
   init();

@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { makeSandbox, sleep } from "./helpers/app-sandbox.js";
 
-// The rating lives behind three identical Supabase Edge deployments (three free
-// accounts, 500k invocations each). These tests pin the two properties that
+// The rating lives behind three identical Supabase Edge deployments. These
+// tests pin the two properties that
 // matter: a film is always asked of the same project, and one project being
 // down costs the next caller nothing.
 
@@ -88,6 +88,19 @@ test("a dead project is skipped, and stops being tried for a while", async () =>
   const before = calls.length;
   await helpers.letterboxdRating("tt7654321");
   assert.equal(calls.length - before, 1, "the cooling project must not be retried");
+});
+
+test("an upstream-unreachable answer falls through and is never cached as a miss", async () => {
+  const { helpers, calls, storage } = await boot({
+    handler: (_url, _opts, number) => (
+      number === 1
+        ? ok({ imdb: "tt0111161", found: false, unreachable: true })
+        : ok({ imdb: "tt0111161", found: true, slug: "shawshank", r: 4.6, n: 10 })
+    ),
+  });
+  assert.equal((await helpers.letterboxdRating("tt0111161"))?.r, 4.6);
+  assert.equal(calls.length, 2, "the next shard should get a chance to answer");
+  assert.equal(JSON.parse(storage.get("alphy.cache.letterboxd.v1:tt0111161")).v.r, 4.6);
 });
 
 test("nothing but an IMDb id ever reaches the network", async () => {

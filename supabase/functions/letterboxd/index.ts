@@ -22,9 +22,6 @@ const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 // simply is not on Letterboxd yet.
 const FRESH_HIT_MS = 30 * 24 * 3600e3;
 const FRESH_MISS_MS = 7 * 24 * 3600e3;
-// How many unknown films one batch may scrape. Bounds the wall clock of a single
-// request and stops a crafted query turning into a crawl.
-const BATCH_FETCH_LIMIT = 12;
 // The film page already carries its popular reviews, so these cost no extra
 // request upstream — the same document the rating comes from. Only a handful are
 // kept: they are read as a taste of the reception, not as a comment section.
@@ -210,32 +207,33 @@ Deno.serve(async (req)=>{
   if (req.method === "OPTIONS") return new Response("ok", {
     headers: CORS
   });
+  if (req.method !== "GET") return json({ error: "method not allowed" }, 405);
   const url = new URL(req.url);
   const raw = url.searchParams.get("imdb")?.trim() ?? "";
-  const force = url.searchParams.get("refresh") === "1";
-  // Only the watch page asks for these, one film at a time.
-  const withReviews = url.searchParams.get("reviews") === "1";
   // A caller asking for a batch gets the map shape even when it happens to want
   // exactly one film. Inferring this from a comma made a shard that drew a
   // single id answer in the other shape, and the grid quietly painted nothing.
   const batch = url.searchParams.get("mode") === "batch" || raw.includes(",");
+  // Only the watch page asks for these, one film at a time. A batch is a cache
+  // lookup by contract and cannot be turned into a reviews scrape by query flags.
+  const withReviews = !batch && url.searchParams.get("reviews") === "1";
   const ids = [
     ...new Set(raw.split(",").map((id)=>id.trim()))
-  ].filter((id)=>/^tt\d{6,10}$/.test(id));
+  ].filter((id)=>/^tt\d{6,10}$/.test(id)).slice(0, 60);
   if (!ids.length) return json({
     error: "bad imdb id"
   }, 400);
   const known = new Map();
-  if (!force) {
-    for (const row of (await readRows(ids.slice(0, 60)))){
-      // A row stored before reviews existed is fresh for the rating but has
-      // never been asked for reviews; scraping it again is the only way to fill
-      // them, and it is the same one document either way.
-      const needsReviews = withReviews && row.found && !row.reviews;
-      if (fresh(row) && !needsReviews) known.set(row.imdb, row);
-    }
+  for (const row of (await readRows(ids))){
+    // A row stored before reviews existed is fresh for the rating but has never
+    // been asked for reviews; only the single-title watch request may refresh it.
+    const needsReviews = withReviews && row.found && !row.reviews;
+    if (fresh(row) && !needsReviews) known.set(row.imdb, row);
   }
-  const missing = ids.filter((id)=>!known.has(id)).slice(0, batch ? BATCH_FETCH_LIMIT : 1);
+  // Search/catalog grids are read-only. Scraping every unknown in a cold grid
+  // both contradicted the client contract and could fan one page into 36
+  // Letterboxd requests across three shards. Opening a film warms exactly one.
+  const missing = batch ? [] : ids.filter((id)=>!known.has(id)).slice(0, 1);
   if (missing.length) {
     const scraped = (await Promise.all(missing.map(scrape))).filter(Boolean);
     for (const row of scraped)known.set(row.imdb, row);

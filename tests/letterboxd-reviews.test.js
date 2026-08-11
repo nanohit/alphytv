@@ -189,5 +189,12 @@ test("the request is opt-in, so a grid never carries review payloads", async () 
 
   const fn = await readFile(new URL("../supabase/functions/letterboxd/index.ts", import.meta.url), "utf8");
   // The map shape a grid reads has no reviews branch at all.
-  assert.match(fn, /withReviews = url\.searchParams\.get\("reviews"\) === "1"/);
+  assert.match(fn, /withReviews = !batch && url\.searchParams\.get\("reviews"\) === "1"/);
+});
+
+test("the public batch path is cache-only and cannot bypass freshness", async () => {
+  const source = await readFile(new URL("../supabase/functions/letterboxd/index.ts", import.meta.url), "utf8");
+  assert.match(source, /const missing = batch \? \[\] : ids\.filter/);
+  assert.doesNotMatch(source, /searchParams\.get\("refresh"\)/);
+  assert.doesNotMatch(source, /BATCH_FETCH_LIMIT/);
 });

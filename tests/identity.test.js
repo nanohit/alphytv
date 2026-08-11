@@ -56,6 +56,12 @@ test("an id the payload already carries is trusted and costs nothing", async () 
   assert.deepEqual(calls, [], "nothing should have been fetched");
 });
 
+test("nested provider identity is trusted and normalized without a lookup", async () => {
+  const { identity, calls } = boot();
+  assert.equal(await identity.resolve({ externalId: { imdb: "TT0816692" } }), "tt0816692");
+  assert.deepEqual(calls, []);
+});
+
 test("the committed catalogue resolves without touching the network", async () => {
   const { identity, calls } = boot();
   // Built by scripts/build-imdb-map.mjs; "Большой куш" is Snatch (2000).
@@ -180,9 +186,24 @@ test("the committed map covers the whole catalogue it was built from", () => {
   const items = (catalogue.lists ?? []).flatMap((list) => list.items ?? []);
   const { identity } = boot();
   const missing = items.filter((item) => {
-    const key = identity._test.mapKey(item.title, String(item.year).slice(0, 4));
+    const key = identity._test.mapKey(item.title, String(item.year).slice(0, 4), !!item.isSeries);
     return !MAP.entries[key];
   });
   assert.deepEqual(missing.map((i) => `${i.title} (${i.year})`), [],
     "run: node scripts/build-imdb-map.mjs");
+});
+
+test("a film and series with the same title and year cannot poison each other's identity", async () => {
+  const { identity, store } = boot({
+    map: { entries: {} },
+    handler: (url) => ok([{
+      name: url.includes("/series/") ? "Shared Series" : "Shared Film",
+      releaseInfo: "2020",
+      imdb_id: url.includes("/series/") ? "tt2222222" : "tt1111111",
+    }]),
+  });
+  assert.equal(await identity.resolve({ title: "Одинаковое", year: 2020, isSeries: false }), "tt1111111");
+  assert.equal(await identity.resolve({ title: "Одинаковое", year: 2020, isSeries: true }), "tt2222222");
+  assert.ok([...store.keys()].some((key) => key.endsWith("|f")));
+  assert.ok([...store.keys()].some((key) => key.endsWith("|s")));
 });

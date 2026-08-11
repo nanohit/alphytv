@@ -126,6 +126,23 @@ test("buildSeeds: weights favour finished + recent, zen entries go to unresolved
   assert.ok(excludeTitles.has(api._test.normTitle("Зенитный без кп")), "watched titles excluded even without kpId");
 });
 
+test("buildSeeds: an accidental open is excluded but a zero-second bookmark remains a seed", async () => {
+  const now = Date.now();
+  const storage = new Map([
+    ["alphy.history", JSON.stringify([
+      historyEntry({ key: "kp:10", kpId: "10", title: "Только открыл", progress: 0, position: 0, updatedAt: now }),
+      historyEntry({ key: "kp:20", kpId: "20", title: "Сохранил", progress: 0, position: 0, updatedAt: now }),
+    ])],
+    ["alphy.bookmarks", JSON.stringify([
+      { key: "kp:20", target: { kind: "kp", kpId: "20" }, title: "Сохранил", addedAt: now },
+    ])],
+  ]);
+  const { api } = await loadForYou(storage);
+  const { seeds, excludeKp } = api._test.buildSeeds();
+  assert.deepEqual(Array.from(seeds, (seed) => String(seed.kpId)), ["20"]);
+  assert.ok(excludeKp.has("10"), "an opened title is still excluded from recommendations");
+});
+
 test("scoreCandidates: intersection beats a single top position", async () => {
   const { api } = await loadForYou();
   const seedA = { kpId: "1", weight: 1 };
@@ -138,6 +155,17 @@ test("scoreCandidates: intersection beats a single top position", async () => {
   assert.equal(picked[0].id, "20", "candidate named by two seeds ranks first");
   assert.equal(picked[0].hits, 2);
   assert.ok(picked[0].final > picked[1].final);
+});
+
+test("scoreCandidates: a generic tail intersection cannot bury a strong first choice", async () => {
+  const { api } = await loadForYou();
+  const tail = Array.from({ length: 20 }, (_, index) => ({ id: `a${index}`, ru: `A ${index}` }));
+  tail[19] = { id: "999", ru: "Общий хвост" };
+  const picked = api._test.scoreCandidates([
+    { seed: { kpId: "1", weight: 1 }, similars: [{ id: "100", ru: "Сильный первый" }, ...tail] },
+    { seed: { kpId: "2", weight: 0.8 }, similars: [...Array.from({ length: 19 }, (_, i) => ({ id: `b${i}`, ru: `B ${i}` })), { id: "999", ru: "Общий хвост" }] },
+  ], new Set(), new Set());
+  assert.equal(picked[0].id, "100");
 });
 
 test("scoreCandidates: excludes watched kpIds and watched titles", async () => {

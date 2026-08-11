@@ -16,6 +16,12 @@ origin, which also works in privacy browsers that block cross-site fetches.
 `npm run sync:catalog` snapshots the live catalog into the deployment fallback
 and a revisioned file under `docs/catalog-backups/`.
 
+`npm run refresh:identity` also incrementally fills `imdb-map.json`; existing
+IDs are reused and only newly added identities reach Cinemeta. The daily
+`Refresh catalog identity` GitHub Action runs the same pipeline and commits a
+changed snapshot. `npm run check:identity` is an offline coverage check used by
+CI. Rare aliases that Cinemeta cannot resolve belong in `imdb-overrides.json`.
+
 ## Authentication
 
 Set these variables in Production and Preview:
