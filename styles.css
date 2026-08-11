@@ -794,8 +794,12 @@ body.admin-mode .meta-info { display: flex; }
   padding: 1px 4px; font-size: 9px; font-weight: 600; letter-spacing: .04em;
   color: var(--muted-strong); white-space: nowrap;
 }
-.meta-ratings { display: flex; gap: 16px; }
-.meta-ratings .rt { display: flex; flex-direction: column; gap: 2px; }
+/* Each figure is centred over its own label. Left-aligned, the numbers sat at
+   the left edge of labels of very different widths — КИНОПОИСК is twice IMDB —
+   so IMDb and Letterboxd clumped together while Кинопоиск drifted away from
+   them, and the row read as two groups instead of three. */
+.meta-ratings { display: flex; gap: 18px; }
+.meta-ratings .rt { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .meta-ratings .rt b { font-size: 18px; color: var(--accent); }
 .meta-ratings .rt span { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
 .meta-desc {
@@ -853,6 +857,42 @@ body.admin-mode .meta-info { display: flex; }
 }
 .similar-row::-webkit-scrollbar { width: 0; height: 0; display: none; }
 .similar-row > .card { width: 100%; }
+
+/* Отзывы. Popular reviews from Letterboxd, under «Похожее». Deliberately not
+   boxed: rules between entries are enough to separate them, and a panel per
+   review would out-shout the covers above. */
+.reviews-section { grid-column: 1; grid-row: 3; min-width: 0; margin-top: 17px; }
+.reviews-section.collapsed .reviews-list { display: none; }
+.reviews-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column;
+}
+.review { padding: 11px 0; border-top: 1px solid var(--stroke); }
+.review:first-child { border-top: 0; padding-top: 2px; }
+.review-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.review-author {
+  font-size: 11px; font-weight: 600; color: #cfcfcf;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%;
+}
+/* Letterboxd's own idiom, and half-stars make it exact. Kept small so it reads
+   as one person's mark rather than competing with the aggregate badges. */
+.review-stars { font-size: 10px; letter-spacing: .06em; color: var(--accent); white-space: nowrap; }
+/* The column is as wide as the player, which is far past a comfortable measure
+   for prose; the covers above fill it, a paragraph should not. */
+.review-text { margin: 0; max-width: 74ch; font-size: 12px; line-height: 1.5; color: #cfcfcf; overflow-wrap: anywhere; }
+.review-text .review-cut { color: var(--muted); }
+.review-spoiler {
+  align-self: flex-start; padding: 0; border: 0; background: none;
+  color: var(--muted-strong); cursor: pointer; font: inherit; font-size: 11px;
+  text-align: left;
+}
+.review-spoiler:hover { color: var(--accent); }
+.reviews-note {
+  margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--stroke);
+  font-size: 10px; letter-spacing: .04em; color: var(--muted);
+}
+.reviews-note a { color: var(--muted-strong); text-decoration: none; }
+.reviews-note a:hover { color: var(--accent); }
 .similar-row .card-remove { left: 7px; right: auto; }
 
 /* ---------- track / quality controls (Shaka) ---------- */
@@ -906,7 +946,7 @@ body.admin-mode .meta-info { display: flex; }
   .brand { min-width: 100px; display: flex; justify-content: flex-start; }
   .logo-image { height: 44px; max-width: 110px; }
   .watch-layout { display: flex; flex-direction: column; gap: 0; }
-  .watch-main, .meta-panel, .similar-section { width: 100%; }
+  .watch-main, .meta-panel, .similar-section, .reviews-section { width: 100%; }
   .meta-panel { margin-top: 20px; }
   /* Below the player the panel is wide rather than tall, so the poster moves
      beside the text instead of on top of it. */
@@ -1113,7 +1153,7 @@ body.admin-mode .meta-info { display: flex; }
    across one row crowded the cover and shrank all of them; stacking keeps every
    number at the size a two-rating card uses. The gap is tighter than the one
    above the runtime so the three scores still read as one group. */
-.hover-rating-lb { margin-top: -4px; }
+.hover-rating-lb { margin-top: 6px; }
 .meta-ratings .kp-rating-link { color: inherit; text-decoration: none; }
 .meta-ratings .kp-rating-link:hover span { color: var(--accent); }
 

@@ -37,6 +37,7 @@
     "https://gzwynsvcydynqidwxjru.supabase.co/functions/v1/letterboxd",
   ];
   const LETTERBOXD_CACHE_NS = "letterboxd.v1";
+  const LETTERBOXD_REVIEWS_NS = "letterboxd.reviews.v1";
   // Letterboxd scores out of 5. It is stored and linked out at its true scale,
   // and only ever doubled for display, so it reads on the same 0-10 footing as
   // the Кинопоиск and IMDb figures it sits beside. Doubling is exact, so this
@@ -176,6 +177,9 @@
     similarSection: document.getElementById("similarSection"),
     similarRow: document.getElementById("similarRow"),
     similarToggle: document.getElementById("similarToggle"),
+    reviewsSection: document.getElementById("reviewsSection"),
+    reviewsList: document.getElementById("reviewsList"),
+    reviewsToggle: document.getElementById("reviewsToggle"),
     loading: document.getElementById("loading"),
     error: document.getElementById("error"),
   };
@@ -2984,6 +2988,63 @@
     else hover.appendChild(row);
   }
 
+  // Reviews ride inside the same film page the rating is scraped from, so they
+  // cost nothing extra upstream. They are asked for only here, one film at a
+  // time, and never by a grid.
+  // Bidirectional overrides reorder every character rendered after them, so a
+  // display name carrying one can rearrange the line it sits in. The resolver
+  // already strips these; this is the same guarantee made where the text is
+  // actually rendered, because that is the side that has to hold.
+  const stripBidi = (text) =>
+    String(text || "").replace(/[\u0000-\u001f\u007f\u00ad\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "");
+
+  async function letterboxdReviews(imdb) {
+    const id = String(imdb || "").trim();
+    if (!/^tt\d{6,10}$/.test(id)) return null;
+    const cached = cacheGet(LETTERBOXD_REVIEWS_NS, id);
+    if (cached) return cached.list?.length ? cached.list : null;
+    const now = Date.now();
+    for (const endpoint of letterboxdEndpointOrder(id)) {
+      if ((letterboxdCooldown.get(endpoint) || 0) > now) continue;
+      let payload = null;
+      try {
+        const controller = new AbortController();
+        // Longer than the rating's: a film nobody has opened yet is scraped
+        // during this call, and the scrape alone is about two seconds.
+        const timer = setTimeout(() => controller.abort(), 12000);
+        const response = await fetch(`${endpoint}?imdb=${encodeURIComponent(id)}&reviews=1`, {
+          signal: controller.signal,
+          referrerPolicy: "no-referrer",
+        });
+        clearTimeout(timer);
+        if (!response.ok) throw new Error(`http ${response.status}`);
+        payload = await response.json();
+      } catch (error) {
+        letterboxdCooldown.set(endpoint, now + LETTERBOXD_COOLDOWN_MS);
+        log("letterboxd-reviews-warn", { endpoint, message: error.message });
+        continue;
+      }
+      // A shard on an older build answers with the rating and no reviews key at
+      // all. That is not "this film has none" — it never spoke to the question,
+      // so ask the next shard rather than cache an absence. Deliberately outside
+      // the catch above: only a failed request should cool a project down.
+      if (!Array.isArray(payload?.reviews)) continue;
+      const list = payload.reviews
+        .filter((item) => item && typeof item.t === "string" && item.t.trim())
+        .slice(0, 6)
+        .map((item) => ({
+          a: stripBidi(compact(item.a)).slice(0, 40),
+          r: Number(item.r) > 0 && Number(item.r) <= 5 ? Number(item.r) : 0,
+          t: stripBidi(compact(item.t)).slice(0, 600),
+          c: !!item.c,
+          s: !!item.s,
+        }));
+      cacheSet(LETTERBOXD_REVIEWS_NS, id, { list }, list.length ? TTL.letterboxd : TTL.letterboxdmiss);
+      return list.length ? list : null;
+    }
+    return null;
+  }
+
   // Called once per rendered grid: collect what the cards declared, ask the
   // shards for whatever is not already known, then paint from the cache.
   async function fillGridLetterboxd(grid) {
@@ -3038,6 +3099,7 @@
     el.trackPanel.classList.add("hidden");
     watchExtrasKey = "";
     hideSimilarRow();
+    hideReviews();
     // Show the loading state immediately so the previous title's player is never
     // left on screen while the new one resolves (or fails to resolve).
     showPlayerLoading();
@@ -5225,7 +5287,11 @@
     if (meta?.isSeries) return;
     const token = resolveToken;
     letterboxdImdbId(meta)
-      .then((imdbId) => (imdbId && !isStale(token) ? letterboxdRating(imdbId) : null))
+      .then(async (imdbId) => {
+        if (!imdbId || isStale(token)) return null;
+        const rating = await letterboxdRating(imdbId);
+        return rating ? { ...rating, imdb: imdbId } : null;
+      })
       .then((rating) => {
         if (!rating || isStale(token) || !state.currentTarget) return;
         if (keyFor(state.currentTarget) !== keyFor(target)) return;
@@ -5243,6 +5309,9 @@
         }
         node.innerHTML = `<b>${escapeHtml(letterboxdOutOfTen(rating.r))}</b><span>Letterboxd</span>`;
         host.appendChild(node);
+        // The block below «Похожее» hangs off the same resolved id, so it costs
+        // no second identity lookup.
+        renderReviews(rating.imdb, rating.slug, token).catch((error) => log("reviews-warn", error.message));
       })
       .catch((error) => log("letterboxd-badge-warn", error.message));
   }
@@ -5352,6 +5421,7 @@
   async function renderSimilarRow(kpId, token) {
     if (!el.similarSection || !el.similarRow) return;
     hideSimilarRow();
+    hideReviews();
     if (!/^\d+$/.test(kpId)) return;
     const items = await window.alphyForYou?.similarRow?.(kpId);
     if (!items?.length || isStale(token)) return;
@@ -5413,6 +5483,86 @@
   function hideSimilarRow() {
     el.similarSection?.classList.add("hidden");
     el.similarRow?.replaceChildren();
+  }
+
+  function hideReviews() {
+    el.reviewsSection?.classList.add("hidden");
+    el.reviewsList?.replaceChildren();
+  }
+
+  const STARS = (score) => "★".repeat(Math.floor(score)) + (score % 1 >= 0.5 ? "½" : "");
+
+  // Text arrives already stripped of markup and control characters by the
+  // resolver, but it is still someone's prose from the open internet, so it only
+  // ever reaches the page as a text node.
+  function renderReview(item) {
+    const row = document.createElement("li");
+    row.className = "review";
+    const top = document.createElement("div");
+    top.className = "review-top";
+    if (item.a) {
+      const author = document.createElement("span");
+      author.className = "review-author";
+      author.textContent = item.a;
+      top.appendChild(author);
+    }
+    if (item.r > 0) {
+      const stars = document.createElement("span");
+      stars.className = "review-stars";
+      stars.textContent = STARS(item.r);
+      stars.title = `${item.r} из 5`;
+      top.appendChild(stars);
+    }
+    if (top.childNodes.length) row.appendChild(top);
+
+    const text = document.createElement("p");
+    text.className = "review-text";
+    text.textContent = item.t;
+    if (item.c) {
+      // Letterboxd hides the rest behind its own "more"; saying so is honest and
+      // the footer link goes where the rest of it is.
+      const cut = document.createElement("span");
+      cut.className = "review-cut";
+      cut.textContent = " …";
+      text.appendChild(cut);
+    }
+
+    if (item.s) {
+      // A spoiler stays behind one deliberate click. Showing it and apologising
+      // afterwards is not an option on a page about a film someone is choosing.
+      const reveal = document.createElement("button");
+      reveal.className = "review-spoiler";
+      reveal.type = "button";
+      reveal.textContent = "Отзыв со спойлером — показать";
+      reveal.addEventListener("click", () => reveal.replaceWith(text), { once: true });
+      row.appendChild(reveal);
+    } else {
+      row.appendChild(text);
+    }
+    return row;
+  }
+
+  async function renderReviews(imdbId, slug, token) {
+    if (!el.reviewsSection || !el.reviewsList) return;
+    const list = await letterboxdReviews(imdbId);
+    if (!list?.length || isStale(token)) return;
+    const frag = document.createDocumentFragment();
+    for (const item of list) frag.appendChild(renderReview(item));
+    el.reviewsList.replaceChildren(frag);
+    const note = document.createElement("li");
+    note.className = "reviews-note";
+    if (slug) {
+      const link = document.createElement("a");
+      link.href = `https://letterboxd.com/film/${encodeURIComponent(slug)}/reviews/by/activity/`;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "Все отзывы на Letterboxd";
+      note.append("Популярные отзывы с Letterboxd, на английском · ", link);
+    } else {
+      note.textContent = "Популярные отзывы с Letterboxd, на английском";
+    }
+    el.reviewsList.appendChild(note);
+    el.reviewsSection.classList.remove("hidden");
   }
 
   // =====================================================================
@@ -8277,6 +8427,12 @@ addEventListener('message', async (event) => {
     });
     el.searchInput.addEventListener("keydown", (e) => { if (e.key === "Enter") onSearchSubmit(); });
     el.bookmarksToggle.addEventListener("click", () => go("/bookmarks"));
+    el.reviewsToggle?.addEventListener("click", () => {
+      const collapsed = !el.reviewsSection?.classList.contains("collapsed");
+      el.reviewsSection?.classList.toggle("collapsed", collapsed);
+      el.reviewsToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      el.reviewsToggle.textContent = collapsed ? "Показать" : "Скрыть";
+    });
     el.similarToggle?.addEventListener("click", () => {
       setSimilarCollapsed(!el.similarSection?.classList.contains("collapsed"));
     });
@@ -8444,6 +8600,7 @@ addEventListener('message', async (event) => {
       letterboxdEndpointOrder,
       letterboxdRating,
       letterboxdBatch,
+      letterboxdReviews,
       LETTERBOXD_ENDPOINTS,
       isPlaceholderTitle,
       mergeMetadata,

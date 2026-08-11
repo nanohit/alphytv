@@ -14,7 +14,7 @@
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <title>Alphy TV — каталог фильмов и сериалов.</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260811-lb4">
+  <link rel="stylesheet" href="/styles.css?v=20260811-rev1">
 </head>
 <body>
   <div id="bookmarkBanner" class="bookmark-banner hidden">Добавьте сайт в закладки</div>
@@ -149,6 +149,13 @@
           </div>
           <div id="similarRow" class="similar-row"></div>
         </section>
+        <section id="reviewsSection" class="reviews-section hidden" aria-label="Отзывы">
+          <div class="similar-head">
+            <h3>Отзывы</h3>
+            <button id="reviewsToggle" class="similar-toggle" type="button" aria-expanded="true">Скрыть</button>
+          </div>
+          <ul id="reviewsList" class="reviews-list"></ul>
+        </section>
       </div>
     </section>
 
@@ -207,10 +214,10 @@
   </dialog>
 
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
-  <script src="/identity.js?v=20260811-lb4"></script>
-  <script src="/app.js?v=20260811-lb4"></script>
-  <script src="/foryou.js?v=20260811-lb4"></script>
-  <script src="/catalog.js?v=20260811-lb4"></script>
-  <script src="/keypool.js?v=20260811-lb4"></script>
+  <script src="/identity.js?v=20260811-rev1"></script>
+  <script src="/app.js?v=20260811-rev1"></script>
+  <script src="/foryou.js?v=20260811-rev1"></script>
+  <script src="/catalog.js?v=20260811-rev1"></script>
+  <script src="/keypool.js?v=20260811-rev1"></script>
 </body>
 </html>
