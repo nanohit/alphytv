@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { makeSandbox, sleep } from "./helpers/app-sandbox.js";
 
-// The rating lives behind three identical Supabase Edge deployments. These
+// The rating lives behind four identical Supabase Edge deployments. These
 // tests pin the two properties that
 // matter: a film is always asked of the same project, and one project being
 // down costs the next caller nothing.
@@ -31,7 +31,7 @@ const ok = (body) => ({ ok: true, status: 200, headers: { get: () => "" }, json:
 test("a film always goes to the same project, and the ring is the failover order", async () => {
   const { helpers } = await boot();
   const endpoints = helpers.LETTERBOXD_ENDPOINTS;
-  assert.equal(endpoints.length, 3);
+  assert.equal(endpoints.length, 4);
   assert.ok(endpoints.every((url) => /^https:\/\/[a-z]+\.supabase\.co\/functions\/v1\/letterboxd$/.test(url)));
 
   // Deterministic: the same id always starts at the same project.
@@ -45,7 +45,19 @@ test("a film always goes to the same project, and the ring is the failover order
   // And the load actually spreads rather than pinning everything to one.
   const starts = new Set();
   for (let i = 1000; i < 1200; i += 1) starts.add(helpers.letterboxdEndpointOrder(`tt${i}0000`)[0]);
-  assert.equal(starts.size, 3, "ids should reach all three projects");
+  assert.equal(starts.size, 4, "ids should reach all four managed projects");
+});
+
+test("every serving shard is managed by the deploy matrix", async () => {
+  const { helpers } = await boot();
+  const workflow = await readFile(new URL("../.github/workflows/deploy-letterboxd.yml", import.meta.url), "utf8");
+  for (const endpoint of helpers.LETTERBOXD_ENDPOINTS) {
+    const ref = new URL(endpoint).hostname.split(".")[0];
+    assert.match(workflow, new RegExp(`project: ${ref}\\b`), `${ref} cannot be deployed`);
+  }
+  assert.doesNotMatch(workflow, /project: lcldjrphnkufymdhevyx\b/,
+    "an undeployable legacy shard must not return to the serving ring");
+  assert.match(workflow, /node scripts\/deploy-letterboxd-schema\.mjs/);
 });
 
 test("a rating is fetched once and then served from storage", async () => {
@@ -71,15 +83,17 @@ test("a title Letterboxd does not carry is remembered as a miss", async () => {
 });
 
 test("a dead project is skipped, and stops being tried for a while", async () => {
+  const initial = await boot();
+  const dead = initial.helpers.letterboxdEndpointOrder("tt0137523")[0];
   const { helpers, calls } = await boot({
     handler: (url) => {
-      if (url.includes("lcldjrphnkufymdhevyx")) throw new Error("project paused");
+      if (url.startsWith(dead)) throw new Error("project paused");
       return ok({ found: true, r: 4.27, n: 5862630 });
     },
   });
-  // tt0137523 starts on the dead project, so this exercises the fall-through.
+  // The chosen id starts on the dead project, so this exercises fall-through.
   const order = helpers.letterboxdEndpointOrder("tt0137523");
-  assert.match(order[0], /lcldjrphnkufymdhevyx/);
+  assert.equal(order[0], dead);
   assert.deepEqual(plain(await helpers.letterboxdRating("tt0137523")), { r: 4.27, n: 5862630, slug: "" });
   assert.equal(calls.length, 2, "one failure, then the next project answers");
 
@@ -149,7 +163,7 @@ test("a grid asks once per shard and never triggers scraping", async () => {
   await helpers.letterboxdBatch(ids);
 
   // One request per shard, not one per film.
-  assert.ok(asked.length <= 3 && asked.length >= 1, `${asked.length} requests for ${ids.length} films`);
+  assert.ok(asked.length <= 4 && asked.length >= 1, `${asked.length} requests for ${ids.length} films`);
   assert.ok(asked.every((url) => url.includes(",") || new URL(url).searchParams.get("imdb").split(",").length >= 1));
   // Every id went to the shard its hash picks, so batch and single agree.
   for (const url of asked) {

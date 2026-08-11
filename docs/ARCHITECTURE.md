@@ -268,11 +268,11 @@ new fallback/map revision. Between snapshots, the browser's Cinemeta fallback
 still covers newly added cards immediately.
 
 Letterboxd is enrichment, not identity and not a recommendation source. The
-browser sends only IMDb ids to one of three deterministic Supabase shards.
+browser sends only IMDb ids to one of four deterministic Supabase shards.
 Catalog/search batches are table reads only: they never scrape unknown films.
 Opening a single film may warm exactly that one missing row and its bounded
 review sample. There is no public force-refresh switch. This caps a cold grid at
-three database reads instead of turning it into up to 36 upstream page loads.
+four database reads instead of turning it into dozens of upstream page loads.
 
 `Для вас` synthesizes a row locally from Kinopoisk's strong per-title
 `/similars` lists. The six strongest watched/bookmarked seeds are blended with
@@ -290,10 +290,13 @@ names, and posters. Their nominally free input is therefore more expensive at
 the usable-card boundary.
 
 The Edge source and schema are kept under `supabase/functions/letterboxd/`.
-Deployment is the manual `Deploy Letterboxd shards` GitHub workflow, using one
-repository secret named `SUPABASE_ACCESS_TOKEN` with access to all three
-projects. This keeps the deployed function reproducible instead of editing an
-unversioned dashboard bundle.
+Deployment is the manual `Deploy Letterboxd shards` GitHub workflow. Each
+independent account has its own repository secret (`..._ICM`, `..._GZW`,
+`..._CUY`, `..._HRT`); the workflow applies the idempotent schema before it
+deploys the same function to all four projects. The retired `lcld...` project is
+not in the active ring because its lost management access made synchronized
+deploys impossible. This keeps every serving shard reproducible instead of
+leaving an unversioned dashboard bundle in rotation.
 
 ## Backend Scope
 

@@ -231,8 +231,8 @@ Deno.serve(async (req)=>{
     if (fresh(row) && !needsReviews) known.set(row.imdb, row);
   }
   // Search/catalog grids are read-only. Scraping every unknown in a cold grid
-  // both contradicted the client contract and could fan one page into 36
-  // Letterboxd requests across three shards. Opening a film warms exactly one.
+  // both contradicted the client contract and could fan one page into dozens of
+  // Letterboxd requests across the shard ring. Opening a film warms exactly one.
   const missing = batch ? [] : ids.filter((id)=>!known.has(id)).slice(0, 1);
   if (missing.length) {
     const scraped = (await Promise.all(missing.map(scrape))).filter(Boolean);

@@ -27,12 +27,15 @@
   const LIFTW_SEARCH_CACHE_NS = "liftwsearch.v1";
   const LIFTW_SEARCH_URL = "https://api.liftw.ws/search";
   // Letterboxd publishes no API and sends no CORS header, so the lookup runs on
-  // three independently deployed Supabase Edge shards. The film's IMDb id picks
-  // its primary shard for stable cache locality; the rest form its failover ring.
+  // independently deployed Supabase Edge shards. The film's IMDb id picks its
+  // primary shard for stable cache locality; the rest form its failover ring.
+  // lcld... is intentionally retired: its management token is gone and keeping
+  // an undeployable function in the active ring would reintroduce version drift.
   const LETTERBOXD_ENDPOINTS = [
-    "https://lcldjrphnkufymdhevyx.supabase.co/functions/v1/letterboxd",
     "https://icmjgvlsyfqwyewvsuje.supabase.co/functions/v1/letterboxd",
     "https://gzwynsvcydynqidwxjru.supabase.co/functions/v1/letterboxd",
+    "https://cuyofxgofmhdugauoqzt.supabase.co/functions/v1/letterboxd",
+    "https://hrtnvhafwzimjstvegno.supabase.co/functions/v1/letterboxd",
   ];
   const LETTERBOXD_CACHE_NS = "letterboxd.v1";
   const LETTERBOXD_REVIEWS_NS = "letterboxd.reviews.v1";

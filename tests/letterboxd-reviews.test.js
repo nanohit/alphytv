@@ -116,21 +116,20 @@ async function boot(handler) {
   const calls = [];
   ctx.sandbox.fetch = async (url, opts) => {
     calls.push(String(url));
-    return handler(String(url), opts);
+    return handler(String(url), opts, calls.length);
   };
   return { helpers: ctx.sandbox.window.alphyBridge._test, calls, storage: ctx.storage };
 }
 
 test("a shard that does not know about reviews is passed over, not believed", async () => {
-  // One of the three projects can lag behind a deploy. It answers the rating
+  // One project can lag behind a deploy. It answers the rating
   // perfectly well and simply omits the key. Reading that as "this film has no
-  // reviews" would blank the block for a third of the catalogue.
-  const { helpers, calls } = await boot((url) => {
-    if (url.includes("lcldjrphnkufymdhevyx")) return ok({ found: true, r: 4.27, n: 100, slug: "fight-club" });
+  // reviews" would blank the block for its share of the catalogue.
+  const { helpers, calls } = await boot((_url, _opts, number) => {
+    if (number === 1) return ok({ found: true, r: 4.27, n: 100, slug: "fight-club" });
     return ok({ found: true, r: 4.27, slug: "fight-club", reviews: [{ a: "sam", r: 4, t: "great" }] });
   });
-  // tt0137523 starts on the shard that lags.
-  assert.match(helpers.letterboxdEndpointOrder("tt0137523")[0], /lcldjrphnkufymdhevyx/);
+  const lagging = helpers.letterboxdEndpointOrder("tt0137523")[0];
 
   const list = await helpers.letterboxdReviews("tt0137523");
   assert.equal(list?.length, 1);
@@ -141,7 +140,7 @@ test("a shard that does not know about reviews is passed over, not believed", as
   // on the second shard instead of the first.
   const before = calls.length;
   await helpers.letterboxdRating("tt0137523");
-  assert.match(calls[before], /lcldjrphnkufymdhevyx/, "the lagging shard was wrongly cooled off");
+  assert.equal(calls[before].split("?")[0], lagging, "the lagging shard was wrongly cooled off");
 });
 
 test("a film that genuinely has none is remembered, not re-asked", async () => {
