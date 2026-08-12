@@ -4,9 +4,10 @@ import { makeSandbox, sleep } from "./helpers/app-sandbox.js";
 
 // Source priority for /k/:kpId clicks (resolveKpPlaybackSource):
 //   1. cached Zona + mid-watch progress → Zenith (resume/озвучка live under kp:)
-//   2. warmed Collaps probe → Collaps (the hover/idle prefetch must pay off)
-//   3. cached Zona → Zenith
-//   4. cold → Collaps fast window, then Zona resolver
+//   2. verified KP→LiftW cache → LiftW
+//   3. warmed Collaps probe → Collaps (the hover/idle prefetch must pay off)
+//   4. cached Zona → Zenith
+//   5. cold → Collaps fast window, then Zona resolver
 // All cached branches must return without touching the network.
 
 const ZONA = JSON.stringify({ v: { zenithId: "777", embedUrl: "https://z.example/embed/movie/777" }, exp: 0 });
@@ -14,6 +15,7 @@ const PROBE = JSON.stringify({
   v: { kpId: "301", title: "Матрица", qualityLabel: "1080p", qualityHeight: 1080, selection: {}, rank: 0 },
   exp: 0,
 });
+const LIFT = JSON.stringify({ v: "86284", exp: 0 });
 
 async function bootedBridge(seed) {
   const ctx = makeSandbox({ storageSeed: seed });
@@ -30,10 +32,23 @@ test("warmed Collaps probe wins over a cached Zona resolve", async () => {
   assert.equal(source.hit.kpId, "301");
 });
 
+test("verified LiftW mapping wins over cached Collaps and Zona", async () => {
+  const seed = new Map([
+    ["alphy.cache.zona:301", ZONA],
+    ["alphy.cache.clpsprobe:301", PROBE],
+    ["alphy.cache.liftwbykp.v1:301", LIFT],
+  ]);
+  const bridge = await bootedBridge(seed);
+  const source = await bridge.resolveKpPlaybackSource("301");
+  assert.equal(source.kind, "lift");
+  assert.equal(source.liftId, "86284");
+});
+
 test("mid-watch Zenith title keeps its player despite a warmed probe", async () => {
   const seed = new Map([
     ["alphy.cache.zona:301", ZONA],
     ["alphy.cache.clpsprobe:301", PROBE],
+    ["alphy.cache.liftwbykp.v1:301", LIFT],
     ["alphy.history", JSON.stringify([{
       key: "kp:301", kind: "kp", target: { kind: "kp", kpId: "301" }, title: "Матрица",
       position: 1200, duration: 8000, progress: 0.15, updatedAt: Date.now(),

@@ -171,3 +171,73 @@ test("age badge distinguishes missing age from a real 0+ and falls back to MPAA"
   assert.equal(ageBadge({ ageRating: 0 }), "0+");
   assert.equal(ageBadge({ ageRating: 12, ratingMpaa: "r" }), "12+");
 });
+
+test("history collapses provider aliases by kpId and keeps route, progress, and rich meta", () => {
+  const ctx = makeSandbox();
+  ctx.run();
+  const { collapseHistory, historyEntryMeta } = ctx.sandbox.window.alphyBridge._test;
+  const entries = collapseHistory([
+    {
+      key: "lift:86284", kind: "lift", kpId: "1048334",
+      target: { kind: "lift", liftId: "86284", kpId: "1048334" },
+      title: "Логан", poster: "poster.webp", year: "2017",
+      meta: {
+        kpId: "1048334", title: "Логан", year: "2017", poster: "poster.webp",
+        description: "Пожилой Логан защищает юного мутанта.",
+        rating: { kp: 8.0, imdb: 8.1 }, externalId: { imdb: "tt3315342" },
+        genres: ["фантастика"], countries: ["США"], metaLevel: "full",
+      },
+      position: 0, duration: 0, progress: 0, updatedAt: 200,
+    },
+    {
+      key: "kp:1048334", kind: "kp", kpId: "1048334",
+      target: { kind: "kp", kpId: "1048334" }, title: "Логан", year: "2017",
+      position: 1800, duration: 8220, progress: 0.219, updatedAt: 100,
+    },
+  ]);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].key, "kp:1048334");
+  assert.equal(entries[0].target.kind, "lift", "latest working provider route survives");
+  assert.equal(entries[0].position, 1800, "older real progress survives a newer open event");
+  const meta = historyEntryMeta(entries[0]);
+  assert.equal(meta.description, "Пожилой Логан защищает юного мутанта.");
+  assert.equal(meta.externalId.imdb, "tt3315342");
+  assert.equal(meta.rating.imdb, 8.1);
+});
+
+test("home boot migrates already-stored kp and provider duplicates", async () => {
+  const seed = new Map([["alphy.history", JSON.stringify([
+    {
+      key: "lift:86284", kind: "lift", kpId: "1048334",
+      target: { kind: "lift", liftId: "86284", kpId: "1048334" },
+      title: "Логан", year: "2017", updatedAt: 200,
+    },
+    {
+      key: "kp:1048334", kind: "kp", kpId: "1048334",
+      target: { kind: "kp", kpId: "1048334" },
+      title: "Логан", year: "2017", updatedAt: 100,
+    },
+  ])]]);
+  const ctx = makeSandbox({ storageSeed: seed });
+  ctx.run();
+  await sleep(80);
+  const history = JSON.parse(ctx.storage.get("alphy.history") || "[]");
+  assert.equal(history.length, 1);
+  assert.equal(history[0].key, "kp:1048334");
+  assert.equal(history[0].target.kind, "lift");
+});
+
+test("summary metadata never blocks a later full movie fetch", () => {
+  const ctx = makeSandbox();
+  ctx.run();
+  const { metadataIsFull } = ctx.sandbox.window.alphyBridge._test;
+  assert.equal(metadataIsFull({ title: "Логан", year: 2017, poster: "x", rating: { kp: 8 }, metaLevel: "summary" }), false);
+  assert.equal(metadataIsFull({
+    title: "Логан", year: 2017, poster: "x", rating: { kp: 8, imdb: 8.1 },
+    externalId: { imdb: "tt3315342" }, genres: ["драма"], countries: ["США"],
+  }), false, "legacy search payload with many fields still needs a synopsis fetch");
+  assert.equal(metadataIsFull({
+    title: "Логан", year: 2017, description: "Описание", rating: { kp: 8, imdb: 8.1 },
+    externalId: { imdb: "tt3315342" }, genres: ["драма"], metaLevel: "full",
+  }), true);
+});

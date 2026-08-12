@@ -36,6 +36,7 @@
   const MAX_SEEDS = 8;
   const MAX_SIM_FETCH_PER_RUN = 6;
   const MAX_META_BATCH_SIZE = 18;
+  const MAX_DIRECT_META_FALLBACK = 6;
   const MAX_LOOKUP_PER_RUN = 3;
   // The pool is ~500 calls/day per key of real capacity. The cap is the safety
   // rail, not the target: the pipeline is cache-first, so a normal day spends a
@@ -525,7 +526,8 @@
     // The app's own meta cache (populated by search/watch flows) is free —
     // use it even when expired, display data does not go stale in a week.
     try {
-      const raw = localStorage.getItem(`alphy.cache.meta:${kpId}`);
+      const raw = localStorage.getItem(`alphy.cache.meta:${kpId}`) ||
+        localStorage.getItem(`alphy.cache.metasummary:${kpId}`);
       if (!raw) return null;
       return JSON.parse(raw)?.v || null;
     } catch {
@@ -541,6 +543,11 @@
     if (Number.isFinite(Number(kp)) && Number(kp) > 0) rating.kp = Number(kp);
     if (Number.isFinite(Number(imdb)) && Number(imdb) > 0) rating.imdb = Number(imdb);
     return {
+      metaLevel: (film?.description || film?.shortDescription || film?.imdbId || film?.externalId?.imdb)
+        ? "full"
+        : "summary",
+      title: film?.title || film?.nameRu || film?.nameOriginal || film?.nameEn || "",
+      originalTitle: film?.originalTitle || film?.nameOriginal || film?.nameEn || "",
       year: year ? String(year) : "",
       isSeries: film?.isSeries ?? (
         !!film?.serial || /SERIES|TV_SHOW|MINI|tv-series|animated-series/i.test(String(film?.type || ""))
@@ -550,11 +557,24 @@
         : null,
       rating,
       poster: film?.poster || film?.posterUrl || film?.posterUrlPreview || "",
+      description: film?.description || film?.shortDescription || "",
+      shortDescription: film?.shortDescription || "",
+      slogan: film?.slogan || "",
+      ageRating: Number(String(film?.ageRating ?? film?.ratingAgeLimits ?? "").match(/\d+/)?.[0]) || null,
+      ratingMpaa: film?.ratingMpaa || "",
+      genres: (film?.genres || []).map((entry) => entry?.genre || entry).filter(Boolean).slice(0, 6),
+      countries: (film?.countries || []).map((entry) => entry?.country || entry).filter(Boolean).slice(0, 4),
       externalId: {
         imdb: film?.externalId?.imdb || film?.externalIds?.imdb || film?.imdbId || "",
         tmdb: film?.externalId?.tmdb || film?.externalIds?.tmdb || film?.tmdbId || "",
       },
     };
+  }
+
+  function cardMetaComplete(meta) {
+    return meta?.metaLevel === "full" || (
+      !!meta?.year && [meta?.rating?.kp, meta?.rating?.imdb].some((value) => Number(value) > 0)
+    );
   }
 
   async function fetchMetaBatch(kpIds) {
@@ -565,7 +585,7 @@
     for (const id of ids) {
       const cached = lsGet(`${META_PREFIX}${id}`) || appMetaFor(id);
       if (cached) result.set(id, cached);
-      else missing.push(id);
+      if (!cardMetaComplete(cached)) missing.push(id);
     }
     if (!missing.length) return result;
     try {
@@ -580,6 +600,23 @@
     } catch (error) {
       if (error.code === "budget") throw error;
       log("meta batch failed", error.message);
+    }
+    // One shared PoiskKino batch is still the cheapest path. When it is exhausted,
+    // recover only the first visible cards through the viewer-side Unofficial pool
+    // instead of leaving every rating blank or fanning out across the whole row.
+    const unresolved = missing.filter((id) => !cardMetaComplete(result.get(id))).slice(0, MAX_DIRECT_META_FALLBACK);
+    if (unresolved.length) {
+      await promisePool(unresolved.map((id) => async () => {
+        try {
+          const film = await directUnofficialGet(`/api/v2.2/films/${encodeURIComponent(id)}`);
+          const meta = normalizeFilmMeta(film);
+          lsSet(`${META_PREFIX}${id}`, meta, META_TTL);
+          result.set(id, meta);
+        } catch (error) {
+          if (error.code === "budget") throw error;
+          log("direct meta fallback failed", id, error.message);
+        }
+      }), 2);
     }
     return result;
   }
@@ -651,6 +688,12 @@
       movieLength: Number.isFinite(Number(meta?.movieLength)) ? Number(meta.movieLength) : null,
       rating: meta?.rating || {},
       externalId: meta?.externalId || {},
+      description: meta?.description || "",
+      shortDescription: meta?.shortDescription || "",
+      ageRating: meta?.ageRating ?? null,
+      ratingMpaa: meta?.ratingMpaa || "",
+      genres: meta?.genres || [],
+      countries: meta?.countries || [],
       target: { kind: "kp", kpId: candidate.id },
     };
   }
@@ -736,10 +779,11 @@
       }
       publish(picked.map((candidate) => toCuratedItem(candidate, metaFor.get(candidate.id))));
 
-      // Then enrich all gaps in ONE PoiskKino request and re-publish. The API
-      // accepts an id array, so this replaces the former per-card fanout.
+      // Then enrich gaps in one PoiskKino batch. If that shared path is exhausted,
+      // fetchMetaBatch repairs only the first visible cards via the viewer-side
+      // Unofficial pool instead of an N-card fanout.
       if (network) {
-        const gaps = picked.filter((candidate) => !metaFor.has(candidate.id)).slice(0, MAX_META_BATCH_SIZE);
+        const gaps = picked.filter((candidate) => !cardMetaComplete(metaFor.get(candidate.id))).slice(0, MAX_META_BATCH_SIZE);
         if (gaps.length) {
           const fetched = await fetchMetaBatch(gaps.map((candidate) => candidate.id)).catch(() => new Map());
           for (const [id, meta] of fetched) metaFor.set(id, meta);
@@ -774,7 +818,7 @@
   // (zen:, ort:, nd: …). Cached for 30 days: a film's director does not change.
   // Two calls at most, once per title, ever.
 
-  const EXTRAS_PREFIX = "alphy.foryou.extras.v2.";
+  const EXTRAS_PREFIX = "alphy.foryou.extras.v3.";
 
   function personNames(staff, professionKey, limit) {
     const out = [];
@@ -811,17 +855,24 @@
     if (!network) return null;
     if (await whenModeReady() !== "on") return null;
     try {
+      const localFilm = appMetaFor(id);
       const [film, staff] = await Promise.all([
-        apiGet(`/api/v2.2/films/${encodeURIComponent(id)}`).catch(() => null),
+        localFilm?.metaLevel === "full"
+          ? Promise.resolve(localFilm)
+          : apiGet(`/api/v2.2/films/${encodeURIComponent(id)}`).catch(() => null),
         apiGet(`/api/v1/staff?filmId=${encodeURIComponent(id)}`).catch(() => null),
       ]);
       if (!film && !staff) return null;
+      const normalized = normalizeFilmMeta(film || {});
       const extras = {
-        genres: (film?.genres || []).map((g) => g?.genre).filter(Boolean).slice(0, 6),
-        countries: (film?.countries || []).map((c) => c?.country).filter(Boolean).slice(0, 4),
-        ageRating: Number(String(film?.ratingAgeLimits || "").match(/\d+/)?.[0]) || null,
-        ratingMpaa: film?.ratingMpaa || null,
-        slogan: film?.slogan || null,
+        ...normalized,
+        kpId: id,
+        metaLevel: film ? "full" : "summary",
+        genres: normalized.genres,
+        countries: normalized.countries,
+        ageRating: normalized.ageRating,
+        ratingMpaa: normalized.ratingMpaa,
+        slogan: normalized.slogan,
         directors: personNames(staff, "DIRECTOR", 3),
         cast: personNames(staff, "ACTOR", 8),
         people: {
@@ -973,6 +1024,7 @@
     refresh: () => compute(),
     similarRow,
     enrichSimilarRow,
+    enrichItems: async (kpIds) => fetchMetaBatch(kpIds),
     filmExtras,
     unofficialGet: directUnofficialGet,
     // Title -> kpId, verified by normalized title + year and cached for 30 days.

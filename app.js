@@ -550,13 +550,17 @@
     return "x";
   }
   function cleanTarget(t) {
+    const keepKpId = (target) => {
+      const kpId = String(t?.kpId || "");
+      return /^\d+$/.test(kpId) ? { ...target, kpId } : target;
+    };
     if (t.kind === "kp") return { kind: "kp", kpId: t.kpId };
-    if (t.kind === "zen") return { kind: "zen", zenithId: t.zenithId };
-    if (t.kind === "ort") return { kind: "ort", embedUrl: t.embedUrl };
-    if (t.kind === "opr") return { kind: "opr", playerUrl: t.playerUrl, pageUrl: t.pageUrl || "" };
-    if (t.kind === "nd") return { kind: "nd", pageUrl: t.pageUrl };
+    if (t.kind === "zen") return keepKpId({ kind: "zen", zenithId: t.zenithId });
+    if (t.kind === "ort") return keepKpId({ kind: "ort", embedUrl: t.embedUrl });
+    if (t.kind === "opr") return keepKpId({ kind: "opr", playerUrl: t.playerUrl, pageUrl: t.pageUrl || "" });
+    if (t.kind === "nd") return keepKpId({ kind: "nd", pageUrl: t.pageUrl });
     if (t.kind === "soap") return { kind: "soap", soapId: String(t.soapId) };
-    if (t.kind === "lift") return liftwTarget(t.liftId, t);
+    if (t.kind === "lift") return keepKpId(liftwTarget(t.liftId, t));
     if (t.kind === "clps") return collapsTarget(t.kpId, t);
     if (t.kind === "rezka") return rezkaTarget(t.rezkaId, t.kpId);
     return t;
@@ -587,14 +591,117 @@
     return "/";
   }
 
-  function recordHistory(entry) {
-    let hist = loadList(STORE_HISTORY);
-    if (entry.snapshot) {
-      hist = hist.map((item) => item.key === entry.key ? item : ({ ...item, snapshot: "" }));
+  function validHistoryKpId(...values) {
+    for (const value of values) {
+      const id = String(value || "");
+      if (/^\d+$/.test(id)) return id;
     }
-    const i = hist.findIndex((h) => h.key === entry.key);
+    return "";
+  }
+
+  function historyKpId(entry = {}, meta = {}) {
+    const target = entry?.target || entry || {};
+    return validHistoryKpId(
+      entry?.kpId,
+      meta?.kpId,
+      target?.kpId,
+      target?.kind === "kp" || target?.kind === "clps" ? target?.kpId : "",
+    );
+  }
+
+  function canonicalHistoryKey(entry = {}, meta = {}) {
+    const kpId = historyKpId(entry, meta);
+    if (kpId) return `kp:${kpId}`;
+    return String(entry?.key || keyFor(entry?.target || entry) || "x");
+  }
+
+  const HISTORY_META_FIELDS = [
+    "title", "originalTitle", "alternativeName", "enName", "year", "poster", "backdrop",
+    "description", "shortDescription", "slogan", "isSeries", "movieLength", "ageRating",
+    "ratingMpaa", "rating", "votes", "externalId", "genres", "countries", "directors",
+    "cast", "people", "kpId", "metaLevel",
+  ];
+
+  function historyEntryMeta(entry = {}) {
+    const meta = entry?.meta && typeof entry.meta === "object" ? entry.meta : {};
+    const top = {};
+    for (const field of HISTORY_META_FIELDS) {
+      if (entry?.[field] !== undefined && entry?.[field] !== null && entry?.[field] !== "") {
+        top[field] = entry[field];
+      }
+    }
+    return mergeMetadata(top, meta);
+  }
+
+  function historyMetaSnapshot(meta = {}, target = {}) {
+    const source = mergeMetadata(meta, target);
+    const snapshot = {};
+    for (const field of HISTORY_META_FIELDS) {
+      const value = source?.[field];
+      if (value === undefined || value === null || value === "") continue;
+      snapshot[field] = value;
+    }
+    const kpId = historyKpId(target, source);
+    if (kpId) snapshot.kpId = kpId;
+    return snapshot;
+  }
+
+  function mergeHistoryEntries(newer, older) {
+    const meta = mergeMetadata(historyEntryMeta(newer), historyEntryMeta(older));
+    const merged = { ...older, ...newer };
+    merged.kpId = historyKpId(merged, meta) || undefined;
+    merged.key = canonicalHistoryKey(merged, meta);
+    merged.meta = historyMetaSnapshot(meta, merged.target || {});
+    for (const field of ["title", "poster", "year", "movieLength", "kpId", "isSeries", "rating"]) {
+      if (meta[field] !== undefined && meta[field] !== null && meta[field] !== "") merged[field] = meta[field];
+    }
+    // Opening a second provider creates a newer zero-second entry. Keep the real
+    // progress from the older alias until the new provider reports playback.
+    if (!(Number(newer?.duration) > 0) && Number(older?.duration) > 0) {
+      merged.position = older.position;
+      merged.duration = older.duration;
+      merged.progress = older.progress;
+    }
+    merged.updatedAt = Math.max(Number(newer?.updatedAt) || 0, Number(older?.updatedAt) || 0);
+    return merged;
+  }
+
+  function collapseHistory(entries) {
+    const sorted = [...(Array.isArray(entries) ? entries : [])]
+      .filter((entry) => entry?.target || entry?.key)
+      .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
+    const byKey = new Map();
+    for (const raw of sorted) {
+      const entry = { ...raw, key: canonicalHistoryKey(raw, historyEntryMeta(raw)) };
+      const previous = byKey.get(entry.key);
+      byKey.set(entry.key, previous ? mergeHistoryEntries(previous, entry) : mergeHistoryEntries(entry, {}));
+    }
+    return [...byKey.values()].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  }
+
+  function historyEntryFor(ref) {
+    const routeKey = typeof ref === "string" ? ref : keyFor(ref);
+    const canonical = typeof ref === "string" ? ref : canonicalHistoryKey(ref, state.currentMeta || {});
+    return collapseHistory(loadList(STORE_HISTORY)).find((entry) => (
+      entry.key === canonical || entry.key === routeKey || keyFor(entry.target) === routeKey
+    ));
+  }
+
+  function recordHistory(entry) {
+    const kpId = historyKpId(entry, entry.meta || state.currentMeta || {});
+    const normalized = {
+      ...entry,
+      ...(kpId ? { kpId } : {}),
+      key: canonicalHistoryKey(entry, entry.meta || state.currentMeta || {}),
+      meta: historyMetaSnapshot(entry.meta || state.currentMeta || historyEntryMeta(entry), entry.target || {}),
+    };
+    let hist = collapseHistory(loadList(STORE_HISTORY));
+    if (normalized.snapshot) {
+      hist = hist.map((item) => item.key === normalized.key ? item : ({ ...item, snapshot: "" }));
+    }
+    const i = hist.findIndex((h) => h.key === normalized.key);
     const prev = i >= 0 ? hist[i] : null;
-    const merged = { ...(prev || {}), ...entry, updatedAt: Date.now() };
+    const merged = mergeHistoryEntries({ ...(prev || {}), ...normalized, updatedAt: Date.now() }, prev || {});
     // A replay whose caches rotted (expired ortmeta, bare deep link) must never
     // blank out metadata an earlier session already stored — progress reporters
     // pass whatever the current target knows, which can be nothing.
@@ -612,15 +719,16 @@
     saveList(STORE_HISTORY, hist.slice(0, 30));
   }
   function recordOpen(target) {
-    const key = keyFor(target);
-    const existing = loadList(STORE_HISTORY).find((h) => h.key === key);
+    const kpId = historyKpId(target, state.currentMeta || {});
+    if (kpId) target.kpId = kpId;
+    const key = canonicalHistoryKey(target, state.currentMeta || {});
+    const existing = historyEntryFor(target);
     recordHistory({
       key,
       kind: target.kind,
       target: cleanTarget(target),
       // Kinopoisk id when known — the "Для вас" recommender seeds from it.
-      kpId: (target.kind === "kp" || target.kind === "clps") ? String(target.kpId)
-        : (state.currentMeta?.kpId ? String(state.currentMeta.kpId) : existing?.kpId),
+      kpId: kpId || existing?.kpId,
       title: target.title || existing?.title || "",
       poster: target.poster || existing?.poster || "",
       year: target.year || existing?.year || "",
@@ -630,6 +738,7 @@
       position: existing?.position || 0,
       duration: existing?.duration || 0,
       progress: existing?.progress || 0,
+      meta: historyMetaSnapshot(state.currentMeta || {}, target),
     });
   }
   // Late kpId attach: zen/nd/ort plays learn their Kinopoisk id only after the
@@ -638,18 +747,20 @@
   function attachHistoryKpId(key, kpId) {
     if (!key || !/^\d+$/.test(String(kpId || ""))) return;
     const hist = loadList(STORE_HISTORY);
-    const entry = hist.find((h) => h.key === key);
-    if (!entry || entry.kpId) return;
+    const entry = hist.find((h) => h.key === key || keyFor(h.target) === key);
+    if (!entry) return;
     entry.kpId = String(kpId);
-    saveList(STORE_HISTORY, hist);
+    if (entry.target) entry.target = cleanTarget({ ...entry.target, kpId: String(kpId) });
+    entry.meta = historyMetaSnapshot({ ...historyEntryMeta(entry), kpId: String(kpId) }, entry.target || {});
+    saveList(STORE_HISTORY, collapseHistory(hist));
   }
 
   // Recover title/poster/year for a target that carries no kpId (Ortified), e.g.
   // when reopened from Continue/Bookmarks where the URL is just the embed. Falls
   // back to whatever the history/bookmark entry kept so the watch tab is never bare.
   function storedMeta(key) {
-    const entry = loadList(STORE_HISTORY).find((x) => x.key === key) || loadList(STORE_BOOKMARKS).find((x) => x.key === key);
-    return entry ? { title: entry.title, poster: entry.poster, year: entry.year } : null;
+    const entry = historyEntryFor(key) || loadList(STORE_BOOKMARKS).find((x) => x.key === key || keyFor(x.target) === key);
+    return entry ? historyEntryMeta(entry) : null;
   }
 
   // Ortified/Opravar targets carry no kpId, so their sidebar lives entirely on the
@@ -738,22 +849,22 @@
   }
 
   function resumePosition(key) {
-    const e = loadList(STORE_HISTORY).find((h) => h.key === key);
+    const e = historyEntryFor(key);
     if (!e || !e.duration) return 0;
     if (e.progress >= 0.95) return 0;
     return e.position > 5 ? e.position : 0;
   }
   function savedAudioLang(key) {
-    return loadList(STORE_HISTORY).find((h) => h.key === key)?.audioLang || null;
+    return historyEntryFor(key)?.audioLang || null;
   }
   function savedOpravarSelection(key) {
-    return loadList(STORE_HISTORY).find((h) => h.key === key)?.opravarSelection || null;
+    return historyEntryFor(key)?.opravarSelection || null;
   }
   function savedCollapsSelection(key) {
-    return loadList(STORE_HISTORY).find((h) => h.key === key)?.collapsSelection || null;
+    return historyEntryFor(key)?.collapsSelection || null;
   }
   function savedSerialSelection(key) {
-    return loadList(STORE_HISTORY).find((h) => h.key === key)?.serialSelection || null;
+    return historyEntryFor(key)?.serialSelection || null;
   }
   function persistAudio(lang) {
     const t = state.currentTarget;
@@ -836,6 +947,7 @@
     syncBookmarkButton(button, key);
     button.addEventListener("keydown", (event) => event.stopPropagation());
     button.addEventListener("click", (event) => {
+      event.preventDefault();
       event.stopPropagation();
       const added = toggleBookmark(target, details);
       onChange?.(added);
@@ -953,6 +1065,7 @@
     const year = String(item?.year ?? "").match(/\d{4}/)?.[0] || null;
     const isSeries = !!item?.serial || /SERIES|TV_SHOW|MINI/i.test(String(item?.type || ""));
     return {
+      metaLevel: search ? "summary" : "full",
       kpId: item?.kinopoiskId ?? item?.filmId ?? null,
       name: item?.nameRu || item?.nameOriginal || item?.nameEn || null,
       alternativeName: item?.nameOriginal || item?.nameEn || null,
@@ -1018,31 +1131,63 @@
         throw primaryError;
       }
     }
+    results = results.map((movie) => ({ ...movie, metaLevel: "summary" }));
     cacheSet("search", ckey, results, TTL.search);
-    results.forEach((m) => m.kpId != null && cacheSet("meta", m.kpId, m, TTL.meta));
+    results.forEach((m) => m.kpId != null && cacheSet("metasummary", m.kpId, m, TTL.meta));
     return results;
   }
 
+  function metadataIsFull(meta) {
+    if (!meta || typeof meta !== "object") return false;
+    if (meta.metaLevel === "full") return true;
+    if (meta.metaLevel === "summary") return false;
+    const external = meta.externalId || meta.externalIds || {};
+    const hasDescription = !!(meta.description || meta.shortDescription);
+    const hasRating = [meta.rating?.kp, meta.rating?.imdb].some((value) => Number(value) > 0);
+    const hasIdentity = !!(external.imdb || meta.imdbId);
+    return hasDescription && hasRating && hasIdentity;
+  }
+
+  function cacheMovieMetadata(kpId, meta, ttl = TTL.meta) {
+    const id = String(kpId || "");
+    if (!/^\d+$/.test(id) || !meta) return;
+    cacheSet(metadataIsFull(meta) ? "meta" : "metasummary", id, meta, ttl);
+  }
+
+  const movieMetaInflight = new Map();
   async function fetchMovieMeta(kpId) {
     const cached = cacheGet("meta", kpId);
-    if (cached) return cached;
-    try {
-      const data = await resolverJson(`/movie?id=${encodeURIComponent(kpId)}&primaryOnly=1`, { retries: 1 });
-      if (data.movie) {
-        cacheSet("meta", kpId, data.movie, TTL.meta);
-        return data.movie;
-      }
-    } catch (primaryError) {
+    if (metadataIsFull(cached)) return cached;
+    const inflightKey = String(kpId || "");
+    const inflight = movieMetaInflight.get(inflightKey);
+    if (inflight) return inflight;
+    const summary = cached || cacheGet("metasummary", kpId) || {};
+    const pending = (async () => { try {
+      // Permanent film identity belongs on the viewer side: Unofficial exposes
+      // IMDb id, both ratings and synopsis in one free call from the viewer's IP.
+      const raw = await directUnofficialJson(`/api/v2.2/films/${encodeURIComponent(kpId)}`);
+      const movie = mergeMetadata(normalizeUnofficialClientMovie(raw), summary);
+      movie.metaLevel = "full";
+      cacheMovieMetadata(kpId, movie);
+      return movie;
+    } catch (clientError) {
       try {
-        const raw = await directUnofficialJson(`/api/v2.2/films/${encodeURIComponent(kpId)}`);
-        const movie = normalizeUnofficialClientMovie(raw);
-        cacheSet("meta", kpId, movie, TTL.meta);
-        return movie;
-      } catch {
-        log("meta-warn", primaryError.message);
+        // Deno keeps PoiskKino plus its own Unofficial pool as a fallback only;
+        // metadata no longer burns shared egress/quota while browser keys work.
+        const data = await resolverJson(`/movie?id=${encodeURIComponent(kpId)}`, { retries: 1 });
+        if (data.movie) {
+          const movie = mergeMetadata({ ...data.movie, metaLevel: "full" }, summary);
+          cacheMovieMetadata(kpId, movie);
+          return movie;
+        }
+      } catch (serverError) {
+        log("meta-warn", { client: clientError.message, server: serverError.message });
       }
     }
     return null;
+    })().finally(() => movieMetaInflight.delete(inflightKey));
+    movieMetaInflight.set(inflightKey, pending);
+    return pending;
   }
 
   async function fetchCollapsJson(url, timeoutMs = 9000) {
@@ -2494,7 +2639,11 @@ parent.postMessage({
     preloadPlayerRuntime();
     document.title = SITE_TITLE;
     el.searchInput.value = "";
-    const hist = loadList(STORE_HISTORY);
+    const rawHistory = loadList(STORE_HISTORY);
+    const hist = collapseHistory(rawHistory);
+    if (hist.length !== rawHistory.length || hist.some((entry, index) => entry.key !== rawHistory[index]?.key)) {
+      saveList(STORE_HISTORY, hist.slice(0, 30));
+    }
     renderContinueHeader(hist.length);
     renderHomeGrid(el.continueGrid, el.continueSection, hist, {
       withProgress: true,
@@ -2604,6 +2753,12 @@ parent.postMessage({
     } else {
       media.appendChild(blankPoster());
     }
+      const nativeLink = document.createElement("a");
+      nativeLink.className = "card-native-link";
+      nativeLink.href = routePath(hashFor(entry.target));
+      nativeLink.tabIndex = -1;
+    nativeLink.setAttribute("aria-label", `Открыть ${entry.title || "тайтл"}`);
+    media.appendChild(nativeLink);
 
     const play = document.createElement("span");
     play.className = "continue-play";
@@ -2629,6 +2784,7 @@ parent.postMessage({
     remove.innerHTML = `<span class="card-remove-glyph" aria-hidden="true">×</span>`;
     remove.setAttribute("aria-label", "Убрать из продолжения");
     remove.addEventListener("click", (event) => {
+      event.preventDefault();
       event.stopPropagation();
       const list = loadList(opts.store).filter((item) => item.key !== entry.key);
       saveList(opts.store, list);
@@ -2649,7 +2805,11 @@ parent.postMessage({
     }
 
     const open = () => go(hashFor(entry.target));
-    card.addEventListener("click", open);
+    card.addEventListener("click", (event) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      open();
+    });
     card.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
@@ -2974,6 +3134,24 @@ parent.postMessage({
     el.resultsGrid.replaceChildren(frag);
     layoutMobileGrid(el.resultsGrid);
     fillGridLetterboxd(el.resultsGrid);
+    enrichSearchCardMetadata(pkResults);
+  }
+
+  const searchMetaEnrichmentInflight = new Map();
+  function enrichSearchCardMetadata(movies) {
+    const ids = [...new Set((movies || []).map((movie) => String(movie?.kpId || "")).filter((id) => /^\d+$/.test(id)))];
+    if (!ids.length || typeof window.alphyForYou?.enrichItems !== "function") return;
+    const key = ids.join(",");
+    let task = searchMetaEnrichmentInflight.get(key);
+    if (!task) {
+      task = Promise.resolve(window.alphyForYou.enrichItems(ids))
+        .finally(() => searchMetaEnrichmentInflight.delete(key));
+      searchMetaEnrichmentInflight.set(key, task);
+    }
+    task.then((meta) => {
+      const enriched = (movies || []).map((movie) => mergeMetadata(movie, meta?.get?.(String(movie.kpId)) || {}));
+      patchCardRowMetadata(el.resultsGrid, enriched);
+    }).catch((error) => log("search-meta-warn", error.message));
   }
 
   function makeLiftwCard(item) {
@@ -3127,6 +3305,17 @@ parent.postMessage({
     } else {
       media.appendChild(blankPoster());
     }
+    const nativeTarget = recommendation?.target || intent?.target || bookmark?.target;
+    const nativeKpId = validHistoryKpId(nativeTarget?.kpId, bookmark?.details?.kpId, recommendation?.kpId);
+    if (nativeKpId) card.dataset.kpId = nativeKpId;
+    if (nativeTarget?.kind) {
+      const nativeLink = document.createElement("a");
+      nativeLink.className = "card-native-link";
+      nativeLink.href = routePath(hashFor(nativeTarget));
+      nativeLink.tabIndex = -1;
+      nativeLink.setAttribute("aria-label", `Открыть ${title || "тайтл"}`);
+      media.appendChild(nativeLink);
+    }
     // The corner pill is a warning, not a label: it exists to call out a release
     // you probably do not want (a TS cam rip, a 720p-only last resort). The source
     // itself rides in the caption line under the poster like every other field.
@@ -3164,7 +3353,7 @@ parent.postMessage({
       add.type = "button";
       add.setAttribute("aria-label", "Добавить в подборку");
       add.textContent = "+";
-      add.addEventListener("click", (event) => { event.stopPropagation(); onAdd(); });
+      add.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); onAdd(); });
       media.appendChild(add);
     }
     if (onRemove) {
@@ -3173,7 +3362,7 @@ parent.postMessage({
       x.type = "button";
       x.setAttribute("aria-label", "Скрыть рекомендацию");
       x.innerHTML = `<span class="card-remove-glyph" aria-hidden="true">×</span>`;
-      x.addEventListener("click", (event) => { event.stopPropagation(); onRemove(); });
+      x.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); onRemove(); });
       media.appendChild(x);
     }
     card.appendChild(media);
@@ -3199,7 +3388,11 @@ parent.postMessage({
         Promise.resolve(result).then(clear, clear);
       }
     };
-    card.addEventListener("click", activate);
+    card.addEventListener("click", (event) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      activate();
+    });
     card.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
@@ -3770,13 +3963,16 @@ parent.postMessage({
     const id = String(kpId || "").trim();
     if (!/^\d+$/.test(id)) throw new Error("Collaps: неверный KP id");
 
-    const cachedMeta = opts.meta || cacheGet("meta", id);
-    const metaTask = cachedMeta ? Promise.resolve(cachedMeta) : fetchMovieMeta(id).catch(() => null);
+    const cachedSeed = opts.meta || cacheGet("meta", id) || cacheGet("metasummary", id);
+    const cachedMeta = cachedSeed ? mergeMetadata(cachedSeed, {}) : null;
+    const metaTask = metadataIsFull(cachedMeta)
+      ? Promise.resolve(cachedMeta)
+      : fetchMovieMeta(id).catch(() => null);
     const playlist = await fetchCollapsPlaylist(id);
     if (isStale(token)) return;
     let meta = cachedMeta || await settleWithin(metaTask, 200);
     if (isStale(token)) return;
-    if (meta) cacheSet("meta", id, meta, TTL.meta);
+    if (metadataIsFull(meta)) cacheSet("meta", id, meta, TTL.meta);
 
     const requested =
       normalizeCollapsSelection(opts.selection) ||
@@ -3797,7 +3993,7 @@ parent.postMessage({
     renderMeta(mergeMetadata({ title, isSeries: target.isSeries }, meta || {}), target);
     recordOpen(target);
 
-    if (!meta) {
+    if (!metadataIsFull(meta)) {
       metaTask.then((fresh) => {
         const current = state.currentTarget;
         if (!fresh || isStale(token) || current?.kind !== "clps" || String(current.kpId || "") !== id) return;
@@ -4285,6 +4481,8 @@ parent.postMessage({
     if (cachedZona?.embedUrl && resumePosition(`kp:${kpId}`) > 0) {
       return { kind: "zen", resolved: cachedZona };
     }
+    const cachedLiftId = cacheGet(LIFTW_BY_KP_CACHE_NS, String(kpId));
+    if (typeof cachedLiftId === "string" && cachedLiftId) return { kind: "lift", liftId: cachedLiftId };
     const cachedCollaps = cacheGet("clpsprobe", kpId);
     if (cachedCollaps?.kpId) return { kind: "clps", hit: cachedCollaps };
     if (cachedZona?.embedUrl) return { kind: "zen", resolved: cachedZona };
@@ -4316,9 +4514,20 @@ parent.postMessage({
     const recommendation = recommendationContextByKp.get(String(kpId));
     if (!recommendation) return resolveStandardKpPlaybackSource(kpId, meta, selection);
 
+    const warmLiftId = cacheGet(LIFTW_BY_KP_CACHE_NS, String(kpId));
+    if (typeof warmLiftId === "string" && warmLiftId) return { kind: "lift", liftId: warmLiftId };
+
     let selected = false;
     const browserTask = resolveRecommendationPlaybackSource(recommendation, selection);
     const standardTask = resolveStandardKpPlaybackSource(kpId, meta, selection, () => !selected);
+    // Start Zona/Collaps immediately, but give client-only sources a bounded lead.
+    // This prevents an old cached Zona URL from beating an exact LiftW 1080p hit,
+    // while a genuine browser miss adds at most 650 ms and wastes no overlap.
+    const browserFast = await settleWithin(browserTask, 650).catch(() => null);
+    if (browserFast) {
+      selected = true;
+      return browserFast;
+    }
     const source = await firstAvailable([browserTask, standardTask]);
     selected = !!source;
     return source;
@@ -4326,8 +4535,11 @@ parent.postMessage({
 
   async function playKp(kpId, token, opts = {}) {
     const id = String(kpId || "");
-    let meta = opts.meta || cacheGet("meta", id);
-    const metaTask = meta ? Promise.resolve(meta) : fetchMovieMeta(id).catch(() => null);
+    const cachedSeed = opts.meta || cacheGet("meta", id) || cacheGet("metasummary", id);
+    let meta = cachedSeed ? mergeMetadata(cachedSeed, {}) : null;
+    const metaTask = metadataIsFull(meta)
+      ? Promise.resolve(meta)
+      : fetchMovieMeta(id).catch(() => null);
     const requestedSelection = normalizeSerialHint(opts.serialSelection)
       || normalizeSerialHint(savedSerialSelection(`kp:${id}`));
     const sourceTask = resolveKpPlaybackSource(id, meta, requestedSelection);
@@ -4336,9 +4548,9 @@ parent.postMessage({
     // Metadata must never serialize in front of source resolution. Give a cold
     // direct link a tiny window for a real title, then let playback continue and
     // paint metadata whenever it arrives.
-    if (!meta) meta = await settleWithin(metaTask, 250);
+    if (!movieTitle(meta) && !meta.poster) meta = await settleWithin(metaTask, 250) || meta;
     if (isStale(token)) return;
-    if (meta) cacheSet("meta", id, meta, TTL.meta);
+    if (metadataIsFull(meta)) cacheSet("meta", id, meta, TTL.meta);
     const isSeries = !!(opts.forceSeries || meta?.isSeries || requestedSelection);
     const target = {
       kind: "kp",
@@ -4353,7 +4565,7 @@ parent.postMessage({
     renderMeta(meta, target);
     recordOpen(target);
 
-    if (!meta) {
+    if (!metadataIsFull(meta)) {
       metaTask.then((fresh) => {
         const current = state.currentTarget;
         if (!fresh || isStale(token) || String(current?.kpId || "") !== id) return;
@@ -4512,6 +4724,7 @@ parent.postMessage({
       poster: cachedMeta?.poster,
       year: cachedMeta?.year,
       isSeries: !!cachedMeta?.isSeries,
+      kpId: validHistoryKpId(cachedMeta?.kpId),
     };
     state.currentTarget = target;
     setWatchHead(target.title, target);
@@ -4540,7 +4753,10 @@ parent.postMessage({
     // newdeaf meta, then from the history/bookmark entry, so the sidebar + title
     // look the same as right after search instead of a bare "Ortified" player.
     const meta = ndMeta || cacheGet("ortmeta", embedUrl) || storedMeta(`ort:${embedUrl}`);
-    const target = { kind: "ort", embedUrl, title: meta?.title, poster: meta?.poster, year: meta?.year };
+    const target = {
+      kind: "ort", embedUrl, title: meta?.title, poster: meta?.poster, year: meta?.year,
+      kpId: validHistoryKpId(meta?.kpId), isSeries: !!meta?.isSeries,
+    };
     state.currentTarget = target;
     setWatchHead(target.title || "Ortified", target);
     if (meta && (meta.title || meta.poster || meta.description)) {
@@ -4570,6 +4786,7 @@ parent.postMessage({
       poster: meta?.poster,
       year: meta?.year,
       isSeries: !!(meta?.isSeries || serialHint),
+      kpId: validHistoryKpId(meta?.kpId),
     };
     state.currentTarget = target;
     setWatchHead(target.title || "Opravar", target);
@@ -4744,6 +4961,7 @@ parent.postMessage({
     const initialMeta = mergeMetadata(opts.meta || {}, cachedMeta || {});
     const initialTitle = movieTitle(initialMeta);
     const target = liftwTarget(safeId, opts.serialSelection || {});
+    target.kpId = validHistoryKpId(initialMeta.kpId);
     target.title = isPlaceholderTitle(initialTitle) ? "" : initialTitle;
     target.poster = initialMeta.poster || "";
     target.year = initialMeta.year || "";
@@ -4762,7 +4980,8 @@ parent.postMessage({
     const parsed = await resolveLiftwTitle(safeId, { force: !!opts.force });
     if (isStale(token)) return;
 
-    const meta = mergeMetadata(parsed.meta, cachedMeta || {});
+    let meta = mergeMetadata(parsed.meta, initialMeta);
+    target.kpId = validHistoryKpId(meta.kpId, target.kpId);
     target.title = meta.title || target.title;
     target.poster = meta.poster || target.poster;
     target.year = meta.year || target.year;
@@ -4771,6 +4990,19 @@ parent.postMessage({
     renderMeta(meta, target);
     recordOpen(target);
     cacheSet("curatedmeta", `lift:${safeId}`, meta, TTL.enriched);
+
+    if (target.kpId && !metadataIsFull(meta)) {
+      fetchMovieMeta(target.kpId).then((fresh) => {
+        if (!fresh || isStale(token) || state.currentTarget !== target) return;
+        meta = mergeMetadata(meta, fresh);
+        target.title = movieTitle(meta) || target.title;
+        target.poster = meta.poster || target.poster;
+        target.year = meta.year || target.year;
+        renderMeta(meta, target);
+        cacheSet("curatedmeta", `lift:${safeId}`, meta, TTL.enriched);
+        recordOpen(target);
+      }).catch(() => {});
+    }
 
     const seasons = parsed.playlist.seasons || [];
     const requested =
@@ -4794,7 +5026,7 @@ parent.postMessage({
 
     state.sources = sources;
     state.audioNames = (episode?.audioNames?.length ? episode.audioNames : parsed.audioNames) || [];
-    const histKey = keyFor(target);
+    const histKey = canonicalHistoryKey(target, meta);
     const serial = selection
       ? { provider: "liftw", liftId: String(safeId), histKey, seasons, selection, switching: false }
       : null;
@@ -4987,7 +5219,7 @@ parent.postMessage({
       throw new Error("PoiskKino не вернул kpId для Zona fallback");
     }
     const meta = mergeMetadata(opts.meta || {}, movie);
-    cacheSet("meta", movie.kpId, meta, TTL.meta);
+    cacheMovieMetadata(movie.kpId, meta);
     replaceHash(`/watch/kp/${encodeURIComponent(movie.kpId)}`);
     return playKp(String(movie.kpId), token, {
       meta,
@@ -5021,7 +5253,7 @@ parent.postMessage({
   }
 
   function savedRezkaPref(key, field) {
-    return loadList(STORE_HISTORY).find((h) => h.key === key)?.[field] || null;
+    return historyEntryFor(key)?.[field] || null;
   }
   function persistRezkaPref(key, patch) {
     const t = state.currentTarget;
@@ -5045,7 +5277,7 @@ parent.postMessage({
       kpId: String(hit.kpId || ""),
     };
     cacheSet("curatedmeta", keyFor(target), meta, TTL.enriched);
-    if (target.kpId) cacheSet("meta", target.kpId, meta, TTL.meta);
+    if (target.kpId) cacheMovieMetadata(target.kpId, meta);
     go(hashFor(target));
   }
 
@@ -5088,8 +5320,10 @@ parent.postMessage({
     const target = rezkaTarget(rezkaId, kpId);
     const histKey = keyFor(target);
     let meta = cacheGet("curatedmeta", histKey) || storedMeta(histKey) ||
-      (target.kpId ? cacheGet("meta", target.kpId) : null);
-    const metaTask = !meta && target.kpId ? fetchMovieMeta(target.kpId).catch(() => null) : Promise.resolve(meta);
+      (target.kpId ? cacheGet("meta", target.kpId) || cacheGet("metasummary", target.kpId) : null);
+    const metaTask = target.kpId && !metadataIsFull(meta)
+      ? fetchMovieMeta(target.kpId).catch(() => null)
+      : Promise.resolve(meta);
     const savedDub = savedRezkaPref(histKey, "rezkaTranslator");
     const resolveTask = savedDub
       ? resolveRezka({ rezkaId, translator: savedDub }).catch(() => resolveRezka({ rezkaId }))
@@ -5109,7 +5343,7 @@ parent.postMessage({
     if (freshMeta && freshMeta !== meta) {
       meta = { ...freshMeta, kpId: target.kpId || freshMeta.kpId };
       cacheSet("curatedmeta", histKey, meta, TTL.enriched);
-      if (target.kpId) cacheSet("meta", target.kpId, meta, TTL.meta);
+      if (target.kpId) cacheMovieMetadata(target.kpId, meta);
       target.title = movieTitle(meta) || meta.title || target.title;
       target.poster = meta.poster || target.poster;
       target.year = meta.year || target.year;
@@ -5490,6 +5724,9 @@ parent.postMessage({
       poster: left.poster || right.poster || "",
       backdrop: left.backdrop || right.backdrop || "",
       description: left.description || left.shortDescription || right.description || right.shortDescription || "",
+      shortDescription: left.shortDescription || right.shortDescription || "",
+      originalTitle: left.originalTitle || left.alternativeName || left.enName ||
+        right.originalTitle || right.alternativeName || right.enName || "",
       isSeries: left.isSeries ?? right.isSeries ?? false,
       // A Kinopoisk id is an identity, never a value to clear. Leaving it to the
       // plain spread let the empty kpId of a first, placeholder render mask the
@@ -5503,6 +5740,15 @@ parent.postMessage({
         ...(right.rating || {}),
         ...(left.rating || {}),
       },
+      externalId: {
+        imdb: left.externalId?.imdb || left.externalIds?.imdb || left.imdbId ||
+          right.externalId?.imdb || right.externalIds?.imdb || right.imdbId || "",
+        tmdb: left.externalId?.tmdb || left.externalIds?.tmdb || left.tmdbId ||
+          right.externalId?.tmdb || right.externalIds?.tmdb || right.tmdbId || "",
+      },
+      metaLevel: left.metaLevel === "full" || right.metaLevel === "full"
+        ? "full"
+        : (left.metaLevel || right.metaLevel || ""),
       people: {
         directors: pickPeople(left, right, "directors", 3),
         cast: pickPeople(left, right, "cast", 8),
@@ -5864,20 +6110,23 @@ parent.postMessage({
     ]);
   }
 
-  // Only ever runs for titles the resolver could not describe (zen:/ort:/nd:
-  // targets carry no kinopoisk.dev document). kp: titles already arrived complete
-  // from /movie, so this costs nothing for them.
+  // Usually runs for provider targets that arrived with only title/poster. It also
+  // repairs a kp: page whose old search-summary cache masqueraded as full metadata.
   async function backfillCredits(target, kpId, token) {
     if (!/^\d+$/.test(kpId)) return;
     const current = state.currentMeta || {};
-    if ((current.genres || []).length && (current.directors || []).length && current.people?.directors?.length) return;
+    const hasIdentity = /^tt\d{6,10}$/.test(String(current.externalId?.imdb || ""));
+    const hasRatings = [current.rating?.kp, current.rating?.imdb].some((value) => Number(value) > 0);
+    if ((current.genres || []).length && (current.directors || []).length && current.people?.directors?.length &&
+        current.description && hasRatings && hasIdentity) return;
     const extras = await window.alphyForYou?.filmExtras?.(kpId);
     if (!extras || isStale(token) || !state.currentTarget) return;
     if (keyFor(state.currentTarget) !== keyFor(target)) return;
     const merged = mergeMetadata(state.currentMeta || {}, extras);
     state.currentMeta = merged;
-    cacheSet("meta", kpId, mergeMetadata(cacheGet("meta", kpId) || {}, extras), TTL.meta);
+    cacheMovieMetadata(kpId, mergeMetadata(cacheGet("meta", kpId) || {}, extras));
     renderMeta(merged, state.currentTarget);
+    recordOpen(state.currentTarget);
   }
 
   async function renderSimilarRow(kpId, token) {
@@ -5886,14 +6135,40 @@ parent.postMessage({
     const items = await window.alphyForYou?.similarRow?.(kpId);
     if (!items?.length || isStale(token)) return;
 
-    // Give the one batch enrichment a short head start and paint exactly once.
-    // If it is cold or slow, the already useful cards win after 220 ms; the
-    // request still fills cache for next time but never replaces a visible row.
+    // Give enrichment a short head start. If it is cold, paint useful cards at
+    // 220 ms and patch their text/rating nodes in place later; never replace the
+    // visible row, which would reset hover and make the shelf blink.
     const enrichTask = window.alphyForYou?.enrichSimilarRow?.(kpId);
     const enriched = enrichTask
       ? await settleWithin(Promise.resolve(enrichTask).catch(() => null), 220)
       : null;
-    if (!isStale(token)) paintSimilarRow(enriched?.length ? enriched : items, token);
+    if (isStale(token)) return;
+    paintSimilarRow(enriched?.length ? enriched : items, token);
+    if (!enriched?.length && enrichTask) {
+      Promise.resolve(enrichTask).then((late) => {
+        if (late?.length && !isStale(token)) patchCardRowMetadata(el.similarRow, late);
+      }).catch(() => {});
+    }
+  }
+
+  function patchCardRowMetadata(grid, items) {
+    const byId = new Map((items || []).map((item) => [
+      String(item?.kpId || item?.target?.kpId || ""), item,
+    ]));
+    for (const card of [...(grid?.querySelectorAll?.(".card[data-kp-id]") || [])]) {
+      const item = byId.get(String(card.dataset.kpId || ""));
+      if (!item) continue;
+      if (item.year) card.dataset.year = String(item.year).slice(0, 4);
+      const meta = card.querySelector(".cmeta");
+      if (meta) meta.textContent = [item.year, item.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · ");
+      const values = card.querySelectorAll(".hover-rating-value");
+      if (values[0]) values[0].textContent = formatRating(item.rating?.imdb);
+      if (values[1]) values[1].textContent = formatRating(item.rating?.kp);
+      const imdb = item.externalId?.imdb || item.imdbId || "";
+      if (/^tt\d{6,10}$/.test(String(imdb))) card.dataset.imdb = imdb;
+      setCardDuration(card, item.movieLength, item.isSeries);
+    }
+    fillGridLetterboxd(grid);
   }
 
   function paintSimilarRow(items, token) {
@@ -6382,6 +6657,8 @@ parent.postMessage({
         rating: state.currentMeta?.rating || undefined,
         movieLength: state.currentMeta?.movieLength || undefined,
         isSeries: state.currentMeta?.isSeries ?? target.isSeries ?? false,
+        kpId: historyKpId(target, state.currentMeta || {}),
+        meta: historyMetaSnapshot(state.currentMeta || {}, target),
         position: cur,
         duration: dur,
         progress: cur / dur,
@@ -6455,6 +6732,8 @@ parent.postMessage({
         title: target.title || state.currentMeta?.title || "",
         poster: target.poster || state.currentMeta?.poster || "",
         year: target.year || state.currentMeta?.year || "",
+        kpId: historyKpId(target, state.currentMeta || {}),
+        meta: historyMetaSnapshot(state.currentMeta || {}, target),
         snapshot,
       });
     } catch (error) {
@@ -6905,7 +7184,7 @@ parent.postMessage({
       if (isStale(token)) return null;
       if (fresh) {
         meta = mergeMetadata(meta, fresh);
-        cacheSet("meta", kpId, meta, TTL.meta);
+        cacheMovieMetadata(kpId, meta);
         state.currentMeta = meta;
         if (state.currentTarget) {
           state.currentTarget.poster = meta.poster || state.currentTarget.poster;
@@ -6928,7 +7207,7 @@ parent.postMessage({
           const fresh = await fetchMovieMeta(kpId);
           if (isStale(token)) return null;
           meta = mergeMetadata(meta, fresh || movie);
-          cacheSet("meta", kpId, meta, TTL.meta);
+          cacheMovieMetadata(kpId, meta);
           state.currentMeta = meta;
           if (state.currentTarget) renderMeta(meta, state.currentTarget);
           external = subtitleExternalId(meta);
@@ -6942,7 +7221,7 @@ parent.postMessage({
       if (externalId) {
         meta = mergeMetadata(meta, { kpId, externalId });
         state.currentMeta = meta;
-        cacheSet("meta", kpId, meta, TTL.meta);
+        cacheMovieMetadata(kpId, meta);
         if (state.currentTarget) renderMeta(meta, state.currentTarget);
         external = subtitleExternalId(meta);
       }
@@ -8863,10 +9142,10 @@ addEventListener('message', async (event) => {
     if (target.kind === "opr") {
       cacheSet("oprmeta", target.playerUrl, { ...meta, pageUrl: target.pageUrl || "" }, TTL.enriched);
     }
-    if (target.kind === "kp") cacheSet("meta", target.kpId, { ...meta, kpId: target.kpId }, TTL.enriched);
-    if (target.kind === "clps") cacheSet("meta", target.kpId, { ...meta, kpId: target.kpId }, TTL.enriched);
+    if (target.kind === "kp") cacheMovieMetadata(target.kpId, { ...meta, kpId: target.kpId }, TTL.enriched);
+    if (target.kind === "clps") cacheMovieMetadata(target.kpId, { ...meta, kpId: target.kpId }, TTL.enriched);
     if (target.kind === "rezka" && target.kpId) {
-      cacheSet("meta", target.kpId, { ...meta, kpId: target.kpId }, TTL.enriched);
+      cacheMovieMetadata(target.kpId, { ...meta, kpId: target.kpId }, TTL.enriched);
     }
     go(hashFor(target));
   }
@@ -9105,6 +9384,10 @@ addEventListener('message', async (event) => {
       LETTERBOXD_ENDPOINTS,
       isPlaceholderTitle,
       mergeMetadata,
+      metadataIsFull,
+      canonicalHistoryKey,
+      collapseHistory,
+      historyEntryMeta,
       formatDuration,
       audioTag,
       audioNameFor,
