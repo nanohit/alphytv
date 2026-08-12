@@ -3580,6 +3580,11 @@ parent.postMessage({
     state.zenithEmbedUrl = "";
     window.dispatchEvent(new CustomEvent("alphy:player-ready", { detail: { ready: false } }));
     el.metaPanel.classList.add("hidden");
+    // The panel normally reuses stable poster/rating nodes across incremental
+    // metadata updates. A route change is a hard ownership boundary: leaving the
+    // old DOM here let a film's Letterboxd badge be adopted by the next series.
+    el.metaPanel.replaceChildren();
+    delete el.metaPanel.dataset.watchToken;
     el.serialPanel.classList.add("hidden");
     el.trackPanel.classList.add("hidden");
     watchExtrasKey = "";
@@ -5850,7 +5855,7 @@ parent.postMessage({
     const poster = meta.poster || target.poster || "";
     const desc = meta.description || meta.shortDescription || "";
     const targetKpId = (target?.kind === "kp" || target?.kind === "clps") ? target.kpId : "";
-    state.currentMeta = mergeMetadata(state.currentMeta || {}, {
+    const mergedMeta = mergeMetadata(state.currentMeta || {}, {
       ...meta,
       kpId: meta.kpId || targetKpId || state.currentMeta?.kpId || "",
       title,
@@ -5859,6 +5864,12 @@ parent.postMessage({
       description: desc,
       isSeries: meta.isSeries ?? target?.isSeries,
     });
+    // Source payloads often begin as film-shaped placeholders and learn their
+    // real type a moment later. Once any payload for this title proves it is a
+    // series, a stale `false` must not mask that correction.
+    mergedMeta.isSeries = state.currentMeta?.isSeries === true ||
+      meta.isSeries === true || target?.isSeries === true;
+    state.currentMeta = mergedMeta;
     // Render from the MERGED view, not the incoming fragment: a later partial
     // update (say a bare title from the resolver) must not blank out credits that
     // an earlier, richer payload already delivered.
@@ -5888,6 +5899,9 @@ parent.postMessage({
 
     const preservedPoster = el.metaPanel.querySelector(".meta-poster img");
     const preservedLetterboxd = el.metaPanel.querySelector(".rt-lb");
+    const canPreserveLetterboxd = !isSeries &&
+      preservedLetterboxd?.dataset.watchToken === String(resolveToken) &&
+      preservedLetterboxd?.dataset.targetKey === keyFor(target);
 
     // Two children only — poster and body. Narrow layouts put them side by side,
     // and a fixed pair survives the fact that ratings/description/credits are each
@@ -5933,14 +5947,16 @@ parent.postMessage({
       ? `<div class="meta-poster"><img src="${escapeAttr(poster)}" alt=""></div>`
       : "";
     el.metaPanel.innerHTML = `${posterHtml}<div class="meta-body">${body}</div>`;
+    el.metaPanel.dataset.watchToken = String(resolveToken);
     const nextPoster = el.metaPanel.querySelector(".meta-poster img");
     if (preservedPoster && nextPoster && preservedPoster.getAttribute("src") === nextPoster.getAttribute("src")) {
       nextPoster.replaceWith(preservedPoster);
     }
     const ratingsHost = el.metaPanel.querySelector(".meta-ratings");
-    if (preservedLetterboxd && ratingsHost && !ratingsHost.querySelector(".rt-lb")) {
+    if (canPreserveLetterboxd && ratingsHost && !ratingsHost.querySelector(".rt-lb")) {
       ratingsHost.appendChild(preservedLetterboxd);
     }
+    if (isSeries) hideReviews();
     const posterHost = el.metaPanel.querySelector(".meta-poster");
     if (posterHost) {
       addCardBookmark(posterHost, target, {
@@ -5991,14 +6007,13 @@ parent.postMessage({
     const token = resolveToken;
     letterboxdImdbId(meta)
       .then(async (imdbId) => {
-        if (!imdbId || isStale(token)) return null;
+        if (!imdbId || !letterboxdWatchIsCurrent(target, token)) return null;
         linkImdbBadge(imdbId, target, token);
         const rating = await letterboxdRating(imdbId);
         return rating ? { ...rating, imdb: imdbId } : null;
       })
       .then((rating) => {
-        if (!rating || isStale(token) || !state.currentTarget) return;
-        if (keyFor(state.currentTarget) !== keyFor(target)) return;
+        if (!rating || !letterboxdWatchIsCurrent(target, token)) return;
         const host = el.metaPanel.querySelector(".meta-ratings");
         if (!host) return;
         if (host.querySelector(".rt-lb")) {
@@ -6016,12 +6031,19 @@ parent.postMessage({
           node.rel = "noopener noreferrer";
         }
         node.innerHTML = `<b>${escapeHtml(letterboxdOutOfTen(rating.r))}</b><span>Letterboxd</span>`;
+        node.dataset.watchToken = String(token);
+        node.dataset.targetKey = keyFor(target);
         host.appendChild(node);
         // The block below «Похожее» hangs off the same resolved id, so it costs
         // no second identity lookup.
         renderReviews(rating.imdb, rating.slug, token).catch((error) => log("reviews-warn", error.message));
       })
       .catch((error) => log("letterboxd-badge-warn", error.message));
+  }
+
+  function letterboxdWatchIsCurrent(target, token) {
+    if (isStale(token) || !state.currentTarget || state.currentMeta?.isSeries) return false;
+    return keyFor(state.currentTarget) === keyFor(target);
   }
 
   // Only the Kinopoisk path carries externalId. Every other source (lift:, zen:,
@@ -6284,9 +6306,9 @@ parent.postMessage({
   }
 
   async function renderReviews(imdbId, slug, token) {
-    if (!el.reviewsSection || !el.reviewsList) return;
+    if (!el.reviewsSection || !el.reviewsList || state.currentMeta?.isSeries) return;
     const list = await letterboxdReviews(imdbId);
-    if (!list?.length || isStale(token)) return;
+    if (!list?.length || isStale(token) || state.currentMeta?.isSeries) return;
     const frag = document.createDocumentFragment();
     for (const item of list) frag.appendChild(renderReview(item));
     el.reviewsList.replaceChildren(frag);

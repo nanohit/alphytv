@@ -143,8 +143,40 @@ test("the badge is appended, never rendered inline, and is skipped for series", 
   assert.match(block, /letterboxdImdbId\(meta\)[\s\S]*\.then\(/);
   assert.match(block, /meta\?\.isSeries/);
   // A late answer must not land on a page the user has already navigated away from.
-  assert.match(block, /isStale\(token\)/);
-  assert.match(block, /keyFor\(state\.currentTarget\) !== keyFor\(target\)/);
+  assert.match(block, /letterboxdWatchIsCurrent\(target, token\)/);
+  const guardStart = source.indexOf("function letterboxdWatchIsCurrent");
+  const guard = source.slice(guardStart, guardStart + 420);
+  assert.match(guard, /isStale\(token\)/);
+  assert.match(guard, /state\.currentMeta\?\.isSeries/);
+  assert.match(guard, /keyFor\(state\.currentTarget\) === keyFor\(target\)/);
+});
+
+test("a film badge cannot survive a route change or a late series correction", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const renderStart = source.indexOf("function renderMeta");
+  const renderEnd = source.indexOf("function linkImdbBadge", renderStart);
+  const render = source.slice(renderStart, renderEnd);
+  assert.match(render, /canPreserveLetterboxd = !isSeries/,
+    "a title corrected to series must discard a film badge");
+  assert.match(render, /dataset\.watchToken === String\(resolveToken\)/,
+    "only a badge created by this navigation may be reused");
+  assert.match(render, /dataset\.targetKey === keyFor\(target\)/,
+    "only a badge owned by this title may be reused");
+  assert.match(render, /state\.currentMeta\?\.isSeries === true[\s\S]*meta\.isSeries === true[\s\S]*target\?\.isSeries === true/,
+    "a late authoritative series type must replace an early film-shaped placeholder");
+
+  const showStart = source.indexOf("async function showWatch");
+  const show = source.slice(showStart, showStart + 1100);
+  assert.match(show, /metaPanel\.replaceChildren\(\)/,
+    "new watch routes must not retain the previous title's DOM");
+
+  const badgeStart = source.indexOf("function fillLetterboxdBadge");
+  const badgeEnd = source.indexOf("async function letterboxdImdbId", badgeStart);
+  const badge = source.slice(badgeStart, badgeEnd);
+  assert.match(badge, /letterboxdWatchIsCurrent\(target, token\)/,
+    "late network answers must re-check the current title type");
+  assert.match(badge, /node\.dataset\.targetKey = keyFor\(target\)/,
+    "new badges must carry explicit title ownership");
 });
 
 test("a grid asks once per shard and never triggers scraping", async () => {
