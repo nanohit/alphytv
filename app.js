@@ -5092,7 +5092,10 @@ parent.postMessage({
     replaceHash(hashFor(target));
 
     try {
-      if (isStale(token) || keyFor(state.currentTarget) !== context.histKey) return;
+      // histKey may be canonicalized to kp:<id>, while the active provider target
+      // remains lift:<id>. It identifies the history bucket, not the live player.
+      // Comparing the two abandoned every episode switch after showing the spinner.
+      if (isStale(token) || state.currentTarget !== target) return;
       state.sources = episode.sources;
       state.audioNames = episode.audioNames?.length ? episode.audioNames : state.audioNames;
       await playShaka(media.url, media.kind, token, {

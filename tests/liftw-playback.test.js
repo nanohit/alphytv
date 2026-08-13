@@ -288,3 +288,18 @@ test("LiftW playback opts into the opaque media scheme for movies and episode sw
   assert.doesNotThrow(() => new Function(source.slice(brokerStart, brokerEnd)),
     "the JavaScript embedded in the opaque media iframe must compile independently");
 });
+
+test("episode switching distinguishes live target identity from canonical history identity", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const start = source.indexOf("async function switchLiftwSelection");
+  const end = source.indexOf("function persistSerialSelection", start);
+  const block = source.slice(start, end);
+
+  assert.ok(start >= 0 && end > start);
+  assert.match(block, /state\.currentTarget !== target/,
+    "the switch must only stop when navigation replaced the active target object");
+  assert.doesNotMatch(block, /keyFor\(state\.currentTarget\) !== context\.histKey/,
+    "lift:<id> can never equal the canonical kp:<id> history bucket");
+  assert.match(block, /startTracking\(context\.histKey, target\)/,
+    "the canonical key is still required for progress persistence");
+});
