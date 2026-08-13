@@ -100,6 +100,25 @@ header {
   background: #000;
   box-shadow: 0 1px 0 #101010;
 }
+
+/* Samsung's browser is more likely to keep video on its hardware plane when no
+   clipped compositing layer or sticky surface overlaps it. This class is set from the
+   Tizen UA and only while the watch view is active; every other device keeps the
+   regular sticky header and rounded player. */
+html.tizen-video-mode.view-watch header {
+  position: relative;
+  top: auto;
+  box-shadow: none;
+}
+html.tizen-video-mode.view-watch .player-host {
+  border-radius: 0;
+  overflow: visible;
+}
+html.tizen-video-mode.view-watch .quick-lists-toggle,
+html.tizen-video-mode.view-watch .quick-lists-backdrop,
+html.tizen-video-mode.view-watch .quick-lists-drawer {
+  display: none !important;
+}
 .brand { min-width: 128px; }
 .logo-btn { display: inline-flex; align-items: center; padding: 0; background: transparent; border: none; cursor: pointer; text-decoration: none; }
 .logo-image {

@@ -141,6 +141,11 @@
   const params = new URLSearchParams(location.search);
   const DEBUG = params.has("debug");
   const isLocal = /^(127\.0\.0\.1|localhost)$/i.test(location.hostname);
+  // Samsung's Tizen browser is uniquely sensitive to work on the page's main
+  // thread while video is decoding. Keep this narrower than weakVideoDevice():
+  // low-core phones and other TVs retain the regular player behaviour.
+  const TIZEN_VIDEO_MODE = samsungTizenVideoDevice();
+  if (TIZEN_VIDEO_MODE) document.documentElement.classList.add("tizen-video-mode");
 
   const el = {
     logoBtn: document.getElementById("logoBtn"),
@@ -210,6 +215,8 @@
     pendingOrtEntry: null,
     lastOrtWriteAt: 0,
     trackInterval: null,
+    trackContext: null,
+    tizenPlayIntentUntil: 0,
     playbackRate: 1,
     subtitleRequest: {
       loading: false,
@@ -977,9 +984,19 @@
     return video;
   }
 
-  function startPlaybackIfAllowed(video) {
-    if (!AUTOPLAY_ON_OPEN || !video) return;
-    video.play().catch(() => { /* user gesture may be required */ });
+  function startPlaybackIfAllowed(video, { resume = false } = {}) {
+    // Tizen loses the remote-control click's transient user activation while an
+    // async resolver/player library loads. Retry play only for a genuine resume;
+    // a freshly opened title still honours the global no-autoplay policy.
+    const tizenIntent = TIZEN_VIDEO_MODE && (resume || state.tizenPlayIntentUntil > Date.now());
+    if ((!AUTOPLAY_ON_OPEN && !tizenIntent) || !video) return;
+    const play = () => {
+      state.tizenPlayIntentUntil = 0;
+      try { video.focus?.({ preventScroll: true }); } catch { /* old Tizen */ }
+      video.play().catch(() => { /* user gesture may still be required */ });
+    };
+    if (video.readyState >= 2) play();
+    else video.addEventListener("canplay", play, { once: true });
   }
 
   function loadExternalScript(name, src, ready) {
@@ -2372,6 +2389,10 @@ parent.postMessage({
   // plays anywhere. Whether that AV1 preference actually holds is decided by
   // pickLiftwLadder below — see the bitrate note there.
   function bestLiftwSource(sources) {
+    // Tizen often advertises WebM MSE support even when its browser cannot keep
+    // AV1/VP9 decoding smooth. LiftW's HLS is H.264 and takes Samsung's reliable
+    // hardware path; no other browser has its ladder choice changed.
+    if (TIZEN_VIDEO_MODE && sources?.hls) return { url: sources.hls, kind: "hls" };
     if (sources?.dasha && canPlayLiftwCodec('video/webm; codecs="av01.0.08M.08"')) {
       return { url: sources.dasha, kind: "dasha" };
     }
@@ -2579,6 +2600,12 @@ parent.postMessage({
     const next = routePath(path);
     const current = new URL(location.href);
     const target = new URL(next, location.origin);
+    if (TIZEN_VIDEO_MODE && parsePathRoute(target.pathname).view === "watch") {
+      // A remote-control click is a real play intent, but Tizen drops transient
+      // user activation before the async resolver completes. Carry only that
+      // intent across the navigation; direct links still open paused.
+      state.tizenPlayIntentUntil = Date.now() + 30000;
+    }
     if (`${current.pathname}${current.search}${current.hash}` === `${target.pathname}${target.search}${target.hash}`) { route(); return; }
     history.pushState(null, "", next);
     route();
@@ -2588,6 +2615,11 @@ parent.postMessage({
   }
 
   async function route() {
+    // Flush while the old target and old <video> still belong to one another.
+    // teardownPlayer may also run during an in-place quality/episode switch,
+    // where persisting the old position under the new selection would be wrong.
+    flushTrackedProgress();
+    flushOrtProgress();
     const r = parseLocationRoute();
     const token = nextToken();
     await teardownPlayer();
@@ -2618,6 +2650,7 @@ parent.postMessage({
     el.soapView?.classList.toggle("hidden", name !== "soap");
     el.watchView.classList.toggle("hidden", name !== "watch");
     el.bookmarksToggle.classList.toggle("active", name === "bookmarks");
+    document.documentElement.classList.toggle("view-watch", name === "watch");
     window.dispatchEvent(new CustomEvent("alphy:view", { detail: { view: name } }));
   }
 
@@ -3754,21 +3787,23 @@ parent.postMessage({
       video.playbackRate = state.playbackRate;
       renderSoapTracks();
       markPlayerReady();
-      const snap = () => {
-        const target = state.currentTarget;
-        if (target) setTimeout(() => captureVideoSnapshot(keyFor(target), target), 350);
-      };
-      video.addEventListener("loadeddata", snap, { once: true });
-      video.addEventListener("playing", snap);
-      video.addEventListener("pause", snap);
-      video.addEventListener("seeked", snap);
-      setTimeout(snap, 2200);
-      startPlaybackIfAllowed(video);
+      if (!TIZEN_VIDEO_MODE) {
+        const snap = () => {
+          const target = state.currentTarget;
+          if (target) setTimeout(() => captureVideoSnapshot(keyFor(target), target), 350);
+        };
+        video.addEventListener("loadeddata", snap, { once: true });
+        video.addEventListener("playing", snap);
+        video.addEventListener("pause", snap);
+        video.addEventListener("seeked", snap);
+        setTimeout(snap, 2200);
+      }
+      startPlaybackIfAllowed(video, { resume: opts.resume > 5 });
     };
 
     const nativeHls = !!video.canPlayType("application/vnd.apple.mpegurl");
     // iOS has native HLS and no MSE, so downloading hls.js there is pure latency.
-    if (!window.MediaSource && nativeHls) {
+    if ((TIZEN_VIDEO_MODE || !window.MediaSource) && nativeHls) {
       video.src = url;
       video.addEventListener("loadedmetadata", onReady, { once: true });
       return;
@@ -4108,7 +4143,7 @@ parent.postMessage({
       active.addEventListener("canplay", done);
       active.src = url;
       active.load();
-      startPlaybackIfAllowed(active);
+      startPlaybackIfAllowed(active, { resume: resume > 5 });
       setTimeout(done, 2500);
     });
     bindCollapsActive();
@@ -5146,9 +5181,14 @@ parent.postMessage({
   // player gets, so it micro-stutters whenever the shared main thread is busy.
   // We use this to shed the periodic work we inject into the Ortified srcdoc
   // (see progressHook) on exactly those devices.
+  function samsungTizenVideoDevice() {
+    const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+    return /\bTizen\b/i.test(ua) && /SMART-?TV|SamsungBrowser[^\n]*\bTV\b/i.test(ua);
+  }
+
   function weakVideoDevice() {
     const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
-    if (/\bTizen\b|SMART-?TV|SmartTV|\bWebOS\b|Web0S|\bNetCast\b|\bBRAVIA\b|CrKey|AFT[A-Z]|\bHbbTV\b|\bVIDAA\b/i.test(ua)) return true;
+    if (samsungTizenVideoDevice() || /SMART-?TV|SmartTV|\bWebOS\b|Web0S|\bNetCast\b|\bBRAVIA\b|CrKey|AFT[A-Z]|\bHbbTV\b|\bVIDAA\b/i.test(ua)) return true;
     const cores = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 0;
     return cores > 0 && cores <= 2;
   }
@@ -5416,17 +5456,19 @@ parent.postMessage({
       video.playbackRate = state.playbackRate;
       renderRezkaControls();
       markPlayerReady();
-      const snap = () => {
-        const t = state.currentTarget;
-        if (t) setTimeout(() => captureVideoSnapshot(histKey, t), 350);
-      };
-      video.addEventListener("loadeddata", snap, { once: true });
-      video.addEventListener("playing", snap);
-      video.addEventListener("pause", snap);
-      video.addEventListener("seeked", snap);
-      setTimeout(snap, 2200);
+      if (!TIZEN_VIDEO_MODE) {
+        const snap = () => {
+          const t = state.currentTarget;
+          if (t) setTimeout(() => captureVideoSnapshot(histKey, t), 350);
+        };
+        video.addEventListener("loadeddata", snap, { once: true });
+        video.addEventListener("playing", snap);
+        video.addEventListener("pause", snap);
+        video.addEventListener("seeked", snap);
+        setTimeout(snap, 2200);
+      }
       startTracking(histKey, target);
-      startPlaybackIfAllowed(video);
+      startPlaybackIfAllowed(video, { resume: resume > 5 });
     };
     video.addEventListener("canplay", onReady, { once: true });
     video.addEventListener("error", () => {
@@ -6606,17 +6648,19 @@ parent.postMessage({
     video.playbackRate = state.playbackRate;
     renderTracks();
     markPlayerReady();
-    const snapshotCurrentFrame = () => {
-      const target = state.currentTarget;
-      if (!target) return;
-      setTimeout(() => captureVideoSnapshot(keyFor(target), target), 350);
-    };
-    video.addEventListener("loadeddata", snapshotCurrentFrame, { once: true });
-    video.addEventListener("playing", snapshotCurrentFrame);
-    video.addEventListener("pause", snapshotCurrentFrame);
-    video.addEventListener("seeked", snapshotCurrentFrame);
-    setTimeout(snapshotCurrentFrame, 2200);
-    startPlaybackIfAllowed(video);
+    if (!TIZEN_VIDEO_MODE) {
+      const snapshotCurrentFrame = () => {
+        const target = state.currentTarget;
+        if (!target) return;
+        setTimeout(() => captureVideoSnapshot(keyFor(target), target), 350);
+      };
+      video.addEventListener("loadeddata", snapshotCurrentFrame, { once: true });
+      video.addEventListener("playing", snapshotCurrentFrame);
+      video.addEventListener("pause", snapshotCurrentFrame);
+      video.addEventListener("seeked", snapshotCurrentFrame);
+      setTimeout(snapshotCurrentFrame, 2200);
+    }
+    startPlaybackIfAllowed(video, { resume: opts.resume > 5 });
   }
 
   function selectHighestShakaVariant(player, preferredLanguage = "") {
@@ -6664,40 +6708,48 @@ parent.postMessage({
   }
 
   function startTracking(histKey, target) {
-    stopTracking();
-    state.trackInterval = setInterval(() => {
-      const v = state.videoEl;
-      if (!v) return;
-      const dur = v.duration;
-      const cur = v.currentTime;
-      if (!dur || !isFinite(dur) || dur <= 0) return;
-      const audioLang = state.player?.getVariantTracks?.().find((t) => t.active)?.language || soapActiveAudioLang();
-      const entry = {
-        key: histKey,
-        kind: target.kind,
-        target: cleanTarget(target),
-        title: target.title || "",
-        poster: target.poster || "",
-        year: target.year || "",
-        rating: state.currentMeta?.rating || undefined,
-        movieLength: state.currentMeta?.movieLength || undefined,
-        isSeries: state.currentMeta?.isSeries ?? target.isSeries ?? false,
-        kpId: historyKpId(target, state.currentMeta || {}),
-        meta: historyMetaSnapshot(state.currentMeta || {}, target),
-        position: cur,
-        duration: dur,
-        progress: cur / dur,
-      };
-      if (audioLang) entry.audioLang = audioLang;
-      if (state.collaps?.selection) entry.collapsSelection = cleanCollapsSelection(state.collaps.selection);
-      recordHistory(entry);
-      if (Date.now() - state.lastSnapshotAt > 20_000) {
-        captureVideoSnapshot(histKey, target);
-      }
-    }, 5000);
+    stopTracking(false);
+    state.trackContext = { histKey, target };
+    state.trackInterval = setInterval(flushTrackedProgress, TIZEN_VIDEO_MODE ? 30000 : 5000);
   }
-  function stopTracking() {
+
+  function flushTrackedProgress() {
+    const tracked = state.trackContext;
+    const v = state.videoEl;
+    if (!tracked || !v) return;
+    const { histKey, target } = tracked;
+    const dur = v.duration;
+    const cur = v.currentTime;
+    if (!dur || !isFinite(dur) || dur <= 0) return;
+    const audioLang = state.player?.getVariantTracks?.().find((t) => t.active)?.language || soapActiveAudioLang();
+    const entry = {
+      key: histKey,
+      kind: target.kind,
+      target: cleanTarget(target),
+      title: target.title || "",
+      poster: target.poster || "",
+      year: target.year || "",
+      rating: state.currentMeta?.rating || undefined,
+      movieLength: state.currentMeta?.movieLength || undefined,
+      isSeries: state.currentMeta?.isSeries ?? target.isSeries ?? false,
+      kpId: historyKpId(target, state.currentMeta || {}),
+      meta: historyMetaSnapshot(state.currentMeta || {}, target),
+      position: cur,
+      duration: dur,
+      progress: cur / dur,
+    };
+    if (audioLang) entry.audioLang = audioLang;
+    if (state.collaps?.selection) entry.collapsSelection = cleanCollapsSelection(state.collaps.selection);
+    recordHistory(entry);
+    if (!TIZEN_VIDEO_MODE && Date.now() - state.lastSnapshotAt > 20_000) {
+      captureVideoSnapshot(histKey, target);
+    }
+  }
+
+  function stopTracking(flush = false) {
+    if (flush) flushTrackedProgress();
     if (state.trackInterval) { clearInterval(state.trackInterval); state.trackInterval = null; }
+    state.trackContext = null;
   }
 
   function markPlayerReady() {
@@ -6724,6 +6776,9 @@ parent.postMessage({
   }
 
   function captureVideoSnapshot(histKey, target) {
+    // drawImage(video) + toDataURL forces a synchronous GPU readback. On Tizen
+    // this can evict the hardware video plane and start a repeating stall cycle.
+    if (TIZEN_VIDEO_MODE) return;
     const video = state.videoEl;
     if (!video || !video.videoWidth || !video.videoHeight || video.readyState < 2) return;
     const width = Math.min(480, video.videoWidth);
@@ -6811,7 +6866,7 @@ parent.postMessage({
   }
 
   async function teardownPlayer() {
-    stopTracking();
+    stopTracking(false);
     flushOrtProgress();
     teardownCollapsPlayer();
     if (state.player) {
@@ -7680,9 +7735,30 @@ LIMIT 1`;
     // canvas snapshot entirely (drawImage+toDataURL forces a synchronous GPU frame
     // readback — the single most expensive thing we run) and report position less
     // often. The continue-card just loses its thumbnail on those devices.
+    const tv = TIZEN_VIDEO_MODE;
     const weak = weakVideoDevice();
     const snapshotEnabled = weak ? "false" : "true";
-    const sendMs = weak ? 10000 : 4000;
+    const sendMs = tv ? 30000 : weak ? 10000 : 4000;
+    const discovery = tv
+      ? `
+  const videos = new Set();
+  const hook = (v) => {
+    if (hooked.has(v)) return; hooked.add(v); videos.add(v);
+    v.addEventListener('pause', () => { lastSent = 0; send(v); });
+  };
+  const discover = () => { try { document.querySelectorAll('video').forEach(hook); } catch (e) {} };
+  discover();
+  try { new MutationObserver(discover).observe(document.documentElement, { childList: true, subtree: true }); } catch (e) {}
+  setInterval(() => videos.forEach((v) => {
+    if (v.isConnected === false) videos.delete(v); else send(v);
+  }), SEND_MS);`
+      : `
+  const hook = (v) => {
+    if (hooked.has(v)) return; hooked.add(v);
+    v.addEventListener('timeupdate', () => send(v));
+    v.addEventListener('pause', () => { lastSent = 0; send(v); });
+  };
+  setInterval(() => { try { document.querySelectorAll('video').forEach(hook); } catch (e) {} }, 1500);`;
     return `<script data-cleanroom="progress-hook">
 (() => {
   const SNAPSHOT = ${snapshotEnabled};
@@ -7713,12 +7789,7 @@ LIMIT 1`;
     }
     try { parent.postMessage({ alphyOrtProgress: true, position: v.currentTime, duration: v.duration, snapshot }, '*'); } catch (e) {}
   };
-  const hook = (v) => {
-    if (hooked.has(v)) return; hooked.add(v);
-    v.addEventListener('timeupdate', () => send(v));
-    v.addEventListener('pause', () => { lastSent = 0; send(v); });
-  };
-  setInterval(() => { try { document.querySelectorAll('video').forEach(hook); } catch (e) {} }, 1500);
+${discovery}
 })();
 <\/script>`;
   }
@@ -8434,14 +8505,42 @@ addEventListener('message', async (event) => {
     const stats = {
       mode,
       ok: false,
+      tizenPatched: false,
       adScriptBlocks: (out.match(/<script\s+data-name=["']ad["'][\s\S]*?<\/script>/gi) || []).length,
       makePlayerRefs: (out.match(/makePlayer\s*\(/g) || []).length,
     };
     out = out.replace(/<script\s+data-name=["']ad["'][\s\S]*?<\/script>/i, '<script data-name="ad">var middleCount = 0, adsConfig = {};</' + "script>");
     out = out.replace(/ads:\s*adsConfig\s*,/g, "ads: {},");
+    if (TIZEN_VIDEO_MODE) {
+      // Venom trusts MediaSource.isTypeSupported and otherwise prefers its WebM
+      // ladders. Samsung advertises them but the LSP3 cannot always decode them
+      // in real time. Apply this immediately before Venom consumes the options:
+      // retain H.264 HLS, and shed P2P/WebRTC plus preview sprite work.
+      const original = out;
+      out = out.replace(/app\s*=\s*VenomPlayer\.make\(opts\)/, `
+        if (window.__ALPHY_TIZEN_VIDEO__) {
+          const hlsOnly = (source) => {
+            if (!source || !source.hls) return;
+            delete source.dash;
+            delete source.dasha;
+          };
+          hlsOnly(opts.source);
+          ((opts.playlist && opts.playlist.seasons) || []).forEach((season) => {
+            (season.episodes || []).forEach(hlsOnly);
+          });
+          opts.p2p = false;
+          opts.preview = false;
+          opts.stats = [];
+        }
+        app = VenomPlayer.make(opts)`);
+      stats.tizenPatched = out !== original;
+    }
     if (!/<base\s/i.test(out) && /<head([^>]*)>/i.test(out)) out = out.replace(/<head([^>]*)>/i, `<head$1><base href="${escapeAttr(baseHref)}">`);
     if (!/<base\s/i.test(out)) out = out.replace(/<html([^>]*)>/i, `<html$1><head><base href="${escapeAttr(baseHref)}"></head>`);
-    out = out.replace(/<head([^>]*)>/i, `<head$1>${adBlockPrelude()}${progressHook()}<style>html,body{margin:0;background:#000;min-height:100%;height:100%;overflow:hidden;}</style>`);
+    const tizenFlag = TIZEN_VIDEO_MODE
+      ? '<script>window.__ALPHY_TIZEN_VIDEO__=true;</' + 'script>'
+      : "";
+    out = out.replace(/<head([^>]*)>/i, `<head$1>${tizenFlag}${adBlockPrelude()}${progressHook()}<style>html,body{margin:0;background:#000;min-height:100%;height:100%;overflow:hidden;}</style>`);
     stats.ok = stats.makePlayerRefs > 0;
     return { html: out, stats };
   }
@@ -8759,6 +8858,7 @@ addEventListener('message', async (event) => {
   }
 
   function bestZenithSource(sources) {
+    if (TIZEN_VIDEO_MODE && sources?.hls) return { url: sources.hls, kind: "hls" };
     if (sources?.dash) return { url: sources.dash, kind: "dash" };
     if (sources?.hls) return { url: sources.hls, kind: "hls" };
     if (sources?.dasha) return { url: sources.dasha, kind: "dasha" };
@@ -9255,6 +9355,13 @@ addEventListener('message', async (event) => {
       if (parseLocationRoute().view === "bookmarks") showBookmarks();
     });
     window.addEventListener("message", onOrtProgress);
+    // pagehide is the one lifecycle signal Tizen reliably emits when its browser
+    // is backgrounded. Persist the latest position once, instead of compensating
+    // with frequent localStorage writes during playback.
+    window.addEventListener("pagehide", () => {
+      flushTrackedProgress();
+      flushOrtProgress();
+    });
     bindKeyboard();
 
     // Migrate legacy hash/query-param deep links to path routes.
@@ -9396,6 +9503,8 @@ addEventListener('message', async (event) => {
       liftwOpaqueUri,
       liftwUriFromOpaque,
       bestLiftwSource,
+      bestZenithSource,
+      chooseCollapsSource,
       pickLiftwLadder,
       topDashRepresentation,
       qualityLabel,
@@ -9421,6 +9530,13 @@ addEventListener('message', async (event) => {
       // on state; tests need to seed them.
       setAudioNames: (names) => { state.audioNames = names; },
       setLiftwManifestFetcher: (fetcher) => { liftwManifestFetcher = fetcher; },
+      samsungTizenVideoDevice,
+      weakVideoDevice,
+      progressHook,
+      soapHlsConfig,
+      startPlaybackIfAllowed,
+      carryTizenPlayIntent: () => { state.tizenPlayIntentUntil = Date.now() + 30000; },
+      tizenVideoMode: TIZEN_VIDEO_MODE,
       parseZenithEmbed,
       normalizeSerialSeasons,
       chooseSerialSelection,

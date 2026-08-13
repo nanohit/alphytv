@@ -22,7 +22,14 @@ export const CATALOG = {
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export function makeSandbox({ storageSeed = new Map(), catalog = CATALOG, quotaLimit = Infinity, startPath = "/" } = {}) {
+export function makeSandbox({
+  storageSeed = new Map(),
+  catalog = CATALOG,
+  quotaLimit = Infinity,
+  startPath = "/",
+  userAgent = "vm-test",
+  hardwareConcurrency = 0,
+} = {}) {
   const storage = new Map(storageSeed);
   let used = [...storage.entries()].reduce((n, [k, v]) => n + k.length + String(v).length, 0);
   const localStorage = {
@@ -116,7 +123,7 @@ export function makeSandbox({ storageSeed = new Map(), catalog = CATALOG, quotaL
     localStorage,
     sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
     location, history: historyObj, document: documentObj,
-    navigator: { userAgent: "vm-test", language: "ru", languages: ["ru"], clipboard: { writeText: async () => {} }, mediaSession: null },
+    navigator: { userAgent, hardwareConcurrency, language: "ru", languages: ["ru"], clipboard: { writeText: async () => {} }, mediaSession: null },
     screen: { width: 1440, height: 900 },
     innerWidth: 1440, innerHeight: 900, devicePixelRatio: 2,
     matchMedia: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {}, addListener: () => {} }),
