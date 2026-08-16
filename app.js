@@ -25,7 +25,20 @@
   // this namespace versioned so those false misses cannot survive an upgrade.
   const ND_SEARCH_CACHE_NS = "ndsearch.v2";
   const LIFTW_SEARCH_CACHE_NS = "liftwsearch.v1";
-  const LIFTW_SEARCH_URL = "https://api.liftw.ws/search";
+  // api.liftw.ws is blocked in Russia AND sends no CORS header of any kind, so
+  // the page can never read it directly — the relay below is the only route.
+  // It rides the same rotating Supabase projects as the Letterboxd lookup:
+  // spreading the workaround over several hostnames is the whole point, since
+  // putting it on one would rebuild the single blockable name we are escaping.
+  // A shard that has not been given the function yet answers 404 and simply
+  // falls through to the next, so widening the ring is a deploy, not a release.
+  const LIFTW_ENDPOINTS = [
+    "https://icmjgvlsyfqwyewvsuje.supabase.co/functions/v1/liftw",
+    "https://gzwynsvcydynqidwxjru.supabase.co/functions/v1/liftw",
+    "https://cuyofxgofmhdugauoqzt.supabase.co/functions/v1/liftw",
+    "https://hrtnvhafwzimjstvegno.supabase.co/functions/v1/liftw",
+  ];
+  const LIFTW_COOLDOWN_MS = 5 * 60e3;
   // Letterboxd publishes no API and sends no CORS header, so the lookup runs on
   // independently deployed Supabase Edge shards. The film's IMDb id picks its
   // primary shard for stable cache locality; the rest form its failover ring.
@@ -48,8 +61,13 @@
   const LIFTW_TITLE_CACHE_NS = "liftwtitle.v1";
   const LIFTW_KP_OF_CACHE_NS = "liftwkpof.v1";
   const LIFTW_BY_KP_CACHE_NS = "liftwbykp.v1";
-  const LIFTW_INFO_URL = "https://api.liftw.ws/info/";
-  const LIFTW_EMBED_HOST = "embed.liftw.ws";
+  // The player is reached directly, not through the relay: lift3.ws serves the
+  // same embed with `Access-Control-Allow-Origin: *`, so the HTML and then the
+  // video come straight to the browser and no stream ever crosses our servers.
+  // Two hosts because neither reaches everyone: embed.liftw.ws is blocked in
+  // Russia, and lift3.ws answers 422 to addresses its operator dislikes (a VPN
+  // exit on a hosting ASN gets it; a domestic address and AWS both pass).
+  const LIFTW_EMBED_HOSTS = ["lift3.ws", "embed.liftw.ws"];
   const LIFTW_CDN_ORIGINS = [
     "https://hye1eaipby4w.interkh.com",
     "https://ghzbfjzbazc.interkh.com",
@@ -1562,20 +1580,9 @@
     const cached = cacheGet(LIFTW_SEARCH_CACHE_NS, cacheKey);
     if (Array.isArray(cached)) return cached;
 
-    const url = new URL(LIFTW_SEARCH_URL);
-    url.searchParams.set("q", normalizedQuery);
-    // LiftW explicitly permits Origin:null. Keep this search inside the opaque
-    // client sandbox and fail closed so alphy.tv is never exposed as Origin.
-    const text = await fetchThirdPartyText(url.href, {
-      preferSandbox: true,
-      directFallback: false,
-      label: "liftw-search",
-      timeoutMs: 9000,
-      sandboxTimeoutMs: 9000,
-    });
-    let payload;
-    try { payload = JSON.parse(text); }
-    catch { throw new Error("LiftW вернул некорректный ответ"); }
+    // The relay talks to LiftW on our behalf, so LiftW sees the shard rather
+    // than the viewer — the same thing the opaque sandbox used to buy us.
+    const payload = await liftwRelay({ mode: "search", q: normalizedQuery }, normalizedQuery);
     const results = normalizeLiftwSearchPayload(payload);
     cacheSet(LIFTW_SEARCH_CACHE_NS, cacheKey, results, TTL.liftwsearch);
     return results;
@@ -2021,27 +2028,51 @@ parent.postMessage({
     return pending;
   }
 
-  async function fetchLiftwTitle(id) {
-    const infoText = await fetchThirdPartyText(`${LIFTW_INFO_URL}${encodeURIComponent(id)}`, {
-      preferSandbox: true,
-      directFallback: false,
-      label: "liftw-info",
-      timeoutMs: 9000,
-      sandboxTimeoutMs: 9000,
-    });
-    let info;
-    try { info = JSON.parse(infoText); }
-    catch { throw new Error("LiftW вернул некорректный ответ"); }
-    const embedUrl = liftwEmbedUrl(info?.iframe_uri);
-    if (!embedUrl) throw new Error("LiftW не выдал ссылку на плеер");
+  // Same ring shape the Letterboxd lookup uses: a stable starting point per key
+  // so a repeated query keeps hitting the same (warm) shard, with the rest as
+  // failover. A shard that errors cools off rather than being retried per call.
+  const liftwCooldown = new Map();
+  function liftwEndpointOrder(key) {
+    let hash = 0;
+    const text = String(key || "");
+    for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+    const start = hash % LIFTW_ENDPOINTS.length;
+    return LIFTW_ENDPOINTS.map((_, index) =>
+      LIFTW_ENDPOINTS[(start + index) % LIFTW_ENDPOINTS.length]);
+  }
 
-    const html = await fetchThirdPartyText(embedUrl, {
-      preferSandbox: true,
-      directFallback: false,
-      label: "liftw-embed",
-      timeoutMs: 12000,
-      sandboxTimeoutMs: 12000,
-    });
+  async function liftwRelay(params, key) {
+    const now = Date.now();
+    const order = liftwEndpointOrder(key);
+    const ready = order.filter((endpoint) => (liftwCooldown.get(endpoint) || 0) <= now);
+    let lastError = null;
+    // Every shard cooling at once must not mean "no LiftW": try them anyway
+    // rather than reporting a failure the user cannot act on.
+    for (const endpoint of (ready.length ? ready : order)) {
+      const url = new URL(endpoint);
+      for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value);
+      try {
+        const response = await fetchWithTimeout(url.href, { timeoutMs: 9000 });
+        if (!response.ok) throw new Error(`liftw relay ${response.status}`);
+        const payload = await response.json();
+        if (payload?.error) throw new Error(String(payload.error));
+        liftwCooldown.delete(endpoint);
+        return payload;
+      } catch (error) {
+        lastError = error;
+        liftwCooldown.set(endpoint, Date.now() + LIFTW_COOLDOWN_MS);
+        log("liftw-relay-warn", `${new URL(endpoint).hostname}: ${error.message}`);
+      }
+    }
+    throw lastError || new Error("LiftW недоступен");
+  }
+
+  async function fetchLiftwTitle(id) {
+    const info = await liftwRelay({ mode: "info", id: String(id) }, `info:${id}`);
+    const candidates = liftwEmbedCandidates(info?.iframe_uri);
+    if (!candidates.length) throw new Error("LiftW не выдал ссылку на плеер");
+
+    const html = await fetchLiftwEmbed(candidates);
     const parsed = parseZenithEmbed(html);
     const seasons = parsed.playlist?.seasons || [];
     if (!seasons.length && !bestLiftwSource(parsed.sources)) {
@@ -2057,18 +2088,61 @@ parent.postMessage({
     };
   }
 
-  // The signed iframe_uri is the only entry point that still works — the bare
-  // /embed/movie/<id> path started answering 410 Gone, so never synthesise it.
-  function liftwEmbedUrl(value) {
+  // /info hands back a signed embed URL on embed.liftw.ws. That host is blocked
+  // in Russia, so the same path is tried on lift3.ws first — same backend, same
+  // id space, same player — and the original is kept as the fallback for
+  // addresses lift3.ws turns away. The signature rides along; the bare path is
+  // tried too, because it answers 200 on both hosts again (it once did not, and
+  // the note saying so is why this used to refuse to synthesise it).
+  function liftwEmbedCandidates(value) {
+    let source;
     try {
-      const url = new URL(String(value || ""));
-      if (url.protocol !== "https:") return "";
-      if (url.hostname.toLowerCase() !== LIFTW_EMBED_HOST) return "";
-      if (!/^\/embed\/movie\/\d+$/.test(url.pathname)) return "";
-      return url.href;
+      source = new URL(String(value || ""));
     } catch {
-      return "";
+      return [];
     }
+    if (source.protocol !== "https:") return [];
+    if (source.hostname.toLowerCase() !== "embed.liftw.ws") return [];
+    if (!/^\/embed\/movie\/\d+$/.test(source.pathname)) return [];
+
+    const out = [];
+    for (const host of LIFTW_EMBED_HOSTS) {
+      const signed = new URL(source.href);
+      signed.hostname = host;
+      out.push(signed.href);
+      if (host === LIFTW_EMBED_HOSTS[0] && source.search) {
+        const bare = new URL(source.href);
+        bare.hostname = host;
+        bare.search = "";
+        out.push(bare.href);
+      }
+    }
+    return out;
+  }
+
+  // Whichever host answers first wins. A host that is blocked or refuses this
+  // address must cost one failed request, not the title.
+  async function fetchLiftwEmbed(candidates) {
+    let lastError = null;
+    for (const url of candidates) {
+      try {
+        const html = await fetchThirdPartyText(url, {
+          preferSandbox: true,
+          directFallback: false,
+          label: "liftw-embed",
+          timeoutMs: 12000,
+          sandboxTimeoutMs: 12000,
+        });
+        // A blocked host can answer with something that is not the player at
+        // all, so the payload has to be recognised before it counts as success.
+        if (/makePlayer\s*\(/.test(String(html || ""))) return html;
+        throw new Error("ответ без makePlayer");
+      } catch (error) {
+        lastError = error;
+        log("liftw-embed-warn", `${new URL(url).hostname}: ${error.message}`);
+      }
+    }
+    throw lastError || new Error("LiftW не отдал плеер");
   }
 
   // A movie's `cc` is a JSON array of {url,name} sitting unquoted in the same
@@ -2301,16 +2375,11 @@ parent.postMessage({
     if (warm?.meta) return String(warm.meta.kpId || "");
     const cached = cacheGet(LIFTW_KP_OF_CACHE_NS, key);
     if (typeof cached === "string") return cached;
-    const text = await fetchThirdPartyText(`${LIFTW_INFO_URL}${encodeURIComponent(key)}`, {
-      preferSandbox: true,
-      directFallback: false,
-      label: "liftw-kp-confirm",
-      timeoutMs: 9000,
-      sandboxTimeoutMs: 9000,
-    });
     let kpId = "";
-    try { kpId = String(positiveInt(JSON.parse(text)?.info?.id) || ""); }
-    catch { kpId = ""; }
+    try {
+      const info = await liftwRelay({ mode: "info", id: key }, `info:${key}`);
+      kpId = String(positiveInt(info?.info?.id) || "");
+    } catch { kpId = ""; }
     cacheSet(LIFTW_KP_OF_CACHE_NS, key, kpId, TTL.liftwkp);
     return kpId;
   }
@@ -9495,7 +9564,7 @@ addEventListener('message', async (event) => {
       newdeafSerialHint,
       resolveRecommendationTarget,
       normalizeLiftwSearchPayload,
-      liftwEmbedUrl,
+      liftwEmbedCandidates,
       liftwMeta,
       liftwTextTracks,
       liftwTarget,

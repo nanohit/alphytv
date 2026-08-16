@@ -61,15 +61,19 @@ test("LiftW search payload is normalized without Kinopoisk metadata calls", asyn
   assert.equal(results[1].serialStatus, "Все серии");
 });
 
-test("LiftW search is fail-closed inside the opaque client sandbox", async () => {
+test("LiftW search never reaches LiftW from the viewer's own address", async () => {
   const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
   const start = source.indexOf("async function searchLiftw");
   const end = source.indexOf("function normalizeLiftwSearchPayload", start);
   const block = source.slice(start, end);
   assert.ok(start >= 0 && end > start);
-  assert.match(block, /preferSandbox:\s*true/);
-  assert.match(block, /directFallback:\s*false/);
-  assert.doesNotMatch(block, /resolverJson|\/api\//);
+  // The opaque sandbox used to hide alphy.tv from LiftW. api.liftw.ws is now
+  // blocked in Russia and sends no CORS header at all, so the search goes
+  // through the relay instead — which hides the viewer outright rather than
+  // just their Origin. What must never come back is a direct call.
+  assert.match(block, /liftwRelay\(/);
+  assert.doesNotMatch(block, /api\.liftw\.ws/);
+  assert.doesNotMatch(block, /preferSandbox/);
 });
 
 test("LiftW search results build in-app playback targets", async () => {

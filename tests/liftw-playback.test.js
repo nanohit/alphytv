@@ -106,21 +106,30 @@ test("the ladder chooser prefers the cheapest codec the browser can actually dec
   assert.deepEqual(plain(bare.bestLiftwSource({ dasha: "a" })), { url: "a", kind: "dasha" });
 });
 
-test("only the signed iframe_uri is accepted as an embed URL", async () => {
+test("the embed is retried on a second host, and only the signed /info URL seeds it", async () => {
   const helpers = await liftwSandbox();
   const info = await fixtureJson("liftw-info-movie.json");
 
-  assert.equal(helpers.liftwEmbedUrl(info.iframe_uri), info.iframe_uri);
-  // Resolution still uses the signed iframe_uri supplied by /info. The validator
-  // only admits the exact embed host and numeric path even if a caller tries a
-  // hand-built URL.
-  assert.equal(helpers.liftwEmbedUrl("https://embed.liftw.ws/embed/movie/51984"), "https://embed.liftw.ws/embed/movie/51984");
-  assert.equal(helpers.liftwEmbedUrl("http://embed.liftw.ws/embed/movie/51984"), "");
-  assert.equal(helpers.liftwEmbedUrl("https://embed.liftw.ws.evil.example/embed/movie/51984"), "");
-  assert.equal(helpers.liftwEmbedUrl("https://embed.liftw.ws/embed/movie/../../etc"), "");
-  assert.equal(helpers.liftwEmbedUrl("javascript:alert(1)"), "");
-  assert.equal(helpers.liftwEmbedUrl(""), "");
-  assert.equal(helpers.liftwEmbedUrl(null), "");
+  const candidates = helpers.liftwEmbedCandidates(info.iframe_uri);
+  // lift3.ws is tried first: embed.liftw.ws is the host that is blocked in
+  // Russia, and it stays last as the fallback for addresses lift3.ws refuses.
+  assert.ok(candidates.length >= 2, `expected several candidates, saw ${candidates.length}`);
+  assert.equal(new URL(candidates[0]).hostname, "lift3.ws");
+  assert.equal(new URL(candidates.at(-1)).hostname, "embed.liftw.ws");
+  // The signature from /info must survive the host swap.
+  assert.equal(new URL(candidates[0]).search, new URL(info.iframe_uri).search);
+  // Every candidate keeps the id /info gave us; none is invented.
+  const path = new URL(info.iframe_uri).pathname;
+  assert.ok(candidates.every((url) => new URL(url).pathname === path));
+
+  // The validator still admits nothing but the exact host and numeric path.
+  assert.equal(helpers.liftwEmbedCandidates("http://embed.liftw.ws/embed/movie/51984").length, 0, "http://embed.liftw.ws/embed/movie/51984");
+  assert.equal(helpers.liftwEmbedCandidates("https://embed.liftw.ws.evil.example/embed/movie/51984").length, 0, "https://embed.liftw.ws.evil.example/embed/movie/51984");
+  assert.equal(helpers.liftwEmbedCandidates("https://embed.liftw.ws/embed/movie/../../etc").length, 0, "https://embed.liftw.ws/embed/movie/../../etc");
+  assert.equal(helpers.liftwEmbedCandidates("https://lift3.ws/embed/movie/51984").length, 0, "https://lift3.ws/embed/movie/51984");
+  assert.equal(helpers.liftwEmbedCandidates("javascript:alert(1)").length, 0, "javascript:alert(1)");
+  assert.equal(helpers.liftwEmbedCandidates("").length, 0, "");
+  assert.equal(helpers.liftwEmbedCandidates(null).length, 0, null);
 });
 
 test("LiftW /info alone is rich enough to render a watch page", async () => {
@@ -239,17 +248,28 @@ test("clicking a dub selects that dub, not merely its language", async () => {
   assert.equal(helpers.audioTag(null), "");
 });
 
-test("the LiftW control plane stays sandboxed and fail-closed", async () => {
+test("the LiftW control plane stays fail-closed, and no stream crosses our servers", async () => {
   const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
-  const start = source.indexOf("async function fetchLiftwTitle");
-  const end = source.indexOf("function liftwEmbedUrl", start);
-  const block = source.slice(start, end);
-  assert.ok(start >= 0 && end > start);
-  // Both hops — /info and the embed — must run inside the null-origin sandbox and
-  // must NOT fall back to a direct fetch, which would leak alphy.tv to LiftW.
-  assert.equal(block.match(/preferSandbox:\s*true/g)?.length, 2);
-  assert.equal(block.match(/directFallback:\s*false/g)?.length, 2);
-  assert.doesNotMatch(block, /resolverJson|\/api\//);
+  const embed = source.slice(source.indexOf("async function fetchLiftwEmbed"));
+  const block = embed.slice(0, embed.indexOf("\n  }") + 4);
+  // The embed still runs inside the null-origin sandbox and must NOT fall back
+  // to a direct fetch, which would expose alphy.tv to the host.
+  assert.match(block, /preferSandbox:\s*true/);
+  assert.match(block, /directFallback:\s*false/);
+
+  // /info and search now go through the relay instead, so LiftW sees a shard
+  // rather than the viewer — but the relay must never carry media.
+  const relay = source.slice(source.indexOf("function liftwEndpointOrder"));
+  assert.match(relay.slice(0, 2400), /LIFTW_ENDPOINTS/);
+  assert.match(relay.slice(0, 2400), /liftwCooldown\.set/);
+  const fn = await readFile(new URL("../supabase/functions/liftw/index.ts", import.meta.url), "utf8");
+  assert.match(fn, /mode === "info"/);
+  assert.match(fn, /mode === "search"/);
+  // Not a general proxy: nothing but the two known shapes may be reached, and
+  // the id/query are validated here rather than forwarded.
+  assert.doesNotMatch(fn, /searchParams\.get\("url"\)/);
+  assert.match(fn, /\^\\d\{1,12\}\$/);
+  assert.doesNotMatch(fn, /interkh|\.m3u8|\.mpd/);
 });
 
 test("the LiftW media plane accepts only interkh and is wrapped for opaque Shaka fetches", async () => {

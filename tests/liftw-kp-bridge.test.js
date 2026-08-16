@@ -95,14 +95,17 @@ test("candidate ranking drops what could only fail confirmation", async () => {
   assert.ok(exact > prefix && prefix > other, `${exact} > ${prefix} > ${other}`);
 });
 
-test("the confirmation hop is fail-closed inside the opaque client sandbox", async () => {
+test("the confirmation hop goes through the relay, and a failed hop confirms nothing", async () => {
   const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
   const start = source.indexOf("async function liftwKpIdFor");
   const end = source.indexOf("async function findLiftwByKpId", start);
   const block = source.slice(start, end);
   assert.ok(start >= 0 && end > start);
-  assert.match(block, /preferSandbox:\s*true/);
-  assert.match(block, /directFallback:\s*false/);
+  assert.match(block, /liftwRelay\(/);
+  assert.doesNotMatch(block, /api\.liftw\.ws/);
+  // A relay failure must read as "not confirmed" — never as a confirmation,
+  // which is what would let a title match alone pass for a kpId match.
+  assert.match(block, /catch\s*\{\s*kpId = ""/);
 });
 
 test("LiftW is tried before HDRezka when the Kinopoisk chain is exhausted", async () => {
