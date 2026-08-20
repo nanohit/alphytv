@@ -2105,19 +2105,36 @@ parent.postMessage({
     if (source.hostname.toLowerCase() !== "embed.liftw.ws") return [];
     if (!/^\/embed\/movie\/\d+$/.test(source.pathname)) return [];
 
+    // lift3.ws direct first: it reaches the browser in Russia and keeps the
+    // video path client-only. embed.liftw.ws is NOT tried directly — it is the
+    // host that is blocked, so a direct attempt could only ever burn a timeout.
+    // The relay is the fallback instead, and it tries both hosts server-side.
     const out = [];
-    for (const host of LIFTW_EMBED_HOSTS) {
-      const signed = new URL(source.href);
-      signed.hostname = host;
-      out.push(signed.href);
-      if (host === LIFTW_EMBED_HOSTS[0] && source.search) {
-        const bare = new URL(source.href);
-        bare.hostname = host;
-        bare.search = "";
-        out.push(bare.href);
-      }
+    const direct = new URL(source.href);
+    direct.hostname = "lift3.ws";
+    out.push(direct.href);
+    if (source.search) {
+      const bare = new URL(direct.href);
+      bare.search = "";
+      out.push(bare.href);
     }
-    return out;
+    out.push(liftwRelayEmbedUrl(source));
+    return out.filter(Boolean);
+  }
+
+  // The relay rebuilds the embed URL from the id plus the signature parts it
+  // recognises, so this passes those parts rather than a whole URL.
+  function liftwRelayEmbedUrl(source) {
+    const id = (source.pathname.match(/(\d+)/) || [])[1];
+    if (!id) return "";
+    const url = new URL(liftwEndpointOrder(`embed:${id}`)[0]);
+    url.searchParams.set("mode", "embed");
+    url.searchParams.set("id", id);
+    for (const name of ["host", "imp2", "imp3", "t2", "ht", "season", "episode"]) {
+      const value = source.searchParams.get(name);
+      if (value) url.searchParams.set(name, value);
+    }
+    return url.href;
   }
 
   // Whichever host answers first wins. A host that is blocked or refuses this
@@ -2125,14 +2142,19 @@ parent.postMessage({
   async function fetchLiftwEmbed(candidates) {
     let lastError = null;
     for (const url of candidates) {
+      const viaRelay = LIFTW_ENDPOINTS.some((endpoint) => url.startsWith(endpoint));
       try {
-        const html = await fetchThirdPartyText(url, {
-          preferSandbox: true,
-          directFallback: false,
-          label: "liftw-embed",
-          timeoutMs: 12000,
-          sandboxTimeoutMs: 12000,
-        });
+        // Our own relay is fetched plainly; a third-party host still goes
+        // through the null-origin sandbox so it never learns who is watching.
+        const html = viaRelay
+          ? await (await fetchWithTimeout(url, { timeoutMs: 12000 })).text()
+          : await fetchThirdPartyText(url, {
+            preferSandbox: true,
+            directFallback: false,
+            label: "liftw-embed",
+            timeoutMs: 9000,
+            sandboxTimeoutMs: 9000,
+          });
         // A blocked host can answer with something that is not the player at
         // all, so the payload has to be recognised before it counts as success.
         if (/makePlayer\s*\(/.test(String(html || ""))) return html;
@@ -7973,8 +7995,7 @@ addEventListener('message', async (event) => {
     const host = target.hostname.toLowerCase();
     const allowed = target.protocol === 'https:' && (
       host === 'plapi.cdnvideohub.com' ||
-      (host === 'api.liftw.ws' && (target.pathname === '/search' || /^\\/info\\/\\d+$/.test(target.pathname))) ||
-      (host === 'embed.liftw.ws' && /^\\/embed\\/movie\\/\\d+$/.test(target.pathname)) ||
+      ((host === 'embed.liftw.ws' || host === 'lift3.ws') && /^\\/embed\\/movie\\/\\d+$/.test(target.pathname)) ||
       host === 'api.ortified.ws' ||
       host === 'api.zenithjs.ws' ||
       host === 'newdeaf.co' || host.endsWith('.newdeaf.co')
@@ -7999,8 +8020,7 @@ addEventListener('message', async (event) => {
       const host = url.hostname.toLowerCase();
       return url.protocol === "https:" && (
         host === "plapi.cdnvideohub.com" ||
-        (host === "api.liftw.ws" && (url.pathname === "/search" || /^\/info\/\d+$/.test(url.pathname))) ||
-        (host === "embed.liftw.ws" && /^\/embed\/movie\/\d+$/.test(url.pathname)) ||
+        ((host === "embed.liftw.ws" || host === "lift3.ws") && /^\/embed\/movie\/\d+$/.test(url.pathname)) ||
         host === "api.ortified.ws" ||
         host === "api.zenithjs.ws" ||
         host === "newdeaf.co" || host.endsWith(".newdeaf.co")

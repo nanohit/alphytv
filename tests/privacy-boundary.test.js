@@ -13,13 +13,19 @@ async function privacyHelpers() {
 test("opaque fetch allowlist accepts only the intended HTTPS provider hosts", async () => {
   const helpers = await privacyHelpers();
   assert.equal(helpers.isOpaqueFetchUrl("https://plapi.cdnvideohub.com/api/v1/player/sv/video/1"), true);
-  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/search?q=test"), true);
-  // LiftW playback needs /info/<id> and the embed too — both are control plane
-  // and both must stay opaque, so LiftW never sees alphy.tv as an origin.
-  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/info/1"), true);
+  // api.liftw.ws is blocked in Russia and has no CORS header, so search and
+  // /info moved to the relay and are no longer fetched from the browser at all.
+  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/search?q=test"), false);
+  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/info/1"), false);
+  // The embed still is: lift3.ws serves it to Russian viewers, and the old host
+  // stays admitted for viewers lift3.ws turns away. A host missing from this
+  // list is rejected before it leaves the browser, which is exactly how lift3
+  // silently never got tried and every title fell through to a timeout.
+  assert.equal(helpers.isOpaqueFetchUrl("https://lift3.ws/embed/movie/51984?imp2=x"), true);
   assert.equal(helpers.isOpaqueFetchUrl("https://embed.liftw.ws/embed/movie/51984?imp2=x"), true);
-  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/info/not-an-id"), false);
-  assert.equal(helpers.isOpaqueFetchUrl("https://api.liftw.ws/auth/login"), false);
+  assert.equal(helpers.isOpaqueFetchUrl("https://lift3.ws/embed/movie/not-an-id"), false);
+  assert.equal(helpers.isOpaqueFetchUrl("https://lift3.ws/msx/"), false);
+  assert.equal(helpers.isOpaqueFetchUrl("https://lift3.ws.evil.example/embed/movie/1"), false);
   assert.equal(helpers.isOpaqueFetchUrl("https://embed.liftw.ws.evil.example/embed/movie/1"), false);
   assert.equal(helpers.isOpaqueFetchUrl("https://api.ortified.ws/embed/movie/1"), true);
   assert.equal(helpers.isOpaqueFetchUrl("https://api.zenithjs.ws/embed/movie/1"), true);

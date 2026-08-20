@@ -115,12 +115,21 @@ test("the embed is retried on a second host, and only the signed /info URL seeds
   // Russia, and it stays last as the fallback for addresses lift3.ws refuses.
   assert.ok(candidates.length >= 2, `expected several candidates, saw ${candidates.length}`);
   assert.equal(new URL(candidates[0]).hostname, "lift3.ws");
-  assert.equal(new URL(candidates.at(-1)).hostname, "embed.liftw.ws");
+  // embed.liftw.ws is the blocked host: attempting it from the browser could
+  // only ever burn a timeout, so the last resort is our own relay, which tries
+  // both hosts server-side instead.
+  assert.ok(candidates.every((url) => new URL(url).hostname !== "embed.liftw.ws"),
+    `a blocked host must never be fetched directly: ${candidates.join(" ")}`);
+  assert.match(new URL(candidates.at(-1)).hostname, /supabase\.co$/);
+  assert.equal(new URL(candidates.at(-1)).searchParams.get("mode"), "embed");
   // The signature from /info must survive the host swap.
   assert.equal(new URL(candidates[0]).search, new URL(info.iframe_uri).search);
-  // Every candidate keeps the id /info gave us; none is invented.
-  const path = new URL(info.iframe_uri).pathname;
-  assert.ok(candidates.every((url) => new URL(url).pathname === path));
+  const id = new URL(info.iframe_uri).pathname.match(/(\d+)/)[1];
+  assert.ok(candidates.slice(0, -1).every((url) => new URL(url).pathname.endsWith(id)));
+  // ...and reach the relay as parts, so the relay rebuilds rather than forwards.
+  assert.equal(new URL(candidates.at(-1)).searchParams.get("id"), id);
+  assert.equal(new URL(candidates.at(-1)).searchParams.get("imp2"),
+    new URL(info.iframe_uri).searchParams.get("imp2"));
 
   // The validator still admits nothing but the exact host and numeric path.
   assert.equal(helpers.liftwEmbedCandidates("http://embed.liftw.ws/embed/movie/51984").length, 0, "http://embed.liftw.ws/embed/movie/51984");
@@ -322,4 +331,16 @@ test("episode switching distinguishes live target identity from canonical histor
     "lift:<id> can never equal the canonical kp:<id> history bucket");
   assert.match(block, /startTracking\(context\.histKey, target\)/,
     "the canonical key is still required for progress persistence");
+});
+
+test("the sandbox allowlist admits the host the app actually fetches", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  // The allowlist exists twice — once parent-side, once inside the srcdoc — and
+  // a host missing from either is rejected before it leaves the browser. lift3
+  // was missing from both, so every attempt fell through to the blocked host
+  // and timed out: the source looked dead while the fix was already deployed.
+  assert.equal(source.match(/host === ['"]lift3\.ws['"]/g)?.length, 2,
+    "lift3.ws must be in both the parent guard and the srcdoc guard");
+  // api.liftw.ws is no longer fetched from the browser at all.
+  assert.doesNotMatch(source, /host === ['"]api\.liftw\.ws['"]/);
 });

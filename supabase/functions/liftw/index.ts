@@ -71,5 +71,39 @@ Deno.serve(async (req) => {
     return json(body, 200, CACHE_SEARCH);
   }
 
+  // The player page, for viewers who cannot reach either embed host directly:
+  // embed.liftw.ws is blocked in Russia and lift3.ws refuses some addresses, so
+  // without this the last resort was a fetch that could only ever time out.
+  // HTML only — the video still comes straight from the CDN to the browser.
+  if (mode === "embed") {
+    const id = (url.searchParams.get("id") ?? "").trim();
+    if (!/^\d{1,12}$/.test(id)) return json({ error: "bad id" }, 400);
+    // The signature /info issued is passed through as opaque parts; anything
+    // else a caller appends is dropped rather than forwarded.
+    const signed = new URLSearchParams();
+    for (const name of ["host", "imp2", "imp3", "t2", "ht", "season", "episode"]) {
+      const value = url.searchParams.get(name);
+      if (value && /^[\w.\-]{1,120}$/.test(value)) signed.set(name, value);
+    }
+    const query = signed.toString();
+    for (const host of ["lift3.ws", "embed.liftw.ws"]) {
+      try {
+        const response = await fetch(`https://${host}/embed/movie/${id}${query ? `?${query}` : ""}`, {
+          headers: { "User-Agent": UA, Accept: "text/html" },
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+        if (!response.ok) continue;
+        const html = await response.text();
+        // A host that answers with something other than the player is a failed
+        // attempt, not an empty title.
+        if (!/makePlayer\s*\(/.test(html)) continue;
+        return new Response(html, {
+          headers: { ...CORS, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=1800" },
+        });
+      } catch { /* try the next host */ }
+    }
+    return json({ error: "no embed host answered" }, 502);
+  }
+
   return json({ error: "bad mode" }, 400);
 });
