@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const CATALOG_CACHE_VERSION = "20260625-r70";
+  const CATALOG_CACHE_VERSION = "20260816-r71";
   const CONFIG_URL = `/curated-config.json?v=${CATALOG_CACHE_VERSION}`;
   const ADMIN_CHECK_URL = "/api/admin/check";
   const ADMIN_CATALOG_URL = "/api/admin/catalog";
@@ -97,6 +97,18 @@
     }
     if (kind === "rezka" && /^\d+$/.test(String(value?.rezkaId || ""))) {
       const target = { kind, rezkaId: String(value.rezkaId) };
+      if (/^\d+$/.test(String(value?.kpId || ""))) target.kpId = String(value.kpId);
+      return target;
+    }
+    // LiftW shipped as a source but was never registered here, so every LiftW
+    // title added to a list failed normalizeTarget, returned null, and was
+    // dropped without a word — the add button simply did nothing.
+    if (kind === "lift" && /^\d+$/.test(String(value?.liftId || ""))) {
+      const target = { kind, liftId: String(value.liftId) };
+      const season = Number.parseInt(String(value?.season || ""), 10);
+      const episode = Number.parseInt(String(value?.episode || ""), 10);
+      if (Number.isInteger(season) && season > 0) target.season = season;
+      if (Number.isInteger(episode) && episode > 0) target.episode = episode;
       if (/^\d+$/.test(String(value?.kpId || ""))) target.kpId = String(value.kpId);
       return target;
     }
@@ -636,13 +648,101 @@
     return card;
   }
 
-  function moveItem(fromListIndex, itemIndex, direction) {
-    const items = state.catalog.lists[fromListIndex]?.items;
-    const targetIndex = itemIndex + direction;
-    if (!items || targetIndex < 0 || targetIndex >= items.length) return;
-    [items[itemIndex], items[targetIndex]] = [items[targetIndex], items[itemIndex]];
+  // Drag state lives at module level: dragstart and drop fire on different
+  // elements, and the payload must survive a re-render of the row in between.
+  let dragging = null;
+
+  function reorderItem(from, to) {
+    if (!from || !to) return;
+    const source = state.catalog.lists[from.list];
+    const destination = state.catalog.lists[to.list];
+    if (!source || !destination) return;
+    const [item] = source.items.splice(from.index, 1);
+    if (!item) return;
+    // Splicing out of the same list shifts every later index down by one, so an
+    // insertion point past the removed slot has to come back by one too. Without
+    // this, dragging a card to the right always lands it one place short.
+    let at = to.index;
+    if (from.list === to.list && to.index > from.index) at -= 1;
+    if (from.list !== to.list && destination.items.some((entry) => entry.key === item.key)) {
+      // A duplicate in the destination means the move would silently delete the
+      // card, so put it back where it came from instead.
+      source.items.splice(from.index, 0, item);
+      return;
+    }
+    destination.items.splice(Math.max(0, Math.min(at, destination.items.length)), 0, item);
     markDirty();
     render();
+  }
+
+  // Where a drop lands: the row is a grid that wraps onto two rows, so the
+  // insertion point is the nearest card by centre distance, and which side of it
+  // depends on the pointer being past that centre.
+  function dropIndexFor(row, x, y) {
+    const cards = [...row.children].filter((child) => child.classList.contains("card"));
+    if (!cards.length) return 0;
+    let best = null;
+    cards.forEach((card, index) => {
+      const box = card.getBoundingClientRect();
+      const cx = box.left + box.width / 2;
+      const cy = box.top + box.height / 2;
+      const distance = Math.hypot(x - cx, y - cy);
+      if (!best || distance < best.distance) best = { distance, index, after: x > cx };
+    });
+    return best.index + (best.after ? 1 : 0);
+  }
+
+  function clearDropMarkers(row) {
+    for (const card of row.querySelectorAll(".drop-before, .drop-after")) {
+      card.classList.remove("drop-before", "drop-after");
+    }
+  }
+
+  function markDropTarget(row, index) {
+    clearDropMarkers(row);
+    const cards = [...row.children].filter((child) => child.classList.contains("card"));
+    if (!cards.length) return;
+    if (index >= cards.length) cards[cards.length - 1].classList.add("drop-after");
+    else cards[index].classList.add("drop-before");
+  }
+
+  // Attached to the row rather than each card, so it survives cards being
+  // re-created and covers the gaps between them.
+  function armRowDrop(row, listIndex) {
+    row.addEventListener("dragover", (event) => {
+      if (!dragging) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      markDropTarget(row, dropIndexFor(row, event.clientX, event.clientY));
+    });
+    row.addEventListener("dragleave", (event) => {
+      if (!row.contains(event.relatedTarget)) clearDropMarkers(row);
+    });
+    row.addEventListener("drop", (event) => {
+      if (!dragging) return;
+      event.preventDefault();
+      const index = dropIndexFor(row, event.clientX, event.clientY);
+      clearDropMarkers(row);
+      const from = dragging;
+      dragging = null;
+      reorderItem(from, { list: listIndex, index });
+    });
+  }
+
+  function armCardDrag(card, listIndex, itemIndex) {
+    card.draggable = true;
+    card.addEventListener("dragstart", (event) => {
+      dragging = { list: listIndex, index: itemIndex };
+      card.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      // Firefox ignores a drag that carries no data at all.
+      event.dataTransfer.setData("text/plain", String(itemIndex));
+    });
+    card.addEventListener("dragend", () => {
+      card.classList.remove("dragging");
+      dragging = null;
+      for (const row of document.querySelectorAll(".curated-row")) clearDropMarkers(row);
+    });
   }
 
   function moveItemToList(fromListIndex, itemIndex, toListIndex) {
@@ -867,6 +967,7 @@
   }
 
   function addAdminItemControls(card, listIndex, itemIndex) {
+    armCardDrag(card, listIndex, itemIndex);
     if (!state.admin) return;
     const item = state.catalog.lists[listIndex]?.items?.[itemIndex];
     const media = card.querySelector(".card-media");
@@ -923,24 +1024,12 @@
     const controls = document.createElement("div");
     controls.className = "admin-item-controls";
     controls.addEventListener("keydown", (event) => event.stopPropagation());
-    const left = document.createElement("button");
-    left.type = "button";
-    left.textContent = "‹";
-    left.title = "Сдвинуть влево";
-    left.disabled = itemIndex === 0;
-    left.addEventListener("click", (event) => {
-      event.stopPropagation();
-      moveItem(listIndex, itemIndex, -1);
-    });
-    const right = document.createElement("button");
-    right.type = "button";
-    right.textContent = "›";
-    right.title = "Сдвинуть вправо";
-    right.disabled = itemIndex >= state.catalog.lists[listIndex].items.length - 1;
-    right.addEventListener("click", (event) => {
-      event.stopPropagation();
-      moveItem(listIndex, itemIndex, 1);
-    });
+    // Ordering is done by dragging the card itself. The handle is there to say
+    // so — and to give touch and trackpad users something obvious to grab.
+    const grip = document.createElement("span");
+    grip.className = "grip";
+    grip.textContent = "⠿";
+    grip.title = "Перетащите карточку, чтобы изменить порядок";
     const select = document.createElement("select");
     select.title = "Перенести в другой список";
     state.catalog.lists.forEach((list, index) => {
@@ -975,7 +1064,7 @@
       markDirty();
       render();
     });
-    controls.append(left, right, select, refresh, remove);
+    controls.append(grip, select, refresh, remove);
     media.appendChild(controls);
 
     // Corner badge rather than a sixth column in the strip below: at ~130px card
@@ -1398,6 +1487,7 @@
         });
         wrap.appendChild(row);
         block.appendChild(wrap);
+        if (state.admin) armRowDrop(row, listIndex);
         setupCuratedRow(wrap, row);
         window.alphyBridge?.fillGridLetterboxd?.(row);
       }
@@ -1541,7 +1631,7 @@
     // Search/recommendations consult this to open an already-curated title
     // through its resolved list target instead of the full kp resolve flow.
     findReady,
-    _test: { normalizeItem, applyItemMetadata },
+    _test: { normalizeItem, applyItemMetadata, normalizeTarget, reorderItem, dropIndexFor, state },
   };
 
   init();

@@ -110,6 +110,18 @@ function normalizeTarget(value) {
     if (/^\d+$/.test(String(value?.kpId || ""))) target.kpId = String(value.kpId);
     return target;
   }
+  // Must stay in step with the same list in catalog.js: a kind missing from
+  // either one is dropped, and the LiftW gap meant an admin could add a title,
+  // see nothing happen, and have no idea which half rejected it.
+  if (kind === "lift" && /^\d+$/.test(String(value?.liftId || ""))) {
+    const target = { kind, liftId: String(value.liftId) };
+    const season = positiveIntegerText(value?.season);
+    const episode = positiveIntegerText(value?.episode);
+    if (season) target.season = Number(season);
+    if (episode) target.episode = Number(episode);
+    if (/^\d+$/.test(String(value?.kpId || ""))) target.kpId = String(value.kpId);
+    return target;
+  }
   if (kind === "clps" && /^\d+$/.test(String(value?.kpId || ""))) {
     const target = { kind, kpId: String(value.kpId) };
     const season = positiveIntegerText(value?.season);

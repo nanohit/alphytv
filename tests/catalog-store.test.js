@@ -143,3 +143,35 @@ test("bookmark banner is an explicit catalog boolean", () => {
   assert.equal(enabled.bookmarkBannerText, "Важное объявление");
   assert.equal(normalizeCatalog({ bookmarkBanner: "true", lists: [] }).bookmarkBanner, false);
 });
+
+test("a LiftW title survives both validators, and the two lists agree on kinds", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const catalog = normalizeCatalog({
+    lists: [{
+      title: "LiftW",
+      items: [{
+        title: "Нормальные люди",
+        year: 2020,
+        isSeries: true,
+        target: { kind: "lift", liftId: 15859, season: 1, episode: 2, kpId: "1301155" },
+      }],
+    }],
+  });
+  // The whole bug in one assertion: an unknown kind makes normalizeTarget return
+  // null, normalizeItem drop the item, and the add button do nothing at all.
+  assert.equal(catalog.lists[0].items.length, 1, "a LiftW title must not be dropped on save");
+  assert.deepEqual(catalog.lists[0].items[0].target, {
+    kind: "lift", liftId: "15859", season: 1, episode: 2, kpId: "1301155",
+  });
+  assert.equal(normalizeCatalog({ lists: [{ items: [{ title: "x", target: { kind: "lift" } }] }] })
+    .lists[0].items.length, 0, "a lift target without an id must still be refused");
+
+  // The accepted kinds are declared twice — once here, once in catalog.js — and
+  // a kind added to only one silently loses items on the other side. Neither
+  // copy is authoritative, so the test is that they match.
+  const kindsOf = (source) => new Set([...source.matchAll(/kind === "(\w+)"/g)].map((m) => m[1]));
+  const server = kindsOf(await readFile(new URL("../api/_catalog-store.js", import.meta.url), "utf8"));
+  const client = kindsOf(await readFile(new URL("../catalog.js", import.meta.url), "utf8"));
+  assert.deepEqual([...server].sort(), [...client].sort(),
+    "catalog.js and api/_catalog-store.js must accept the same target kinds");
+});

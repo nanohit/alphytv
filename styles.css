@@ -1265,3 +1265,28 @@ body.admin-mode .meta-info { display: flex; }
   .key-pool-row-actions { grid-column: 1 / -1; }
   .key-pool-tools { flex-wrap: wrap; }
 }
+
+/* Ordering a curated list is done by dragging the card. The handle only
+   advertises that — the whole card is the drag surface, so a small target is
+   never the thing standing between an admin and the order they want. */
+.admin-item-controls .grip {
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: grab; user-select: none;
+  color: var(--muted-strong); font-size: 12px; line-height: 1;
+}
+.admin-item-controls .grip:active { cursor: grabbing; }
+body.admin-mode .curated-row .card[draggable="true"] { cursor: grab; }
+body.admin-mode .curated-row .card.dragging {
+  opacity: .4;
+  /* Keeps the lifted card from also reading as a drop target. */
+  pointer-events: none;
+}
+/* The insertion point, drawn on the neighbour rather than as a floating element
+   so it stays correct when the row wraps onto two rows. */
+body.admin-mode .curated-row .card.drop-before .card-media,
+body.admin-mode .curated-row .card.drop-after .card-media {
+  box-shadow: -3px 0 0 0 var(--accent);
+}
+body.admin-mode .curated-row .card.drop-after .card-media {
+  box-shadow: 3px 0 0 0 var(--accent);
+}
