@@ -4312,7 +4312,18 @@ parent.postMessage({
       if (!url) throw new Error("не удалось получить свежий MP4");
       warmCollapsConnections(url);
       const ok = await swapCollapsVideo(url);
-      if (!ok) hardReloadCollapsVideo(url);
+      if (!ok) {
+        // The seamless path failed. Reloading the element the viewer is looking
+        // at costs them the picture, so it is only worth doing when they have
+        // already lost it — a still-advancing video is left alone and the next
+        // scheduled attempt (or the watchdog) tries again.
+        const video = activeCollapsVideo();
+        const stalled = !video || video.error || video.ended
+          || (!video.paused && video.readyState < 3)
+          || qualityKey;
+        if (stalled) hardReloadCollapsVideo(url);
+        else log("collaps-refresh-deferred", "подмена не удалась, картинка идёт — ждём следующей попытки");
+      }
       c.lastAdvanceWall = Date.now();
     } finally {
       c.refreshing = false;
@@ -4322,6 +4333,11 @@ parent.postMessage({
     }
   }
 
+  // The session refresh must be invisible: the viewer never asked for it and
+  // must not be able to tell it happened. So the incoming element is loaded,
+  // seeked and actually *playing* before it is revealed — and if any of that
+  // fails, the outgoing element is left running rather than the viewer being
+  // dropped onto a paused frame.
   function swapCollapsVideo(url) {
     const c = state.collaps;
     const cur = activeCollapsVideo();
@@ -4334,39 +4350,84 @@ parent.postMessage({
         next.removeEventListener("loadedmetadata", onMeta);
         next.removeEventListener("canplay", onCan);
         next.removeEventListener("error", onErr);
+        clearTimeout(guard);
       };
       const finish = (ok) => {
         if (done) return;
         done = true;
         cleanup();
+        if (!ok) {
+          // Abandoned: put the spare back to sleep and make sure the element the
+          // viewer is actually watching is still running.
+          try { next.pause(); next.removeAttribute("src"); next.load(); } catch { /* ignore */ }
+          if (wasPlaying && cur.paused) cur.play().catch(() => {});
+        }
         resolve(ok);
       };
-      const onMeta = () => { try { next.currentTime = cur.currentTime; } catch { /* ignore */ } };
-      const onCan = () => {
+      const guard = setTimeout(() => finish(false), 12000);
+
+      const syncPosition = () => {
+        try { next.currentTime = cur.currentTime; } catch { /* ignore */ }
+      };
+      const onMeta = () => syncPosition();
+
+      const reveal = () => {
         if (state.collaps !== c) { finish(false); return; }
-        const drift = cur.currentTime - next.currentTime;
-        if (Math.abs(drift) > 0.5) { try { next.currentTime = cur.currentTime; } catch { /* ignore */ } }
-        next.volume = cur.volume;
-        next.muted = cur.muted;
-        next.playbackRate = cur.playbackRate;
-        if (wasPlaying) next.play().catch(() => {});
         next.style.display = "block";
         cur.style.display = "none";
         try { cur.pause(); } catch { /* ignore */ }
         c.activeIndex = c.activeIndex === 0 ? 1 : 0;
         state.videoEl = next;
         bindCollapsActive();
+        // Fullscreen lives on the player host, so the swap does not touch it.
+        // If an older session left it on the outgoing element, move it across
+        // rather than letting the picture disappear.
+        if (document.fullscreenElement === cur) {
+          fullscreenTarget()?.requestFullscreen?.().catch(() => {});
+        }
         setTimeout(() => { try { cur.removeAttribute("src"); cur.load(); } catch { /* ignore */ } }, 250);
         finish(true);
       };
+
+      const onCan = async () => {
+        if (state.collaps !== c) { finish(false); return; }
+        next.volume = cur.volume;
+        next.muted = cur.muted;
+        next.playbackRate = cur.playbackRate;
+        if (!wasPlaying) {
+          // Paused stays paused, at the same frame.
+          syncPosition();
+          reveal();
+          return;
+        }
+        // Seek as late as possible: the outgoing element kept advancing while
+        // this one was loading, and a stale seek is a visible jump backwards.
+        syncPosition();
+        try {
+          await next.play();
+        } catch {
+          finish(false);
+          return;
+        }
+        // "play() resolved" is not "a frame is on screen". Wait for real
+        // progress, otherwise the reveal can land on a black frame.
+        const started = () => {
+          next.removeEventListener("timeupdate", started);
+          const drift = cur.currentTime - next.currentTime;
+          if (Math.abs(drift) > 0.4) { try { next.currentTime = cur.currentTime; } catch { /* ignore */ } }
+          reveal();
+        };
+        next.addEventListener("timeupdate", started);
+      };
+
       const onErr = () => finish(false);
       next.muted = true;
+      next.preload = "auto";
       next.addEventListener("loadedmetadata", onMeta);
       next.addEventListener("canplay", onCan);
       next.addEventListener("error", onErr);
       next.src = url;
       next.load();
-      setTimeout(() => finish(false), 12000);
     });
   }
 
@@ -4476,23 +4537,6 @@ parent.postMessage({
       btn.textContent = source.label;
       if (source.key === c.qualityKey) btn.className = "active";
       btn.addEventListener("click", () => refreshCollapsNow("качество", source.key).catch((error) => showError(error)));
-      return btn;
-    });
-
-    addTrackGroup("Сессия", [{ refresh: true }, { auto: true }], (item) => {
-      const btn = document.createElement("button");
-      if (item.refresh) {
-        btn.textContent = "обновить";
-        btn.addEventListener("click", () => refreshCollapsNow("вручную").catch((error) => showError(error)));
-        return btn;
-      }
-      btn.textContent = c.autoRefresh ? "авто вкл" : "авто выкл";
-      if (c.autoRefresh) btn.className = "active";
-      btn.addEventListener("click", () => {
-        c.autoRefresh = !c.autoRefresh;
-        armCollapsTimers();
-        renderCollapsControls();
-      });
       return btn;
     });
 
@@ -9278,7 +9322,53 @@ addEventListener('message', async (event) => {
       else if (code === "ArrowUp") { e.preventDefault(); v.volume = Math.min(1, v.volume + 0.05); }
       else if (code === "ArrowDown") { e.preventDefault(); v.volume = Math.max(0, v.volume - 0.05); }
       else if (code === "Space" || code === "KeyK") { e.preventDefault(); v.paused ? v.play() : v.pause(); }
-      else if (code === "KeyF") { e.preventDefault(); if (document.fullscreenElement) document.exitFullscreen(); else v.requestFullscreen?.(); }
+      else if (code === "KeyF") { e.preventDefault(); toggleFullscreen(); }
+    });
+  }
+
+  // Fullscreen goes on the player host, never on a <video>. Collaps refreshes
+  // its session every few minutes by swapping to a second, pre-buffered video
+  // element; with fullscreen bound to the old element the browser stayed
+  // formally fullscreen on a hidden, paused video, so the picture vanished and
+  // playback looked stuck. The host survives every swap, so the swap becomes
+  // invisible — which is the only acceptable behaviour for something the viewer
+  // never asked for.
+  function fullscreenTarget() {
+    return el.playerHost || activeVideoEl();
+  }
+
+  function toggleFullscreen() {
+    const host = fullscreenTarget();
+    if (document.fullscreenElement) {
+      document.exitFullscreen?.();
+      return;
+    }
+    if (host?.requestFullscreen) {
+      host.requestFullscreen().catch((error) => log("fullscreen-warn", error.message));
+      return;
+    }
+    // iOS Safari has no Element.requestFullscreen — only the video itself can
+    // go fullscreen there, and it owns the swap because it renders natively.
+    const video = activeVideoEl();
+    video?.webkitEnterFullscreen?.();
+  }
+
+  function activeVideoEl() {
+    return state.collaps ? activeCollapsVideo() : state.videoEl;
+  }
+
+  // The <video> carries native controls, so its own fullscreen button is how
+  // most viewers go fullscreen — and that makes the element itself fullscreen,
+  // which is exactly what the session swap then breaks. Migrate to the host as
+  // soon as it happens: while the document is already fullscreen, moving it to
+  // another element needs no fresh user gesture.
+  function armFullscreenMigration() {
+    document.addEventListener("fullscreenchange", () => {
+      const active = document.fullscreenElement;
+      const host = el.playerHost;
+      if (!active || !host || active === host) return;
+      if (active.tagName !== "VIDEO" || !host.contains(active)) return;
+      host.requestFullscreen?.().catch((error) => log("fullscreen-migrate-warn", error.message));
     });
   }
 
@@ -9452,6 +9542,7 @@ addEventListener('message', async (event) => {
       flushOrtProgress();
     });
     bindKeyboard();
+    armFullscreenMigration();
 
     // Migrate legacy hash/query-param deep links to path routes.
     if (location.hash) {
