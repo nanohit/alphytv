@@ -47,10 +47,12 @@ test("Tizen preserves an explicit Collaps quality selection", async () => {
   assert.equal(tizen.chooseCollapsSource(sources, "mpeg2kUrl").url, "4k");
 });
 
-test("Tizen Ortified hook removes frame capture and the 1.5 second DOM poll", async () => {
+test("Tizen Ortified hook reports position only, and drops the 1.5 second DOM poll", async () => {
   const tizen = await helpersFor({ userAgent: TIZEN_UA });
   const hook = tizen.progressHook();
-  assert.match(hook, /const SNAPSHOT = false/);
+  // Frame capture is gone for every device, not just this one — the readback
+  // stuttered playback on any weak GPU, a projector included.
+  assert.doesNotMatch(hook, /toDataURL|drawImage|SNAPSHOT/);
   assert.match(hook, /const SEND_MS = 30000/);
   assert.match(hook, /new MutationObserver\(discover\)/);
   assert.doesNotMatch(hook, /addEventListener\('timeupdate'/);

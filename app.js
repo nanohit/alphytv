@@ -226,7 +226,6 @@
     currentMeta: null,
     zenithEmbedUrl: "",
     playerReady: false,
-    lastSnapshotAt: 0,
     // Ortified progress is reported from the srcdoc player every ~4s. We coalesce
     // the localStorage write (see onOrtProgress) so weak TV browsers don't stall
     // the shared event loop on every tick; the newest tick lives here until flush.
@@ -3878,17 +3877,6 @@ parent.postMessage({
       video.playbackRate = state.playbackRate;
       renderSoapTracks();
       markPlayerReady();
-      if (!TIZEN_VIDEO_MODE) {
-        const snap = () => {
-          const target = state.currentTarget;
-          if (target) setTimeout(() => captureVideoSnapshot(keyFor(target), target), 350);
-        };
-        video.addEventListener("loadeddata", snap, { once: true });
-        video.addEventListener("playing", snap);
-        video.addEventListener("pause", snap);
-        video.addEventListener("seeked", snap);
-        setTimeout(snap, 2200);
-      }
       startPlaybackIfAllowed(video, { resume: opts.resume > 5 });
     };
 
@@ -5591,17 +5579,6 @@ parent.postMessage({
       video.playbackRate = state.playbackRate;
       renderRezkaControls();
       markPlayerReady();
-      if (!TIZEN_VIDEO_MODE) {
-        const snap = () => {
-          const t = state.currentTarget;
-          if (t) setTimeout(() => captureVideoSnapshot(histKey, t), 350);
-        };
-        video.addEventListener("loadeddata", snap, { once: true });
-        video.addEventListener("playing", snap);
-        video.addEventListener("pause", snap);
-        video.addEventListener("seeked", snap);
-        setTimeout(snap, 2200);
-      }
       startTracking(histKey, target);
       startPlaybackIfAllowed(video, { resume: resume > 5 });
     };
@@ -6783,18 +6760,6 @@ parent.postMessage({
     video.playbackRate = state.playbackRate;
     renderTracks();
     markPlayerReady();
-    if (!TIZEN_VIDEO_MODE) {
-      const snapshotCurrentFrame = () => {
-        const target = state.currentTarget;
-        if (!target) return;
-        setTimeout(() => captureVideoSnapshot(keyFor(target), target), 350);
-      };
-      video.addEventListener("loadeddata", snapshotCurrentFrame, { once: true });
-      video.addEventListener("playing", snapshotCurrentFrame);
-      video.addEventListener("pause", snapshotCurrentFrame);
-      video.addEventListener("seeked", snapshotCurrentFrame);
-      setTimeout(snapshotCurrentFrame, 2200);
-    }
     startPlaybackIfAllowed(video, { resume: opts.resume > 5 });
   }
 
@@ -6876,9 +6841,6 @@ parent.postMessage({
     if (audioLang) entry.audioLang = audioLang;
     if (state.collaps?.selection) entry.collapsSelection = cleanCollapsSelection(state.collaps.selection);
     recordHistory(entry);
-    if (!TIZEN_VIDEO_MODE && Date.now() - state.lastSnapshotAt > 20_000) {
-      captureVideoSnapshot(histKey, target);
-    }
   }
 
   function stopTracking(flush = false) {
@@ -6910,52 +6872,12 @@ parent.postMessage({
     state.staleTextTrackIds = [];
   }
 
-  function captureVideoSnapshot(histKey, target) {
-    // drawImage(video) + toDataURL forces a synchronous GPU readback. On Tizen
-    // this can evict the hardware video plane and start a repeating stall cycle.
-    if (TIZEN_VIDEO_MODE) return;
-    const video = state.videoEl;
-    if (!video || !video.videoWidth || !video.videoHeight || video.readyState < 2) return;
-    const width = Math.min(480, video.videoWidth);
-    const height = Math.max(1, Math.round(width * 9 / 16));
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext("2d", { alpha: false });
-    if (!context) return;
-    const sourceRatio = video.videoWidth / video.videoHeight;
-    const targetRatio = width / height;
-    let sx = 0;
-    let sy = 0;
-    let sw = video.videoWidth;
-    let sh = video.videoHeight;
-    if (sourceRatio > targetRatio) {
-      sw = video.videoHeight * targetRatio;
-      sx = (video.videoWidth - sw) / 2;
-    } else {
-      sh = video.videoWidth / targetRatio;
-      sy = (video.videoHeight - sh) / 2;
-    }
-    try {
-      context.drawImage(video, sx, sy, sw, sh, 0, 0, width, height);
-      const snapshot = canvas.toDataURL("image/jpeg", 0.58);
-      state.lastSnapshotAt = Date.now();
-      recordHistory({
-        key: histKey,
-        kind: target.kind,
-        target: cleanTarget(target),
-        title: target.title || state.currentMeta?.title || "",
-        poster: target.poster || state.currentMeta?.poster || "",
-        year: target.year || state.currentMeta?.year || "",
-        kpId: historyKpId(target, state.currentMeta || {}),
-        meta: historyMetaSnapshot(state.currentMeta || {}, target),
-        snapshot,
-      });
-    } catch (error) {
-      state.lastSnapshotAt = Date.now();
-      log("snapshot-warn", error?.message || String(error));
-    }
-  }
+  // Frame snapshots are gone. drawImage(video)+toDataURL forces a synchronous
+  // GPU readback, and it ran on loadeddata/playing/pause/seeked — so on a weak
+  // device every rebuffer fired a capture, and the capture caused the next
+  // rebuffer. A thumbnail on the continue card is not worth a stutter every
+  // second on a projector; those cards fall back to the poster, which every
+  // entry already has.
 
   // Position reports from the Ortified cleanroom iframe (see progressHook). We can't
   // resume the embedded player, but we record where the viewer stopped so the
@@ -7865,14 +7787,12 @@ LIMIT 1`;
     // player resetting on reload, but we can report where the viewer stopped so the
     // homepage shows progress. Posts {alphyOrtProgress, position, duration} out.
     //
-    // On smart-TV/projector browsers the iframe <video> has no hardware overlay, so
-    // it micro-stutters whenever this shared main thread is busy. There we drop the
-    // canvas snapshot entirely (drawImage+toDataURL forces a synchronous GPU frame
-    // readback — the single most expensive thing we run) and report position less
-    // often. The continue-card just loses its thumbnail on those devices.
+    // The iframe <video> has no hardware overlay, so it micro-stutters whenever
+    // this shared main thread is busy. The canvas snapshot that used to ride
+    // along here was the most expensive thing we ran and is gone entirely; what
+    // is left is a position report, sent less often on weak devices.
     const tv = TIZEN_VIDEO_MODE;
     const weak = weakVideoDevice();
-    const snapshotEnabled = weak ? "false" : "true";
     const sendMs = tv ? 30000 : weak ? 10000 : 4000;
     const discovery = tv
       ? `
@@ -7896,33 +7816,15 @@ LIMIT 1`;
   setInterval(() => { try { document.querySelectorAll('video').forEach(hook); } catch (e) {} }, 1500);`;
     return `<script data-cleanroom="progress-hook">
 (() => {
-  const SNAPSHOT = ${snapshotEnabled};
   const SEND_MS = ${sendMs};
   const hooked = new WeakSet();
   let lastSent = 0;
-  let lastShot = 0;
   const send = (v) => {
     const now = Date.now();
     if (now - lastSent < SEND_MS) return;
     if (!v.duration || !isFinite(v.duration) || v.duration <= 0) return;
     lastSent = now;
-    let snapshot = '';
-    if (SNAPSHOT && now - lastShot > 20000 && v.videoWidth && v.videoHeight) {
-      lastShot = now;
-      try {
-        const width = Math.min(480, v.videoWidth), height = Math.max(1, Math.round(width * 9 / 16));
-        const canvas = document.createElement('canvas');
-        canvas.width = width; canvas.height = height;
-        const ctx = canvas.getContext('2d', { alpha: false });
-        const sourceRatio = v.videoWidth / v.videoHeight, targetRatio = width / height;
-        let sx = 0, sy = 0, sw = v.videoWidth, sh = v.videoHeight;
-        if (sourceRatio > targetRatio) { sw = v.videoHeight * targetRatio; sx = (v.videoWidth - sw) / 2; }
-        else { sh = v.videoWidth / targetRatio; sy = (v.videoHeight - sh) / 2; }
-        ctx.drawImage(v, sx, sy, sw, sh, 0, 0, width, height);
-        snapshot = canvas.toDataURL('image/jpeg', 0.58);
-      } catch (e) {}
-    }
-    try { parent.postMessage({ alphyOrtProgress: true, position: v.currentTime, duration: v.duration, snapshot }, '*'); } catch (e) {}
+    try { parent.postMessage({ alphyOrtProgress: true, position: v.currentTime, duration: v.duration }, '*'); } catch (e) {}
   };
 ${discovery}
 })();
