@@ -1,5 +1,5 @@
 import { requireAdmin } from "../_admin-auth.js";
-import { readCatalog, writeCatalog } from "../_catalog-store.js";
+import { readCatalog, writeCatalog } from "../_catalog-versioned-store.js";
 
 async function readBody(req) {
   if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) return req.body;
