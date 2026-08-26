@@ -23,10 +23,19 @@ async function flush(ms = 15) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function harness({ cached = null, fallback = catalog(4), live = catalog(5), admin = false, dirty = false } = {}) {
+function harness({
+  cached = null,
+  primary = catalog(5),
+  fallback = catalog(4),
+  blob = catalog(6),
+  primaryStatus = 200,
+  fallbackStatus = 200,
+  admin = false,
+  dirty = false,
+} = {}) {
   const store = new Map();
   if (cached) {
-    store.set("alphy.curated.public.v2", JSON.stringify({
+    store.set("alphy.curated.public.v3", JSON.stringify({
       revision: cached.revision,
       savedAt: 1,
       catalog: cached,
@@ -37,14 +46,15 @@ function harness({ cached = null, fallback = catalog(4), live = catalog(5), admi
   const nativeFetch = async (input) => {
     const url = new URL(String(input), "https://alphy.tv/");
     calls.push(url.href);
-    if (url.pathname === "/curated-fallback.json") return makeResponse(fallback);
+    if (url.hostname === "cdn.jsdelivr.net") return makeResponse(primary, primaryStatus);
+    if (url.pathname === "/curated-fallback.json") return makeResponse(fallback, fallbackStatus);
     if (url.href.includes("/catalog/current.json")) {
-      return makeResponse({ blobUrl: "https://store.public.blob.vercel-storage.com/catalog/r5.json" });
+      return makeResponse({ blobUrl: "https://store.public.blob.vercel-storage.com/catalog/r6.json" });
     }
-    if (url.hostname.endsWith(".public.blob.vercel-storage.com") && url.pathname.endsWith("/catalog/r5.json")) {
-      return makeResponse(live);
+    if (url.hostname.endsWith(".public.blob.vercel-storage.com") && url.pathname.endsWith("/catalog/r6.json")) {
+      return makeResponse(blob);
     }
-    if (url.pathname === "/api/admin/catalog") return makeResponse({ ok: true, catalog: live });
+    if (url.pathname === "/api/admin/catalog") return makeResponse({ ok: true, catalog: blob });
     if (url.pathname === "/curated-live.json") return makeResponse(fallback);
     throw new Error(`unexpected fetch ${url.href}`);
   };
@@ -108,53 +118,72 @@ function harness({ cached = null, fallback = catalog(4), live = catalog(5), admi
   };
 }
 
-test("warm public open returns cached catalog immediately", async () => {
-  const h = harness({ cached: catalog(5), fallback: catalog(4), live: catalog(5) });
+test("warm public open returns local cache without Vercel catalog traffic", async () => {
+  const h = harness({ cached: catalog(5), primary: catalog(5) });
   h.mount(catalog(5));
-  const config = await (await h.window.fetch("/curated-config.json")).json();
-  assert.equal(config.blobUrl, "/curated-live.json");
   const result = await (await h.window.fetch("/curated-live.json")).json();
   assert.equal(result.revision, 5);
-  await flush(30);
+  assert.equal(h.calls.some((url) => url.includes("alphy.tv/curated-fallback.json")), false);
+  assert.equal(h.calls.some((url) => url.includes("vercel-storage.com")), false);
+  await flush(20);
 });
 
-test("cold open renders static fallback then hot-applies newer Blob revision", async () => {
-  const h = harness({ fallback: catalog(4), live: catalog(5) });
-  h.mount(catalog(4));
+test("cold open gets catalog from jsDelivr", async () => {
+  const h = harness({ primary: catalog(5), fallback: catalog(4) });
+  h.mount(catalog(5));
   const result = await (await h.window.fetch("/curated-live.json")).json();
-  assert.equal(result.revision, 4);
+  assert.equal(result.revision, 5);
+  assert.ok(h.calls.some((url) => url.includes("cdn.jsdelivr.net/gh/nanohit/alphytv@catalog-cdn/curated-fallback.json")));
+  assert.equal(h.calls.some((url) => url.includes("alphy.tv/curated-fallback.json")), false);
+  assert.equal(h.calls.some((url) => url.includes("vercel-storage.com")), false);
+});
+
+test("newer jsDelivr snapshot hot-applies over warm cache", async () => {
+  const h = harness({ cached: catalog(4), primary: catalog(5) });
+  h.mount(catalog(4));
+  h.store.set("alphy.curated.public-refresh.v2", "0");
+  await h.window.fetch("/curated-live.json");
   await flush(40);
   assert.equal(h.window.alphyCatalog._test.state.catalog.revision, 5);
   assert.ok(h.renders >= 1);
-  const saved = JSON.parse(h.store.get("alphy.curated.public.v2"));
-  assert.equal(saved.catalog.revision, 5);
 });
 
-test("background refresh never overwrites an admin draft", async () => {
-  const h = harness({ cached: catalog(4), fallback: catalog(4), live: catalog(5), admin: true, dirty: true });
+test("Vercel static is used only when jsDelivr fails", async () => {
+  const h = harness({ primaryStatus: 503, fallback: catalog(4), blob: catalog(6) });
   h.mount(catalog(4));
   const result = await (await h.window.fetch("/curated-live.json")).json();
   assert.equal(result.revision, 4);
+  assert.ok(h.calls.some((url) => url.includes("cdn.jsdelivr.net")));
+  assert.ok(h.calls.some((url) => url.includes("alphy.tv/curated-fallback.json")));
+  assert.equal(h.calls.some((url) => url.includes("vercel-storage.com")), false);
+});
+
+test("Blob is tertiary fallback after jsDelivr and Vercel static fail", async () => {
+  const h = harness({ primaryStatus: 503, fallbackStatus: 503, blob: catalog(6) });
+  h.mount(catalog(6));
+  const result = await (await h.window.fetch("/curated-live.json")).json();
+  assert.equal(result.revision, 6);
+  assert.ok(h.calls.some((url) => url.includes("/catalog/current.json")));
+  assert.ok(h.calls.some((url) => url.endsWith("/catalog/r6.json")));
+});
+
+test("background refresh never overwrites an admin draft", async () => {
+  const h = harness({ cached: catalog(4), primary: catalog(5), admin: true, dirty: true });
+  h.mount(catalog(4));
+  h.store.set("alphy.curated.public-refresh.v2", "0");
+  await h.window.fetch("/curated-live.json");
   await flush(40);
   assert.equal(h.window.alphyCatalog._test.state.catalog.revision, 4);
   assert.equal(h.renders, 0);
-  const saved = JSON.parse(h.store.get("alphy.curated.public.v2"));
+  const saved = JSON.parse(h.store.get("alphy.curated.public.v3"));
   assert.equal(saved.catalog.revision, 5);
 });
 
-test("older deployment fallback cannot downgrade a newer local snapshot", async () => {
-  const h = harness({ cached: catalog(8), fallback: catalog(7), live: catalog(8) });
-  h.mount(catalog(8));
-  await flush(20);
-  const saved = JSON.parse(h.store.get("alphy.curated.public.v2"));
-  assert.equal(saved.catalog.revision, 8);
-});
-
 test("successful admin catalog response primes the public cache", async () => {
-  const h = harness({ cached: catalog(4), fallback: catalog(4), live: catalog(6), admin: true });
+  const h = harness({ cached: catalog(4), blob: catalog(6), admin: true });
   const response = await h.window.fetch("/api/admin/catalog", { method: "PUT" });
   assert.equal(response.status, 200);
   await flush(10);
-  const saved = JSON.parse(h.store.get("alphy.curated.public.v2"));
+  const saved = JSON.parse(h.store.get("alphy.curated.public.v3"));
   assert.equal(saved.catalog.revision, 6);
 });

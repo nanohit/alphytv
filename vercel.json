@@ -1,5 +1,10 @@
 {
   "cleanUrls": true,
+  "git": {
+    "deploymentEnabled": {
+      "catalog-cdn": false
+    }
+  },
   "rewrites": [
     {
       "source": "/curated-live.json",

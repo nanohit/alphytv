@@ -1,25 +1,24 @@
-// Instant curated-catalog bootstrap with stale-while-revalidate freshness.
-//
-// The public path stays entirely off Functions/Edge Config: a repeat visit is
-// served synchronously from localStorage, while a first visit uses the
-// deployment-baked fallback already sitting on Vercel's CDN. The mutable Blob
-// catalog refreshes in the background and hot-applies only when it is newer.
+// Instant curated-catalog bootstrap: jsDelivr first, Vercel/Blob only as fallbacks.
 (function () {
   "use strict";
 
   const CONFIG_PATH = "/curated-config.json";
   const PUBLIC_CATALOG_PATH = "/curated-live.json";
   const ADMIN_CATALOG_PATH = "/api/admin/catalog";
-  const FALLBACK_URL = "/curated-fallback.json";
-  const MANIFEST_URL =
+  const PRIMARY_CDN_URL =
+    "https://cdn.jsdelivr.net/gh/nanohit/alphytv@catalog-cdn/curated-fallback.json";
+  const VERCEL_FALLBACK_URL = "/curated-fallback.json";
+  const BLOB_MANIFEST_URL =
     "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/current.json";
   const BLOB_HOST_SUFFIX = ".public.blob.vercel-storage.com";
-  const CACHE_KEY = "alphy.curated.public.v2";
-  const REFRESH_KEY = "alphy.curated.public-refresh.v1";
-  const REFRESH_MIN_MS = 60 * 1000;
+  const CACHE_KEY = "alphy.curated.public.v3";
+  const REFRESH_KEY = "alphy.curated.public-refresh.v2";
+  const REFRESH_MIN_MS = 5 * 60 * 1000;
   const nativeFetch = window.fetch.bind(window);
 
+  let primaryPromise = null;
   let fallbackPromise = null;
+  let blobPromise = null;
   let refreshPromise = null;
   let refreshScheduled = false;
 
@@ -63,7 +62,7 @@
         catalog,
       }));
     } catch {
-      // Storage is an acceleration layer only; Vercel static/Blob remain usable.
+      // Storage is only an acceleration layer.
     }
   }
 
@@ -105,17 +104,16 @@
         return;
       }
       const { api, state } = active;
-      // Never overwrite an admin's live edit/draft with a public refresh.
       if (api.isAdmin?.() || state.dirty) return;
       if (revisionOf(catalog) <= revisionOf(state.catalog)) return;
       state.catalog = catalog;
       api.render();
       try {
         window.dispatchEvent(new CustomEvent("alphy:catalog-refreshed", {
-          detail: { revision: revisionOf(catalog) },
+          detail: { revision: revisionOf(catalog), source: "jsdelivr" },
         }));
       } catch {
-        // CustomEvent is only informational; rendering already happened.
+        // Rendering already happened; the event is informational only.
       }
     };
     attempt();
@@ -129,48 +127,68 @@
     return catalog;
   }
 
-  function loadFallback() {
+  function loadPrimary() {
+    if (primaryPromise) return primaryPromise;
+    primaryPromise = fetchCatalogJson(PRIMARY_CDN_URL, {
+      cache: "no-cache",
+      credentials: "omit",
+      mode: "cors",
+    }).then((catalog) => {
+      storeIfNewer(catalog);
+      markRefreshed();
+      applyFreshWhenReady(catalog);
+      return catalog;
+    }).finally(() => {
+      primaryPromise = null;
+    });
+    return primaryPromise;
+  }
+
+  function loadVercelFallback() {
     if (fallbackPromise) return fallbackPromise;
-    fallbackPromise = fetchCatalogJson(FALLBACK_URL, {
+    fallbackPromise = fetchCatalogJson(VERCEL_FALLBACK_URL, {
       cache: "force-cache",
       credentials: "omit",
     }).then((catalog) => {
       storeIfNewer(catalog);
       applyFreshWhenReady(catalog);
       return catalog;
-    }).catch((error) => {
+    }).finally(() => {
       fallbackPromise = null;
-      throw error;
     });
     return fallbackPromise;
   }
 
-  async function loadLiveCatalog() {
-    const manifestResponse = await nativeFetch(MANIFEST_URL, {
-      cache: "default",
-      credentials: "omit",
+  function loadBlobFallback() {
+    if (blobPromise) return blobPromise;
+    blobPromise = (async () => {
+      const manifestResponse = await nativeFetch(BLOB_MANIFEST_URL, {
+        cache: "no-cache",
+        credentials: "omit",
+      });
+      if (!manifestResponse.ok) throw new Error(`catalog manifest ${manifestResponse.status}`);
+      const manifest = await manifestResponse.json();
+      if (!isTrustedSnapshotUrl(manifest?.blobUrl)) {
+        throw new Error("catalog manifest has an invalid snapshot URL");
+      }
+      const catalog = await fetchCatalogJson(manifest.blobUrl, {
+        cache: "force-cache",
+        credentials: "omit",
+      });
+      storeIfNewer(catalog);
+      applyFreshWhenReady(catalog);
+      return catalog;
+    })().finally(() => {
+      blobPromise = null;
     });
-    if (!manifestResponse.ok) throw new Error(`catalog manifest ${manifestResponse.status}`);
-    const manifest = await manifestResponse.json();
-    if (!isTrustedSnapshotUrl(manifest?.blobUrl)) {
-      throw new Error("catalog manifest has an invalid snapshot URL");
-    }
-
-    const catalog = await fetchCatalogJson(manifest.blobUrl, {
-      cache: "force-cache",
-      credentials: "omit",
-    });
-    storeIfNewer(catalog);
-    markRefreshed();
-    applyFreshWhenReady(catalog);
-    return catalog;
+    return blobPromise;
   }
 
   function refreshInBackground() {
     refreshScheduled = false;
     if (refreshedRecently()) return;
     if (!refreshPromise) {
-      refreshPromise = loadLiveCatalog()
+      refreshPromise = loadPrimary()
         .catch(() => null)
         .finally(() => { refreshPromise = null; });
     }
@@ -186,9 +204,9 @@
     }
   }
 
-  // Start the same-origin CDN read before the large app.js gets parsed. On a
-  // cold browser this normally finishes by the time catalog.js asks for data.
-  loadFallback().catch(() => {});
+  // Cold open only: start jsDelivr before app.js parses. Warm opens already have
+  // a synchronous local snapshot and do not need any render-blocking catalog I/O.
+  if (!readCachedCatalog()) loadPrimary().catch(() => {});
 
   window.fetch = async function alphyCatalogFetch(input, init) {
     let requestUrl;
@@ -200,9 +218,6 @@
 
     if (requestUrl.origin !== location.origin) return nativeFetch(input, init);
 
-    // An admin GET/PUT is already authoritative. Mirror a successful response
-    // into the public browser cache so the editor's next normal open sees the
-    // just-saved revision immediately instead of waiting for Blob revalidation.
     if (requestUrl.pathname === ADMIN_CATALOG_PATH) {
       const response = await nativeFetch(input, init);
       if (response.ok) {
@@ -215,12 +230,10 @@
       return response;
     }
 
-    // catalog.js historically fetched this tiny config before it could even ask
-    // for the catalog. The values are deployment constants, so remove that RTT.
     if (requestUrl.pathname === CONFIG_PATH) {
       return jsonResponse({
         blobUrl: PUBLIC_CATALOG_PATH,
-        fallbackUrl: FALLBACK_URL,
+        fallbackUrl: VERCEL_FALLBACK_URL,
       });
     }
 
@@ -228,29 +241,31 @@
 
     scheduleRefresh();
 
-    // Warm open: zero network on the render-critical path.
     const cached = readCachedCatalog();
     if (cached) return jsonResponse(cached);
 
-    // Cold open: use the deployment-baked snapshot from Vercel's static CDN.
     try {
-      return jsonResponse(await loadFallback());
+      return jsonResponse(await loadPrimary());
     } catch {
-      // If the static asset is unavailable, try the live Blob path; if that also
-      // fails, preserve the old same-origin path as the final migration fallback.
       try {
-        return jsonResponse(await loadLiveCatalog());
+        return jsonResponse(await loadVercelFallback());
       } catch {
-        return nativeFetch(PUBLIC_CATALOG_PATH, {
-          cache: "force-cache",
-          credentials: "omit",
-        });
+        try {
+          return jsonResponse(await loadBlobFallback());
+        } catch {
+          return nativeFetch(PUBLIC_CATALOG_PATH, {
+            cache: "force-cache",
+            credentials: "omit",
+          });
+        }
       }
     }
   };
 
   window.alphyCatalogCache = {
+    primaryUrl: PRIMARY_CDN_URL,
     cachedRevision: () => revisionOf(readCachedCatalog()),
-    refresh: () => loadLiveCatalog(),
+    refresh: () => loadPrimary(),
+    fallback: () => loadVercelFallback().catch(() => loadBlobFallback()),
   };
 })();
