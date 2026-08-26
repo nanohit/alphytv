@@ -44,6 +44,7 @@ function harness({ cached = null, fallback = catalog(4), live = catalog(5), admi
     if (url.hostname.endsWith(".public.blob.vercel-storage.com") && url.pathname.endsWith("/catalog/r5.json")) {
       return makeResponse(live);
     }
+    if (url.pathname === "/api/admin/catalog") return makeResponse({ ok: true, catalog: live });
     if (url.pathname === "/curated-live.json") return makeResponse(fallback);
     throw new Error(`unexpected fetch ${url.href}`);
   };
@@ -147,4 +148,13 @@ test("older deployment fallback cannot downgrade a newer local snapshot", async 
   await flush(20);
   const saved = JSON.parse(h.store.get("alphy.curated.public.v2"));
   assert.equal(saved.catalog.revision, 8);
+});
+
+test("successful admin catalog response primes the public cache", async () => {
+  const h = harness({ cached: catalog(4), fallback: catalog(4), live: catalog(6), admin: true });
+  const response = await h.window.fetch("/api/admin/catalog", { method: "PUT" });
+  assert.equal(response.status, 200);
+  await flush(10);
+  const saved = JSON.parse(h.store.get("alphy.curated.public.v2"));
+  assert.equal(saved.catalog.revision, 6);
 });
