@@ -1,6 +1,6 @@
 {
   "note": "Собрано scripts/build-imdb-map.mjs из curated-fallback.json. Руками не править.",
-  "builtFrom": "curated-fallback.json@290",
+  "builtFrom": "curated-fallback.json@291",
   "count": 182,
   "entries": {
     "10 причин моей ненависти|1999|f": {
