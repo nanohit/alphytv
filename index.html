@@ -3,14 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <!-- Keep Referer off third-party CDN requests (some segment hosts 404 otherwise). -->
+  <!-- Keep Referer off every third-party request. Provider connections are warmed
+       only after real user intent; a home-page visit must not touch playback hosts. -->
   <meta name="referrer" content="no-referrer">
-  <!-- Warm DNS/TLS to the stable playback embed hosts so click -> play is snappier. -->
-  <link rel="preconnect" href="https://api.ortified.ws" crossorigin>
-  <link rel="preconnect" href="https://api.zenithjs.ws" crossorigin>
-  <link rel="preconnect" href="https://cdn-r11.soap4youand.me" crossorigin>
-  <link rel="preconnect" href="https://soap4youand.me" crossorigin>
-  <link rel="preconnect" href="https://plapi.cdnvideohub.com" crossorigin>
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <title>Alphy TV — каталог фильмов и сериалов.</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
