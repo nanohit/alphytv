@@ -1,21 +1,83 @@
-// Public curated-catalog cache layer.
+// Instant curated-catalog bootstrap with stale-while-revalidate freshness.
 //
-// catalog.js still asks for /curated-live.json. We intercept only that one
-// request and resolve it through a tiny 60-second Blob manifest. The manifest
-// points at a unique snapshot URL, so a browser can keep the large JSON for a
-// year without ever risking stale content after an admin save.
+// The public path stays entirely off Functions/Edge Config: a repeat visit is
+// served synchronously from localStorage, while a first visit uses the
+// deployment-baked fallback already sitting on Vercel's CDN. The mutable Blob
+// catalog refreshes in the background and hot-applies only when it is newer.
 (function () {
   "use strict";
 
+  const CONFIG_PATH = "/curated-config.json";
   const PUBLIC_CATALOG_PATH = "/curated-live.json";
+  const FALLBACK_URL = "/curated-fallback.json";
   const MANIFEST_URL =
     "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/current.json";
-  const MANIFEST_TTL_MS = 60 * 1000;
   const BLOB_HOST_SUFFIX = ".public.blob.vercel-storage.com";
+  const CACHE_KEY = "alphy.curated.public.v2";
+  const REFRESH_KEY = "alphy.curated.public-refresh.v1";
+  const REFRESH_MIN_MS = 60 * 1000;
   const nativeFetch = window.fetch.bind(window);
 
-  let manifestPromise = null;
-  let manifestExpiresAt = 0;
+  let fallbackPromise = null;
+  let refreshPromise = null;
+  let refreshScheduled = false;
+
+  function revisionOf(value) {
+    const revision = Number(value?.revision);
+    return Number.isFinite(revision) && revision >= 0 ? revision : -1;
+  }
+
+  function validCatalog(value) {
+    return value &&
+      Number(value.schema) === 1 &&
+      revisionOf(value) >= 0 &&
+      Array.isArray(value.lists);
+  }
+
+  function jsonResponse(value) {
+    return new Response(JSON.stringify(value), {
+      status: 200,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
+  }
+
+  function readCachedCatalog() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
+      if (!validCatalog(saved?.catalog)) return null;
+      return saved.catalog;
+    } catch {
+      return null;
+    }
+  }
+
+  function storeIfNewer(catalog) {
+    if (!validCatalog(catalog)) return;
+    try {
+      const current = readCachedCatalog();
+      if (current && revisionOf(current) > revisionOf(catalog)) return;
+      localStorage.setItem(CACHE_KEY, JSON.stringify({
+        revision: revisionOf(catalog),
+        savedAt: Date.now(),
+        catalog,
+      }));
+    } catch {
+      // Storage is an acceleration layer only; Vercel static/Blob remain usable.
+    }
+  }
+
+  function refreshedRecently() {
+    try {
+      const refreshedAt = Number(localStorage.getItem(REFRESH_KEY) || 0);
+      return refreshedAt > 0 && Date.now() - refreshedAt < REFRESH_MIN_MS;
+    } catch {
+      return false;
+    }
+  }
+
+  function markRefreshed() {
+    try { localStorage.setItem(REFRESH_KEY, String(Date.now())); } catch { /* optional */ }
+  }
 
   function isTrustedSnapshotUrl(value) {
     try {
@@ -26,31 +88,106 @@
     }
   }
 
-  async function loadManifest() {
-    const now = Date.now();
-    if (manifestPromise && now < manifestExpiresAt) return manifestPromise;
+  function activeCatalogState() {
+    const api = window.alphyCatalog;
+    const state = api?._test?.state;
+    return api && state ? { api, state } : null;
+  }
 
-    manifestExpiresAt = now + MANIFEST_TTL_MS;
-    manifestPromise = nativeFetch(MANIFEST_URL, {
+  function applyFreshWhenReady(catalog) {
+    if (!validCatalog(catalog)) return;
+    let attempts = 0;
+    const attempt = () => {
+      const active = activeCatalogState();
+      if (!active) {
+        if (attempts++ < 80) setTimeout(attempt, 25);
+        return;
+      }
+      const { api, state } = active;
+      // Never overwrite an admin's live edit/draft with a public refresh.
+      if (api.isAdmin?.() || state.dirty) return;
+      if (revisionOf(catalog) <= revisionOf(state.catalog)) return;
+      state.catalog = catalog;
+      api.render();
+      try {
+        window.dispatchEvent(new CustomEvent("alphy:catalog-refreshed", {
+          detail: { revision: revisionOf(catalog) },
+        }));
+      } catch {
+        // CustomEvent is only informational; rendering already happened.
+      }
+    };
+    attempt();
+  }
+
+  async function fetchCatalogJson(url, options) {
+    const response = await nativeFetch(url, options);
+    if (!response.ok) throw new Error(`catalog ${response.status}`);
+    const catalog = await response.json();
+    if (!validCatalog(catalog)) throw new Error("catalog payload is invalid");
+    return catalog;
+  }
+
+  function loadFallback() {
+    if (fallbackPromise) return fallbackPromise;
+    fallbackPromise = fetchCatalogJson(FALLBACK_URL, {
+      cache: "force-cache",
+      credentials: "omit",
+    }).then((catalog) => {
+      storeIfNewer(catalog);
+      applyFreshWhenReady(catalog);
+      return catalog;
+    }).catch((error) => {
+      fallbackPromise = null;
+      throw error;
+    });
+    return fallbackPromise;
+  }
+
+  async function loadLiveCatalog() {
+    const manifestResponse = await nativeFetch(MANIFEST_URL, {
       cache: "default",
       credentials: "omit",
-    })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`catalog manifest ${response.status}`);
-        const manifest = await response.json();
-        if (!isTrustedSnapshotUrl(manifest?.blobUrl)) {
-          throw new Error("catalog manifest has an invalid snapshot URL");
-        }
-        return manifest;
-      })
-      .catch((error) => {
-        manifestPromise = null;
-        manifestExpiresAt = 0;
-        throw error;
-      });
+    });
+    if (!manifestResponse.ok) throw new Error(`catalog manifest ${manifestResponse.status}`);
+    const manifest = await manifestResponse.json();
+    if (!isTrustedSnapshotUrl(manifest?.blobUrl)) {
+      throw new Error("catalog manifest has an invalid snapshot URL");
+    }
 
-    return manifestPromise;
+    const catalog = await fetchCatalogJson(manifest.blobUrl, {
+      cache: "force-cache",
+      credentials: "omit",
+    });
+    storeIfNewer(catalog);
+    markRefreshed();
+    applyFreshWhenReady(catalog);
+    return catalog;
   }
+
+  function refreshInBackground() {
+    refreshScheduled = false;
+    if (refreshedRecently()) return;
+    if (!refreshPromise) {
+      refreshPromise = loadLiveCatalog()
+        .catch(() => null)
+        .finally(() => { refreshPromise = null; });
+    }
+  }
+
+  function scheduleRefresh() {
+    if (refreshScheduled || refreshPromise || refreshedRecently()) return;
+    refreshScheduled = true;
+    if (typeof requestIdleCallback === "function") {
+      requestIdleCallback(refreshInBackground, { timeout: 500 });
+    } else {
+      setTimeout(refreshInBackground, 0);
+    }
+  }
+
+  // Start the same-origin CDN read before the large app.js gets parsed. On a
+  // cold browser this normally finishes by the time catalog.js asks for data.
+  loadFallback().catch(() => {});
 
   window.fetch = async function alphyCatalogFetch(input, init) {
     let requestUrl;
@@ -60,20 +197,44 @@
       return nativeFetch(input, init);
     }
 
-    if (requestUrl.origin !== location.origin || requestUrl.pathname !== PUBLIC_CATALOG_PATH) {
-      return nativeFetch(input, init);
+    if (requestUrl.origin !== location.origin) return nativeFetch(input, init);
+
+    // catalog.js historically fetched this tiny config before it could even ask
+    // for the catalog. The values are deployment constants, so remove that RTT.
+    if (requestUrl.pathname === CONFIG_PATH) {
+      return jsonResponse({
+        blobUrl: PUBLIC_CATALOG_PATH,
+        fallbackUrl: FALLBACK_URL,
+      });
     }
 
+    if (requestUrl.pathname !== PUBLIC_CATALOG_PATH) return nativeFetch(input, init);
+
+    scheduleRefresh();
+
+    // Warm open: zero network on the render-critical path.
+    const cached = readCachedCatalog();
+    if (cached) return jsonResponse(cached);
+
+    // Cold open: use the deployment-baked snapshot from Vercel's static CDN.
     try {
-      const manifest = await loadManifest();
-      return await nativeFetch(manifest.blobUrl, {
-        cache: "force-cache",
-        credentials: "omit",
-      });
+      return jsonResponse(await loadFallback());
     } catch {
-      // Migration/failure safety: until current.json exists (or if Blob is
-      // temporarily unavailable), keep using the old stable curated.json path.
-      return nativeFetch(input, init);
+      // If the static asset is unavailable, try the live Blob path; if that also
+      // fails, preserve the old same-origin path as the final migration fallback.
+      try {
+        return jsonResponse(await loadLiveCatalog());
+      } catch {
+        return nativeFetch(PUBLIC_CATALOG_PATH, {
+          cache: "force-cache",
+          credentials: "omit",
+        });
+      }
     }
+  };
+
+  window.alphyCatalogCache = {
+    cachedRevision: () => revisionOf(readCachedCatalog()),
+    refresh: () => loadLiveCatalog(),
   };
 })();
