@@ -9,6 +9,7 @@
 
   const CONFIG_PATH = "/curated-config.json";
   const PUBLIC_CATALOG_PATH = "/curated-live.json";
+  const ADMIN_CATALOG_PATH = "/api/admin/catalog";
   const FALLBACK_URL = "/curated-fallback.json";
   const MANIFEST_URL =
     "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/current.json";
@@ -198,6 +199,21 @@
     }
 
     if (requestUrl.origin !== location.origin) return nativeFetch(input, init);
+
+    // An admin GET/PUT is already authoritative. Mirror a successful response
+    // into the public browser cache so the editor's next normal open sees the
+    // just-saved revision immediately instead of waiting for Blob revalidation.
+    if (requestUrl.pathname === ADMIN_CATALOG_PATH) {
+      const response = await nativeFetch(input, init);
+      if (response.ok) {
+        response.clone().json().then((payload) => {
+          if (!validCatalog(payload?.catalog)) return;
+          storeIfNewer(payload.catalog);
+          markRefreshed();
+        }).catch(() => {});
+      }
+      return response;
+    }
 
     // catalog.js historically fetched this tiny config before it could even ask
     // for the catalog. The values are deployment constants, so remove that RTT.
