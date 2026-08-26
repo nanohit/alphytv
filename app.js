@@ -4180,6 +4180,8 @@ parent.postMessage({
       nextAt: 0,
       pendingRefresh: false,
       refreshing: false,
+      nativeFullscreenVideo: null,
+      fullscreenButton: null,
       status: "",
     };
     state.collaps = playback;
@@ -4199,11 +4201,14 @@ parent.postMessage({
 
     const active = createCollapsVideo();
     const buffer = createCollapsVideo();
-    buffer.style.display = "none";
+    active.dataset.collapsActive = "1";
+    buffer.dataset.collapsActive = "0";
     c.videos = [active, buffer];
     c.activeIndex = 0;
     state.videoEl = active;
+    el.playerHost.classList.add("collaps-host");
     el.playerHost.replaceChildren(active, buffer);
+    mountCollapsFullscreenButton();
 
     await new Promise((resolve) => {
       let settled = false;
@@ -4234,9 +4239,107 @@ parent.postMessage({
     video.controls = true;
     video.playsInline = true;
     video.referrerPolicy = "no-referrer";
+    // The native fullscreen button binds fullscreen to this replaceable <video>.
+    // Hide it where controlsList is supported and provide our own button on the
+    // stable #playerHost instead. Browsers that ignore this are still protected:
+    // native video fullscreen is detected and automatic swaps are deferred.
+    video.setAttribute("controlslist", "nofullscreen noremoteplayback");
+    try {
+      video.controlsList?.add("nofullscreen");
+      video.controlsList?.add("noremoteplayback");
+      video.disableRemotePlayback = true;
+    } catch { /* optional media-control hints */ }
     mountPaused(video);
     video.playbackRate = state.playbackRate;
     return video;
+  }
+
+  function mountCollapsFullscreenButton() {
+    const c = state.collaps;
+    if (!c || !el.playerHost) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "collaps-fullscreen-btn";
+    btn.setAttribute("aria-label", "Полный экран");
+    btn.setAttribute("title", "Полный экран");
+    btn.textContent = "⛶";
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleFullscreen();
+    });
+    c.fullscreenButton = btn;
+    el.playerHost.appendChild(btn);
+  }
+
+  function isCollapsNativeFullscreen(video = activeCollapsVideo()) {
+    const c = state.collaps;
+    if (!c || !video) return false;
+    return document.fullscreenElement === video ||
+      video.webkitDisplayingFullscreen === true ||
+      c.nativeFullscreenVideo === video;
+  }
+
+  function resumePendingCollapsRefresh(reason = "выход из fullscreen") {
+    const c = state.collaps;
+    if (!c || !c.pendingRefresh || c.refreshing || isCollapsNativeFullscreen()) return;
+    c.pendingRefresh = false;
+    refreshCollapsNow(reason).catch((error) => log("collaps-refresh-warn", error.message));
+  }
+
+  function waitForCollapsSeek(video, target, timeoutMs = 3000) {
+    if (!video || !Number.isFinite(target)) return Promise.resolve(false);
+    if (Math.abs((video.currentTime || 0) - target) < 0.18) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        video.removeEventListener("seeked", onSeeked);
+        video.removeEventListener("error", onError);
+        resolve(ok);
+      };
+      const onSeeked = () => finish(true);
+      const onError = () => finish(false);
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      video.addEventListener("seeked", onSeeked);
+      video.addEventListener("error", onError);
+      try { video.currentTime = Math.max(0, target); }
+      catch { finish(false); }
+    });
+  }
+
+  // timeupdate means the media clock advanced; it does NOT mean the new frame
+  // reached the compositor. requestVideoFrameCallback is the correct handoff
+  // signal. Older engines fall back to timeupdate plus two animation frames.
+  function waitForPresentedCollapsFrame(video, timeoutMs = 3500) {
+    if (!video) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let done = false;
+      let frameId = null;
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        video.removeEventListener("timeupdate", onTime);
+        if (frameId != null) {
+          try { video.cancelVideoFrameCallback?.(frameId); } catch { /* ignore */ }
+        }
+        resolve(ok);
+      };
+      const afterPaint = () => {
+        const raf = window.requestAnimationFrame || ((fn) => setTimeout(fn, 16));
+        raf(() => raf(() => finish(true)));
+      };
+      const onTime = () => afterPaint();
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      if (typeof video.requestVideoFrameCallback === "function") {
+        frameId = video.requestVideoFrameCallback(() => finish(true));
+      } else {
+        video.addEventListener("timeupdate", onTime, { once: true });
+      }
+    });
   }
 
   function activeCollapsVideo() {
@@ -4260,17 +4363,27 @@ parent.postMessage({
       buffer.ontimeupdate = null;
       buffer.oncanplay = null;
       buffer.onplay = null;
+      buffer.onwebkitbeginfullscreen = null;
+      buffer.onwebkitendfullscreen = null;
     }
     active.ontimeupdate = () => { c.lastAdvanceWall = Date.now(); };
     active.onplay = () => {
-      if (c.pendingRefresh && !c.refreshing) {
+      if (c.pendingRefresh && !c.refreshing && !isCollapsNativeFullscreen(active)) {
         c.pendingRefresh = false;
         refreshCollapsNow("возобновление").catch((error) => log("collaps-refresh-warn", error.message));
       }
     };
+    active.onwebkitbeginfullscreen = () => {
+      if (state.collaps === c) c.nativeFullscreenVideo = active;
+    };
+    active.onwebkitendfullscreen = () => {
+      if (state.collaps !== c) return;
+      if (c.nativeFullscreenVideo === active) c.nativeFullscreenVideo = null;
+      resumePendingCollapsRefresh();
+    };
     active.onerror = () => {
       if (!c.refreshing) {
-        refreshCollapsNow("error").catch((error) => showError(new Error(`Collaps: ${error.message}`)));
+        refreshCollapsNow("error").catch((error) => showError(new Error("Collaps: " + error.message)));
       }
     };
   }
@@ -4293,24 +4406,42 @@ parent.postMessage({
   async function refreshCollapsNow(reason, qualityKey = "") {
     const c = state.collaps;
     if (!c || c.refreshing) return;
+
+    const current = activeCollapsVideo();
+    const emergency = reason === "error" || reason === "зависание";
+    // A native fullscreen session belongs to the exact <video> element. Never
+    // replace that element under a healthy viewer. Automatic refresh waits until
+    // fullscreen ends; only an actual playback failure or an explicit quality
+    // choice may reload the same element in place.
+    if (isCollapsNativeFullscreen(current) && !emergency && !qualityKey) {
+      c.pendingRefresh = true;
+      armCollapsTimers();
+      log("collaps-refresh-deferred", "native video fullscreen");
+      return;
+    }
+
     c.refreshing = true;
     stopCollapsSchedule();
     try {
       const url = await resolveFreshCollapsSource(qualityKey);
       if (!url) throw new Error("не удалось получить свежий MP4");
       warmCollapsConnections(url);
-      const ok = await swapCollapsVideo(url);
-      if (!ok) {
-        // The seamless path failed. Reloading the element the viewer is looking
-        // at costs them the picture, so it is only worth doing when they have
-        // already lost it — a still-advancing video is left alone and the next
-        // scheduled attempt (or the watchdog) tries again.
-        const video = activeCollapsVideo();
-        const stalled = !video || video.error || video.ended
-          || (!video.paused && video.readyState < 3)
-          || qualityKey;
-        if (stalled) hardReloadCollapsVideo(url);
-        else log("collaps-refresh-deferred", "подмена не удалась, картинка идёт — ждём следующей попытки");
+
+      if (isCollapsNativeFullscreen(activeCollapsVideo())) {
+        // Keep the fullscreen-owned DOM node alive. A stalled stream may show a
+        // short provider rebuffer, but it cannot expose the site UI or strand
+        // fullscreen on a hidden element.
+        hardReloadCollapsVideo(url);
+      } else {
+        const ok = await swapCollapsVideo(url);
+        if (!ok) {
+          const video = activeCollapsVideo();
+          const stalled = !video || video.error || video.ended
+            || (!video.paused && video.readyState < 3)
+            || qualityKey;
+          if (stalled) hardReloadCollapsVideo(url);
+          else log("collaps-refresh-deferred", "подмена не удалась, картинка идёт — ждём следующей попытки");
+        }
       }
       c.lastAdvanceWall = Date.now();
     } finally {
@@ -4321,19 +4452,19 @@ parent.postMessage({
     }
   }
 
-  // The session refresh must be invisible: the viewer never asked for it and
-  // must not be able to tell it happened. So the incoming element is loaded,
-  // seeked and actually *playing* before it is revealed — and if any of that
-  // fails, the outgoing element is left running rather than the viewer being
-  // dropped onto a paused frame.
   function swapCollapsVideo(url) {
     const c = state.collaps;
     const cur = activeCollapsVideo();
     const next = bufferCollapsVideo();
-    if (!c || !cur || !next) return Promise.resolve(false);
+    if (!c || !cur || !next || isCollapsNativeFullscreen(cur)) return Promise.resolve(false);
+
     return new Promise((resolve) => {
       const wasPlaying = !cur.paused && !cur.ended;
+      const desiredMuted = !!cur.muted;
+      const desiredVolume = Number.isFinite(cur.volume) ? cur.volume : 1;
       let done = false;
+      let preparing = false;
+
       const cleanup = () => {
         next.removeEventListener("loadedmetadata", onMeta);
         next.removeEventListener("canplay", onCan);
@@ -4345,71 +4476,103 @@ parent.postMessage({
         done = true;
         cleanup();
         if (!ok) {
-          // Abandoned: put the spare back to sleep and make sure the element the
-          // viewer is actually watching is still running.
-          try { next.pause(); next.removeAttribute("src"); next.load(); } catch { /* ignore */ }
+          try {
+            next.pause();
+            next.dataset.collapsActive = "0";
+            next.style.opacity = "0";
+            next.style.pointerEvents = "none";
+            next.removeAttribute("src");
+            next.load();
+          } catch { /* ignore */ }
           if (wasPlaying && cur.paused) cur.play().catch(() => {});
         }
         resolve(ok);
       };
-      const guard = setTimeout(() => finish(false), 12000);
+      const guard = setTimeout(() => finish(false), 14000);
 
-      const syncPosition = () => {
-        try { next.currentTime = cur.currentTime; } catch { /* ignore */ }
+      const lateSync = async () => {
+        const target = cur.currentTime || 0;
+        if (!(await waitForCollapsSeek(next, target))) return false;
+        if (wasPlaying) {
+          try { await next.play(); }
+          catch { return false; }
+        }
+        if (!(await waitForPresentedCollapsFrame(next))) return false;
+
+        // The outgoing video kept advancing while the spare decoded. If we need
+        // a final correction, wait for a frame AFTER that seek too. The previous
+        // implementation sought here and revealed immediately, which is exactly
+        // how audio can continue over a black compositor frame.
+        const drift = (cur.currentTime || 0) - (next.currentTime || 0);
+        if (Math.abs(drift) > 0.35) {
+          if (!(await waitForCollapsSeek(next, cur.currentTime || 0))) return false;
+          if (!(await waitForPresentedCollapsFrame(next))) return false;
+        }
+        return true;
       };
-      const onMeta = () => syncPosition();
 
       const reveal = () => {
-        if (state.collaps !== c) { finish(false); return; }
-        next.style.display = "block";
-        cur.style.display = "none";
-        try { cur.pause(); } catch { /* ignore */ }
+        if (state.collaps !== c || isCollapsNativeFullscreen(cur)) { finish(false); return; }
+
+        // Both decoded layers overlap for the handoff. There is never a frame in
+        // which the old layer is gone and the new layer has not been composited.
+        next.dataset.collapsActive = "1";
+        next.style.zIndex = "2";
+        next.style.opacity = "1";
+        next.style.pointerEvents = "auto";
+        cur.style.zIndex = "1";
+
+        // Audio changes owner without a double-audio interval.
+        cur.muted = true;
+        next.volume = desiredVolume;
+        next.muted = desiredMuted;
+
         c.activeIndex = c.activeIndex === 0 ? 1 : 0;
         state.videoEl = next;
         bindCollapsActive();
-        // Fullscreen lives on the player host, so the swap does not touch it.
-        // If an older session left it on the outgoing element, move it across
-        // rather than letting the picture disappear.
-        if (document.fullscreenElement === cur) {
-          fullscreenTarget()?.requestFullscreen?.().catch(() => {});
-        }
-        setTimeout(() => { try { cur.removeAttribute("src"); cur.load(); } catch { /* ignore */ } }, 250);
-        finish(true);
+
+        const raf = window.requestAnimationFrame || ((fn) => setTimeout(fn, 16));
+        raf(() => raf(() => {
+          if (state.collaps !== c) { finish(false); return; }
+          try { cur.pause(); } catch { /* ignore */ }
+          cur.dataset.collapsActive = "0";
+          cur.style.opacity = "0";
+          cur.style.pointerEvents = "none";
+          cur.style.zIndex = "0";
+          cur.muted = desiredMuted;
+          next.style.zIndex = "1";
+          setTimeout(() => {
+            try { cur.removeAttribute("src"); cur.load(); } catch { /* ignore */ }
+          }, 250);
+          finish(true);
+        }));
       };
 
+      const onMeta = () => {
+        try { next.currentTime = Math.max(0, cur.currentTime || 0); } catch { /* ignore */ }
+      };
       const onCan = async () => {
+        if (preparing || done) return;
+        preparing = true;
+        next.removeEventListener("canplay", onCan);
         if (state.collaps !== c) { finish(false); return; }
-        next.volume = cur.volume;
-        next.muted = cur.muted;
         next.playbackRate = cur.playbackRate;
-        if (!wasPlaying) {
-          // Paused stays paused, at the same frame.
-          syncPosition();
-          reveal();
-          return;
-        }
-        // Seek as late as possible: the outgoing element kept advancing while
-        // this one was loading, and a stale seek is a visible jump backwards.
-        syncPosition();
-        try {
-          await next.play();
-        } catch {
-          finish(false);
-          return;
-        }
-        // "play() resolved" is not "a frame is on screen". Wait for real
-        // progress, otherwise the reveal can land on a black frame.
-        const started = () => {
-          next.removeEventListener("timeupdate", started);
-          const drift = cur.currentTime - next.currentTime;
-          if (Math.abs(drift) > 0.4) { try { next.currentTime = cur.currentTime; } catch { /* ignore */ } }
-          reveal();
-        };
-        next.addEventListener("timeupdate", started);
+        // Preserve the viewer's mute state, but prime with zero audio output so
+        // the spare can play without a double-audio interval. At reveal() volume
+        // moves from old -> new atomically; there is no late unmute transition.
+        next.muted = desiredMuted;
+        next.volume = 0;
+        if (!(await lateSync())) { finish(false); return; }
+        reveal();
       };
-
       const onErr = () => finish(false);
-      next.muted = true;
+
+      next.dataset.collapsActive = "0";
+      next.style.opacity = "0";
+      next.style.pointerEvents = "none";
+      next.style.zIndex = "0";
+      next.muted = desiredMuted;
+      next.volume = 0;
       next.preload = "auto";
       next.addEventListener("loadedmetadata", onMeta);
       next.addEventListener("canplay", onCan);
@@ -4498,6 +4661,7 @@ parent.postMessage({
         /* ignore */
       }
     }
+    el.playerHost.classList.remove("collaps-host");
     state.collaps = null;
   }
 
@@ -9264,13 +9428,13 @@ addEventListener('message', async (event) => {
   // which is exactly what the session swap then breaks. Migrate to the host as
   // soon as it happens: while the document is already fullscreen, moving it to
   // another element needs no fresh user gesture.
-  function armFullscreenMigration() {
+  function armFullscreenGuard() {
     document.addEventListener("fullscreenchange", () => {
-      const active = document.fullscreenElement;
-      const host = el.playerHost;
-      if (!active || !host || active === host) return;
-      if (active.tagName !== "VIDEO" || !host.contains(active)) return;
-      host.requestFullscreen?.().catch((error) => log("fullscreen-migrate-warn", error.message));
+      const c = state.collaps;
+      if (!c) return;
+      const video = activeCollapsVideo();
+      c.nativeFullscreenVideo = document.fullscreenElement === video ? video : null;
+      if (!c.nativeFullscreenVideo) resumePendingCollapsRefresh();
     });
   }
 
@@ -9444,7 +9608,7 @@ addEventListener('message', async (event) => {
       flushOrtProgress();
     });
     bindKeyboard();
-    armFullscreenMigration();
+    armFullscreenGuard();
 
     // Migrate legacy hash/query-param deep links to path routes.
     if (location.hash) {
