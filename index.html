@@ -12,6 +12,8 @@
   <link rel="preconnect" href="https://soap4youand.me" crossorigin>
   <link rel="preconnect" href="https://plapi.cdnvideohub.com" crossorigin>
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <!-- The first curated snapshot rides the static CDN in parallel with the shell. -->
+  <link rel="preload" href="/curated-fallback.json" as="fetch" crossorigin>
   <title>Alphy TV — каталог фильмов и сериалов.</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css?v=20260816-nosnap">
@@ -216,9 +218,9 @@
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
   <script src="/identity.js?v=20260816-nosnap"></script>
   <script src="/foryou.js?v=20260816-nosnap"></script>
+  <script src="/catalog-cache.js?v=20260826-instant1"></script>
   <script src="/shaka-smooth.js?v=20260826-shakasmooth1"></script>
   <script src="/app.js?v=20260816-nosnap"></script>
-  <script src="/catalog-cache.js?v=20260825-r1"></script>
   <script src="/catalog.js?v=20260816-nosnap"></script>
   <script src="/keypool.js?v=20260816-nosnap"></script>
 </body>
