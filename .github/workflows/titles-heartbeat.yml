@@ -1,0 +1,33 @@
+# Heartbeat for the title indexer.
+#
+# The crawl itself runs entirely on Cloudflare — its egress, its D1, its edge.
+# This only pokes the Worker, because Cloudflare's own cron triggers were not
+# firing on this account and a half-built index is worse than none. If cron
+# starts working the Worker's lease makes the two harmless to each other: the
+# second one to arrive sees the lease and returns immediately.
+name: Titles indexer heartbeat
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: titles-heartbeat
+  cancel-in-progress: false
+
+jobs:
+  poke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Drive the indexer for ten minutes
+        run: |
+          END=$(( $(date +%s) + 600 ))
+          while [ "$(date +%s)" -lt "$END" ]; do
+            OUT=$(curl -s -m 120 "https://alphy-titles.p-tikhonin.workers.dev/run" || echo '{"ok":false}')
+            echo "$(date -u +%H:%M:%S) $OUT"
+            # The Worker paces itself and holds a lease for the length of a
+            # batch; polling faster than that just burns lease-denied replies.
+            sleep 20
+          done
