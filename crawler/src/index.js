@@ -19,7 +19,13 @@
 
 const UA = "AlphyTVIndexer/1.0 (+https://alphy.tv; contact: info@alphy.tv)";
 const CATALOG = "https://api.zombie-film.live/v2/franchise/search/";
-const INFO = "https://api.liftw.ws/info/";
+// NOT api.liftw.ws/info: the catalogue's `id` is a franchise id, and /info
+// expects the player id from `video.embedUrl` — a different number entirely
+// (Морок is 123800 in the catalogue and 92750 to the player). Asking /info with
+// a franchise id answers 500 for every single title, which is exactly what it
+// did. The catalogue's own view endpoint takes the slug and returns both the
+// Kinopoisk id and the player id in one request, so it is also cheaper.
+const VIEW = "https://api.zombie-film.live/v2/franchise/view/";
 const PER_PAGE = 100;
 // Cron fires every two minutes, so a batch should fill that window rather than
 // work for fifty seconds and idle for seventy — that idling was costing half the
@@ -60,13 +66,22 @@ async function noteSuccess(db) {
   if (Number(await getMeta(db, "fail_streak", "0")) > 0) await setMeta(db, "fail_streak", "0");
 }
 
-async function fetchJson(url) {
+class SoftError extends Error {}
+
+async function fetchJson(url, { soft = false } = {}) {
   const response = await fetch(url, {
     headers: { "User-Agent": UA, Accept: "application/json" },
     signal: AbortSignal.timeout(20_000),
   });
+  // 429 is always about us, never about the row, so it always backs off.
   if (response.status === 429) throw new Error("429 rate limited");
-  if (!response.ok) throw new Error(`http ${response.status}`);
+  if (!response.ok) {
+    // One title answering 500 is that title's problem. Treating it as the
+    // service refusing us stopped the batch and slept a minute for a single bad
+    // row, which over a night of them means nothing gets indexed at all.
+    if (soft) throw new SoftError(`http ${response.status}`);
+    throw new Error(`http ${response.status}`);
+  }
   return response.json();
 }
 
@@ -91,14 +106,24 @@ async function crawlCatalog(env, db, deadline) {
       return done;
     }
     const items = Array.isArray(payload?.items) ? payload.items : [];
-    if (payload?.totalCount) await setMeta(db, "total_count", payload.totalCount);
-    if (!items.length) {
-      // Ran off the end: the catalogue is mirrored. Start again from the front
-      // tomorrow so new releases are picked up without a second full pass.
+    const total = Number(payload?.totalCount) || 0;
+    if (total) await setMeta(db, "total_count", total);
+
+    // The end of the catalogue does NOT look like an empty page: this API clamps
+    // an out-of-range page and serves the last one again, forever. Waiting for
+    // items.length === 0 spun past page 1278 re-fetching the same 100 titles —
+    // hundreds of pointless requests at the source. Two independent stops now,
+    // because either alone can be defeated by the catalogue growing mid-crawl.
+    const firstId = String(items[0]?.id ?? "");
+    const repeated = firstId && firstId === await getMeta(db, "last_first_id");
+    const pastEnd = total > 0 && (page - 1) * PER_PAGE >= total;
+    if (!items.length || repeated || pastEnd) {
       await setMeta(db, "catalog_page", "1");
+      await setMeta(db, "last_first_id", "");
       await setMeta(db, "catalog_done_at", Date.now());
       return done;
     }
+    await setMeta(db, "last_first_id", firstId);
 
     const seen = nowSec();
     const base = (page - 1) * PER_PAGE;
@@ -136,24 +161,48 @@ async function fillKpIds(env, db, deadline) {
   const spacing = Number(env.SPACING_MS || 2000);
   const batch = Number(env.BATCH || 25);
   const pending = await db.prepare(
-    "select id from titles where kp is null order by rank asc limit ?",
+    "select id, slug from titles where kp is null and tries < 3 and slug <> '' order by rank asc limit ?",
   ).bind(batch).all();
   const rows = pending?.results ?? [];
   let done = 0;
+  // Consecutive, not total: scattered bad rows are normal, a run of them means
+  // the service itself is unhappy and we should stop asking.
+  let softStreak = 0;
 
   for (const row of rows) {
     if (Date.now() >= deadline) break;
     let payload;
     try {
-      payload = await fetchJson(`${INFO}${row.id}`);
+      const query = new URLSearchParams({
+        slug: row.slug, findBy: "init", all: "false", season: "", _format: "json",
+      });
+      payload = await fetchJson(`${VIEW}?${query}`, { soft: true });
+      softStreak = 0;
     } catch (error) {
+      if (error instanceof SoftError) {
+        await db.prepare("update titles set tries = tries + 1 where id = ?").bind(row.id).run();
+        softStreak += 1;
+        await setMeta(db, "last_soft_error", `${new Date().toISOString()} info ${row.id}: ${error.message}`);
+        if (softStreak >= 5) {
+          await noteFailure(db, `five in a row, last ${row.id}: ${error.message}`);
+          return done;
+        }
+        if (Date.now() + spacing >= deadline) break;
+        await sleep(spacing);
+        continue;
+      }
       await noteFailure(db, `info ${row.id}: ${error.message}`);
       return done;
     }
     // "" rather than null: a title genuinely without a Kinopoisk id must not be
-    // asked again every single run.
-    const kp = String(payload?.info?.id ?? "").match(/^\d+$/)?.[0] ?? "";
-    await db.prepare("update titles set kp = ? where id = ?").bind(kp, row.id).run();
+    // asked again every single run. A brand new release legitimately has kpId 0.
+    const view = payload?.view ?? {};
+    const raw = String(view.kpId ?? "");
+    const kp = /^\d+$/.test(raw) && raw !== "0" ? raw : "";
+    // The id the player actually needs, which is not the one the catalogue lists.
+    const embed = Number(String(view.video?.embedUrl || "").match(/\/(\d+)/)?.[1]) || null;
+    await db.prepare("update titles set kp = ?, embed_id = ? where id = ?")
+      .bind(kp, embed, row.id).run();
     done += 1;
     await noteSuccess(db);
     if (Date.now() + spacing >= deadline) break;
@@ -234,6 +283,8 @@ async function status(db) {
     },
     kpid: {
       заполнено: withKp,
+      с_id_плеера: Number((await db.prepare(
+        "select count(*) as n from titles where embed_id is not null").first())?.n || 0),
       осталось: pending,
       без_kpid_у_источника: Number(totals?.no_kp_upstream || 0),
       осталось_часов: Number(hoursLeft.toFixed(1)),
@@ -246,6 +297,9 @@ async function status(db) {
         "select count(*) as n from titles where initial is null").first())?.n || 0),
       последний_тик: bag.last_tick || null,
       последняя_ошибка: bag.last_error || null,
+      последняя_мелкая_ошибка: bag.last_soft_error || null,
+      пропущено_битых: Number((await db.prepare(
+        "select count(*) as n from titles where kp is null and tries >= 3").first())?.n || 0),
     },
     темп: "по одному запросу, интервал 2 с, окно 105 с из каждых 120",
   };
@@ -286,10 +340,13 @@ export default {
       const letter = decodeURIComponent(url.pathname.slice("/index/".length)).replace(/\.json$/, "");
       if ([...letter].length !== 1) return json({ error: "one letter" }, 400);
       const rows = await env.DB.prepare(
-        "select id, name, year, type, kp from titles where initial = ? order by rank asc",
+        "select id, embed_id, name, year, type, kp from titles where initial = ? order by rank asc",
       ).bind(initialOf(letter)).all();
       return new Response(
-        JSON.stringify((rows?.results ?? []).map((r) => [r.name, r.year, r.id, r.type, r.kp || ""])),
+        // embed_id where known, the catalogue id otherwise: a row that has not
+        // been through phase 2 yet is still worth showing, it just costs a
+        // resolve when opened.
+        JSON.stringify((rows?.results ?? []).map((r) => [r.name, r.year, r.embed_id || r.id, r.type, r.kp || ""])),
         {
           headers: {
             "Content-Type": "application/json; charset=utf-8",
