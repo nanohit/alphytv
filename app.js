@@ -6770,7 +6770,11 @@ parent.postMessage({
       : null;
 
     state.sources = sources;
-    state.audioNames = parsed.meta.audioNames || [];
+    // Ortified is LiftW, so dub names ride on the EPISODE, not the document — a
+    // season can change studios mid-run. Reading only the document level left a
+    // series showing the manifest's own ru0..ru7 instead of LostFilm/Кубик в
+    // кубе/Eng.Original. A movie has no episode and keeps the document names.
+    state.audioNames = (episode?.audioNames?.length ? episode.audioNames : parsed.meta.audioNames) || [];
     if (selection) {
       target.season = selection.season;
       target.episode = selection.episode;
@@ -6825,6 +6829,8 @@ parent.postMessage({
       if (isStale(token) || keyFor(state.currentTarget) !== keyFor(target)) return;
       const nextContext = { ...context, selection, switching: false };
       state.sources = episode.sources;
+      // Same reason as above: the next episode may be voiced by other studios.
+      state.audioNames = episode.audioNames?.length ? episode.audioNames : state.audioNames;
       await playShaka(media.url, media.kind, token, {
         resume: 0,
         audioLang,

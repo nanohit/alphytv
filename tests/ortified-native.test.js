@@ -76,8 +76,22 @@ test("dubs and subtitles survive, including on movies", async () => {
   // silently without them.
   assert.match(block, /value\.textTracks = liftwTextTracks\(html\)/);
   const play = between(app, "async function playOrtifiedNative", "async function switchOrtSelection");
-  assert.match(play, /state\.audioNames = parsed\.meta\.audioNames/);
+  assert.match(play, /parsed\.meta\.audioNames/);
   assert.match(play, /episode\?\.textTracks\?\.length \? episode\.textTracks : parsed\.textTracks/);
+});
+
+test("a series shows real dub names, not the manifest's ru0..ruN", async () => {
+  const app = await source();
+  const play = between(app, "async function playOrtifiedNative", "async function switchOrtSelection");
+  const swap = between(app, "async function switchOrtSelection", "// Playback — Ortified cleanroom iframe");
+  // Ortified is LiftW: dub names ride on the EPISODE, because a season can
+  // change studios mid-run. Reading only the document level left a series
+  // labelled ru0..ru7 by the manifest instead of LostFilm / Кубик в кубе /
+  // Eng.Original — exactly what Zenith's document-level read would give.
+  assert.match(play, /episode\?\.audioNames\?\.length \? episode\.audioNames : parsed\.meta\.audioNames/);
+  // And they have to be refreshed on an episode switch, or episode 2 keeps the
+  // names of episode 1.
+  assert.match(swap, /state\.audioNames = episode\.audioNames\?\.length/);
 });
 
 test("an ort series gets its own switcher, not Zenith's", async () => {
