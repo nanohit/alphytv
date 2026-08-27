@@ -21,8 +21,12 @@ const UA = "AlphyTVIndexer/1.0 (+https://alphy.tv; contact: info@alphy.tv)";
 const CATALOG = "https://api.zombie-film.live/v2/franchise/search/";
 const INFO = "https://api.liftw.ws/info/";
 const PER_PAGE = 100;
-// A batch must finish well inside its minute or the next cron overlaps it.
-const BUDGET_MS = 50_000;
+// Cron fires every two minutes, so a batch should fill that window rather than
+// work for fifty seconds and idle for seventy — that idling was costing half the
+// throughput. Overrunning is safe: every page and every kpId is committed as it
+// lands, so an invocation killed at any point loses nothing but its place in the
+// current sleep, and the lease expires on its own.
+const BUDGET_MS = 105_000;
 const BACKOFF_STEPS_MS = [60_000, 300_000, 900_000, 3_600_000];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -171,6 +175,7 @@ async function runOnce(env) {
   const lease = Number(await getMeta(db, "running_until", "0"));
   if (Date.now() < lease) return { skipped: "locked" };
   await setMeta(db, "running_until", Date.now() + BUDGET_MS + 10_000);
+  await setMeta(db, "ticks", Number(await getMeta(db, "ticks", "0")) + 1);
   await setMeta(db, "last_tick", new Date().toISOString());
 
   const deadline = Date.now() + BUDGET_MS;
@@ -242,7 +247,7 @@ async function status(db) {
       последний_тик: bag.last_tick || null,
       последняя_ошибка: bag.last_error || null,
     },
-    темп: "25 запросов/мин, по одному, интервал 2 с",
+    темп: "по одному запросу, интервал 2 с, окно 105 с из каждых 120",
   };
 }
 
