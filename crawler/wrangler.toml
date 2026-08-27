@@ -1,0 +1,20 @@
+name = "alphy-titles"
+main = "src/index.js"
+compatibility_date = "2026-06-14"
+workers_dev = true
+
+# One invocation per minute. Each does a small, paced batch and exits, so a
+# killed or overlapping run loses at most that batch — the cursor is in D1.
+[triggers]
+crons = ["*/2 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "alphy-titles"
+database_id = "59ae35a1-d8b0-48d7-b258-52317f18e58a"
+
+[vars]
+# Pacing. Deliberately gentle: ~25 requests a minute is less than one person
+# browsing the site, and the whole point is to be unnoticeable rather than fast.
+BATCH = "25"
+SPACING_MS = "2000"
