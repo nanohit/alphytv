@@ -1745,6 +1745,10 @@
       readyReject = reject;
     });
     const readyTimer = setTimeout(() => readyReject(new Error("LiftW media sandbox timeout")), 8000);
+    // Warming the broker does not await this, and a sandbox that never reports
+    // ready would otherwise surface as an unhandled rejection. Callers that do
+    // await it still see the failure; this only silences the floating copy.
+    ready.catch(() => {});
 
     const finish = (id, error, value) => {
       const job = pending.get(id);
@@ -5095,6 +5099,24 @@ parent.postMessage({
     if (!meta || !meta.title || !meta.description || !meta.rating) {
       healWatchMeta(target, token, meta, "ortmeta", embedUrl, "Ortified");
     }
+    try {
+      await playOrtifiedNative(embedUrl, target, token, {
+        histKey: keyFor(target),
+        serialSelection: savedSerialSelection(keyFor(target)),
+      });
+      return;
+    } catch (error) {
+      if (isStale(token)) return;
+      // A non-Russian address gets 422 from api.ortified.ws — usually a VPN left
+      // on. That is actionable and must not be buried under a retry that will
+      // fail the same way.
+      if (/\b422\b/.test(String(error?.message || error))) {
+        throw new Error("Попробуйте выключить VPN");
+      }
+      // Anything else: the embedded player is still a working way to watch, so
+      // a title we cannot parse falls back rather than failing.
+      log("ort-native-fallback", error.message);
+    }
     await playOrtifiedCleanroom(embedUrl, target, token);
   }
 
@@ -6642,7 +6664,199 @@ parent.postMessage({
   }
 
   // =====================================================================
-  // Playback — Ortified cleanroom iframe
+  // Playback — Ortified, native
+  //
+  // Ortified is the same service as LiftW under a different hostname: its MSX
+  // descriptor calls itself "lift", it serves the identical TV bundle pointing
+  // at //api.lift3.ws/v2, and its ids resolve in LiftW's /info to the same
+  // titles. So its embed is the same player-venom `makePlayer` object we already
+  // parse, and it can play natively instead of inside an iframe.
+  //
+  // Three things that buys, in order of what a viewer notices:
+  //  - resume works. The iframe player could be told nothing, so position was
+  //    recorded and never restored.
+  //  - no iframe <video>, which has no hardware overlay and micro-stutters on
+  //    TV and projector browsers.
+  //  - the media plane stops carrying our origin. The cleanroom iframe is a
+  //    srcdoc with no sandbox attribute, so it inherits alphy.tv and every CDN
+  //    request it made said so; routed through the opaque broker it says null.
+  //
+  // The embed itself is fetched straight from the browser through the opaque
+  // sandbox — no relay. Unlike api.liftw.ws, api.ortified.ws is reachable and
+  // sends CORS, so adding a server hop would create exposure rather than remove
+  // it. There is deliberately no worker fallback here for the same reason.
+  // =====================================================================
+  const ORT_PARSED_CACHE_MS = 20 * 60e3;
+  const ortParsedCache = new Map();
+  const ortParsedInflight = new Map();
+
+  async function resolveOrtifiedParsed(embedUrl, { force = false, wantSeasons = false } = {}) {
+    const key = canonicalOrtEmbedUrl(embedUrl);
+    if (!force) {
+      const cached = ortParsedCache.get(key);
+      if (cached && cached.expiresAt > Date.now() && zenithParsedUsable(cached.value, wantSeasons)) {
+        return cached.value;
+      }
+    }
+    const inflightKey = `${key}|${wantSeasons ? "s" : "-"}|${force ? "f" : "-"}`;
+    const existing = ortParsedInflight.get(inflightKey);
+    if (existing) return existing;
+    const pending = (async () => {
+      const html = await fetchCachedEmbedText(embedUrl, {
+        preferSandbox: true,
+        directFallback: false,
+        label: "ortified",
+        timeoutMs: 12000,
+        sandboxTimeoutMs: 12000,
+      });
+      const value = parseZenithEmbed(html);
+      if (!zenithParsedUsable(value, wantSeasons)) {
+        throw new Error("Ortified embed не отдал dash/hls");
+      }
+      // parseZenithEmbed returns sources/meta/playlist but not subtitles — for a
+      // movie those live in the same `cc:` array LiftW reads, and without this
+      // the native path would quietly play without them. Episodes carry their
+      // own, which normalizeSerialSeasons already picks up.
+      value.textTracks = liftwTextTracks(html);
+      ortParsedCache.set(key, { value, expiresAt: Date.now() + ORT_PARSED_CACHE_MS });
+      return value;
+    })().finally(() => ortParsedInflight.delete(inflightKey));
+    ortParsedInflight.set(inflightKey, pending);
+    return pending;
+  }
+
+  // Errors and logs get the host only: the signed media URL is a credential.
+  function safeMediaHost(value) {
+    try { return new URL(String(value)).hostname; } catch { return "?"; }
+  }
+
+  function dropOrtifiedParsed(embedUrl) {
+    ortParsedCache.delete(canonicalOrtEmbedUrl(embedUrl));
+  }
+
+  async function playOrtifiedNative(embedUrl, target, token, opts = {}) {
+    if (isStale(token)) return;
+    showPlayerLoading();
+    const shakaTask = ensureShaka();
+    shakaTask.catch(() => {});
+    // Warming happens inside the broker document: a top-level preconnect would
+    // open the connection as alphy.tv, which is the leak we are here to close.
+    warmLiftwConnections();
+
+    const parsed = await resolveOrtifiedParsed(embedUrl, {
+      force: !!opts.force,
+      wantSeasons: !!(target?.isSeries || opts.serialSelection),
+    });
+    if (isStale(token)) return;
+
+    const seasons = normalizeSerialSeasons(parsed.playlist?.seasons);
+    const requested = opts.serialSelection || parsed.playlist?.current;
+    const selection = chooseSerialSelection(seasons, requested);
+    const episode = findSerialEpisode(seasons, selection);
+    const sources = episode?.sources || parsed.sources;
+    const media = bestZenithSource(sources);
+    if (!media) throw new Error("Ortified embed не отдал dash/hls");
+    // The broker only rewrites hosts it recognises; anything else would be
+    // fetched by the page itself and would carry our origin to the CDN. A
+    // silent leak is worse than the iframe, so an unroutable host refuses the
+    // native path and lets the caller fall back.
+    if (!isLiftwMediaUrl(media.url)) {
+      throw new Error(`Ortified: медиа-хост вне брокера (${safeMediaHost(media.url)})`);
+    }
+
+    const histKey = opts.histKey || keyFor(target);
+    const serial = selection
+      ? { provider: "ort", embedUrl, histKey, seasons, selection, switching: false }
+      : null;
+
+    state.sources = sources;
+    state.audioNames = parsed.meta.audioNames || [];
+    if (selection) {
+      target.season = selection.season;
+      target.episode = selection.episode;
+      target.isSeries = true;
+      persistSerialSelection(target, selection);
+    }
+    await shakaTask;
+    if (isStale(token)) return;
+    try {
+      await playShaka(media.url, media.kind, token, {
+        resume: opts.resume ?? resumePosition(histKey),
+        audioLang: opts.audioLang ?? savedAudioLang(histKey),
+        textTracks: episode?.textTracks?.length ? episode.textTracks : parsed.textTracks,
+        serial,
+        opaqueMedia: "liftw",
+      });
+    } catch (error) {
+      // A cached parse can only be wrong about one thing: a signature that
+      // rotated between the resolve and the click. Re-mint once, then let it go.
+      if (opts.force || isStale(token)) throw error;
+      log("ort-source-refresh", { message: error.message });
+      dropOrtifiedParsed(embedUrl);
+      await playOrtifiedNative(embedUrl, target, token, { ...opts, force: true });
+      return;
+    }
+    if (isStale(token)) return;
+    startTracking(histKey, target);
+  }
+
+  async function switchOrtSelection(nextSelection) {
+    const context = state.serial;
+    const target = state.currentTarget;
+    if (!context || context.provider !== "ort" || !target || context.switching) return;
+    const selection = chooseSerialSelection(context.seasons, nextSelection);
+    if (!selection || sameSerialSelection(selection, context.selection)) return;
+    const episode = findSerialEpisode(context.seasons, selection);
+    const media = bestZenithSource(episode?.sources);
+    // Same guard as the first episode: a host the broker cannot rewrite would
+    // be fetched by the page and undo the null origin mid-series.
+    if (!media || !isLiftwMediaUrl(media.url)) return;
+
+    const token = resolveToken;
+    const audioLang = audioTag(state.player?.getVariantTracks?.().find((track) => track.active))
+      || savedAudioLang(keyFor(target));
+    context.switching = true;
+    renderTracks();
+    await teardownPlayer();
+    showPlayerLoading();
+    persistSerialSelection(target, selection, true);
+
+    try {
+      if (isStale(token) || keyFor(state.currentTarget) !== keyFor(target)) return;
+      const nextContext = { ...context, selection, switching: false };
+      state.sources = episode.sources;
+      await playShaka(media.url, media.kind, token, {
+        resume: 0,
+        audioLang,
+        textTracks: episode?.textTracks || [],
+        serial: nextContext,
+        // The whole episode switch would otherwise fetch straight from the page
+        // and undo the null origin the first episode was played with.
+        opaqueMedia: "liftw",
+      });
+      if (isStale(token)) return;
+      startTracking(context.histKey || keyFor(target), target);
+    } catch (error) {
+      if (isStale(token)) return;
+      log("ort-episode-refresh", { selection, message: error.message });
+      try {
+        await playOrtifiedNative(context.embedUrl, target, token, {
+          histKey: context.histKey || keyFor(target),
+          resume: 0,
+          audioLang,
+          serialSelection: selection,
+          force: true,
+        });
+      } catch (refreshError) {
+        if (isStale(token)) return;
+        showError(new Error("Не удалось загрузить выбранную серию"));
+        log("ort-episode-switch-error", { selection, message: refreshError.message });
+      }
+    }
+  }
+
+  // =====================================================================
+  // Playback — Ortified cleanroom iframe (fallback)
   // =====================================================================
   async function playOrtifiedCleanroom(embedUrl, target, token) {
     if (isStale(token)) return;
@@ -7138,6 +7352,7 @@ parent.postMessage({
     } else {
       if (state.serial?.provider === "zenith") renderSerialControls(state.serial, switchZenithSelection);
       else if (state.serial?.provider === "liftw") renderSerialControls(state.serial, switchLiftwSelection);
+      else if (state.serial?.provider === "ort") renderSerialControls(state.serial, switchOrtSelection);
       // Group on the label as well as the language: LiftW's HLS master gives all
       // three Russian dubs LANGUAGE="ru" and only tells them apart by NAME
       // (rus0/rus1/rus2), which Shaka surfaces as `label`. Keying on language
