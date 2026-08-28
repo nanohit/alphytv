@@ -155,3 +155,23 @@ test("index hits are ordered by match quality then by year, newest first", async
   const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
   assert.doesNotMatch(app, /a\.score - b\.score \|\| String\(/);
 });
+
+test("an exact title beats a newer one that merely starts with it", () => {
+  // Ranking by recency alone put «Брат 3» (2022) above «Брат» (1997) and pushed
+  // the film being searched for off a six-row list.
+  const rank = (rows, q) => {
+    const f = fold(q);
+    return rows
+      .map(([name, year]) => {
+        const n = fold(name);
+        const score = n === f ? 0 : (n.startsWith(f) ? 1 : (n.includes(` ${f}`) ? 2 : -1));
+        return { name, year, score };
+      })
+      .filter((r) => r.score >= 0)
+      .sort((a, b) => (a.score - b.score) || ((Number(b.year) || 0) - (Number(a.year) || 0)))
+      .map((r) => `${r.name} (${r.year})`);
+  };
+  const rows = [["Брат 3", 2022], ["Брат", 1997], ["Братья", 2022], ["Мой брат", 2010]];
+  assert.deepEqual(rank(rows, "брат"),
+    ["Брат (1997)", "Брат 3 (2022)", "Братья (2022)", "Мой брат (2010)"]);
+});

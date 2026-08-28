@@ -9725,7 +9725,13 @@ addEventListener('message', async (event) => {
     const out = [];
     for (const row of rows) {
       const name = suggestFold(row[0]);
-      const score = name.startsWith(folded) ? 0 : (name.includes(` ${folded}`) ? 1 : -1);
+      // Exact title first. Ordering purely by recency put «Брат 3» (2022) above
+      // «Брат» (1997) and pushed the film actually being searched for off the
+      // list entirely — for a short, famous title that reads as broken.
+      let score = -1;
+      if (name === folded) score = 0;
+      else if (name.startsWith(folded)) score = 1;
+      else if (name.includes(` ${folded}`)) score = 2;
       if (score < 0) continue;
       out.push({ score, entry: {
         title: row[0], year: String(row[1] || ""), slug: row[2],
