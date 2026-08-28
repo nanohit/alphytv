@@ -188,10 +188,14 @@ async function fillKpIds(env, db, deadline) {
     if (Date.now() >= deadline) break;
     let payload;
     try {
-      const query = new URLSearchParams({
-        slug: row.slug, findBy: "init", all: "false", season: "", _format: "json",
-      });
-      payload = await fetchJson(`${VIEW}?${query}`, { soft: true });
+      const ask = (season) => fetchJson(`${VIEW}?${new URLSearchParams({
+        slug: row.slug, findBy: "init", all: "false", season, _format: "json",
+      })}`, { soft: true });
+      payload = await ask("");
+      // A series answers video:null until a season is named — the episodes hold
+      // the player, not the title. Without this every series was recorded as
+      // having no player and refused to open from a suggestion.
+      if (!payload?.view?.video) payload = (await ask("1")) ?? payload;
       softStreak = 0;
     } catch (error) {
       if (error instanceof SoftError) {
@@ -216,8 +220,14 @@ async function fillKpIds(env, db, deadline) {
     const kp = /^\d+$/.test(raw) && raw !== "0" ? raw : "";
     // The id the player actually needs, which is not the one the catalogue lists.
     const embed = Number(String(view.video?.embedUrl || "").match(/\/(\d+)/)?.[1]) || null;
-    await db.prepare("update titles set kp = ?, embed_id = ?, dirty = 1 where id = ?")
-      .bind(kp, embed, row.id).run();
+    // The original title is only in the per-title view, so it rides along here
+    // rather than costing a request of its own. seasonLast is the honest series
+    // signal: the type codes do not separate them (1,2 are films; 3,4,5 all have
+    // seasons), which is why half the suggestions were mislabelled.
+    const isSeries = (view.season || view.seasonLast) ? 1 : 0;
+    await db.prepare(
+      "update titles set kp = ?, embed_id = ?, origin_name = ?, is_series = ?, dirty = 1 where id = ?",
+    ).bind(kp, embed, String(view.originName || "") || null, isSeries, row.id).run();
     done += 1;
     await noteSuccess(db);
     if (Date.now() + spacing >= deadline) break;
@@ -234,7 +244,8 @@ async function publish(env, db, deadline) {
   let sent = 0;
   while (Date.now() < deadline) {
     const rows = await db.prepare(
-      `select id, name, year, type, slug, initial, embed_id, kp, rate_kp
+      `select id, name, year, type, slug, initial, embed_id, kp, rate_kp,
+              origin_name, is_series
        from titles where dirty = 1 limit ?`,
     ).bind(PUBLISH_BATCH).all();
     const list = rows?.results ?? [];
@@ -245,6 +256,7 @@ async function publish(env, db, deadline) {
       body: JSON.stringify(list.map((r) => ({
         id: r.id, name: r.name, year: r.year, type: r.type, slug: r.slug,
         initial: r.initial, embed_id: r.embed_id, kp: r.kp, rate_kp: r.rate_kp,
+        origin_name: r.origin_name, is_series: r.is_series === null ? null : !!r.is_series,
       }))),
       signal: AbortSignal.timeout(30_000),
     });

@@ -9735,8 +9735,8 @@ addEventListener('message', async (event) => {
       if (score < 0) continue;
       out.push({ score, entry: {
         title: row[0], year: String(row[1] || ""), slug: row[2],
-        isSeries: row[3] !== 1, poster: "", liftId: row[4] || null, kpId: row[5] || "",
-        source: "index", folded: name,
+        isSeries: !!row[3], poster: "", liftId: row[4] || null, kpId: row[5] || "",
+        originName: row[6] || "", source: "index", folded: name,
       } });
       if (out.length > 400) break;
     }
@@ -9754,10 +9754,21 @@ addEventListener('message', async (event) => {
     const title = document.createElement("span");
     title.className = "suggest-title";
     title.textContent = entry.title;
-    const meta = document.createElement("span");
-    meta.className = "suggest-meta";
-    meta.textContent = [entry.year, entry.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · ");
-    row.append(title, meta);
+    // No фильм/сериал label: the catalogue's type codes do not actually separate
+    // them — 1 and 2 are films, 3, 4 and 5 all carry seasons — so half of them
+    // were wrong, and a wrong label is worse than none.
+    const year = document.createElement("span");
+    year.className = "suggest-year";
+    year.textContent = entry.year || "";
+    row.append(title, year);
+    // The original title, where the backfill has reached it. Same weight as the
+    // year: it disambiguates without competing with the name.
+    if (entry.originName && suggestFold(entry.originName) !== suggestFold(entry.title)) {
+      const origin = document.createElement("span");
+      origin.className = "suggest-origin";
+      origin.textContent = entry.originName;
+      row.appendChild(origin);
+    }
     row.addEventListener("mousedown", (event) => {
       // mousedown, not click: the input's blur would close the list first.
       event.preventDefault();

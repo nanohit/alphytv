@@ -126,8 +126,12 @@ html.tizen-video-mode.view-watch .quick-lists-drawer {
   filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.6));
 }
 .search-box { flex: 1; display: flex; align-items: center; gap: 10px; }
+/* The dropdown anchors to this, not to .search-box: that row also holds the
+   search and bookmark buttons, so a full-width list overhung the input by 108px
+   and read as misaligned. */
+.search-field { flex: 1; min-width: 0; position: relative; }
 .search-box input {
-  flex: 1; height: 44px; min-width: 0; padding: 0 15px; border-radius: 12px;
+  width: 100%; height: 44px; min-width: 0; padding: 0 15px; border-radius: 12px;
   border: 1px solid var(--stroke);
   background: linear-gradient(180deg, #111 0%, #0b0b0b 100%);
   color: var(--text); font-size: 15px; font-weight: 500; line-height: 1;
@@ -1328,7 +1332,6 @@ body.admin-mode .curated-row .card.drop-after .card-media {
 /* Suggestions. Anchored to the search box rather than the page so it tracks the
    input on every layout, and above the player, which is the only thing tall
    enough to overlap it. */
-.search-box { position: relative; }
 .search-suggest {
   position: absolute; z-index: 40; left: 0; right: 0; top: calc(100% + 6px);
   max-height: min(60vh, 420px); overflow-y: auto;
@@ -1345,8 +1348,15 @@ body.admin-mode .curated-row .card.drop-after .card-media {
 }
 .suggest-row:last-child { border-bottom: 0; }
 .suggest-row:hover, .suggest-row.active { background: rgba(255,255,255,.07); }
-.suggest-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.suggest-meta { flex: none; color: var(--muted); font-size: 11px; }
+.suggest-title { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The year sits immediately after the title rather than pinned to the right
+   edge: at the far end it read as a separate column and the eye had to travel
+   for it. Lighter than the title, but not as quiet as the original name. */
+.suggest-year { flex: none; color: #9a9a9a; font-size: 12px; }
+.suggest-origin {
+  flex: 1; min-width: 0; color: var(--muted); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* Titles already watched or saved are the likeliest pick, so they read as
    knowns rather than as another row of search results. */
 .suggest-history .suggest-title, .suggest-bookmark .suggest-title { color: var(--accent); }
@@ -1355,4 +1365,12 @@ body.admin-mode .curated-row .card.drop-after .card-media {
   letter-spacing: .1em; text-transform: uppercase;
   background: rgba(255,255,255,.03);
   border-block: 1px solid rgba(255,255,255,.05);
+}
+
+/* On a phone the header is narrow enough that matching the input exactly leaves
+   the list looking cramped and slightly off-centre, so there it spans the row
+   and only the right edge stays aligned. */
+@media (max-width: 560px) {
+  .search-suggest { left: -54px; }
+  .suggest-title { max-width: 55%; }
 }

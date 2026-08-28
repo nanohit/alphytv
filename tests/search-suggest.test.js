@@ -175,3 +175,19 @@ test("an exact title beats a newer one that merely starts with it", () => {
   assert.deepEqual(rank(rows, "брат"),
     ["Брат (1997)", "Брат 3 (2022)", "Братья (2022)", "Мой брат (2010)"]);
 });
+
+test("a suggestion row shows no type label, and a series still opens", async () => {
+  const app = await source();
+  const row = between(app, "function suggestRow(entry)", "function chooseSuggest");
+  // The catalogue's type codes do not separate films from series — 1 and 2 are
+  // films, 3, 4 and 5 all carry seasons — so the label was wrong about half the
+  // time, and a confident wrong label is worse than none.
+  assert.doesNotMatch(row, /"сериал"|"фильм"/);
+  assert.match(row, /suggest-year/);
+  assert.match(row, /suggest-origin/);
+  // Series-ness still has to be right for the target, so it comes from the
+  // backfilled flag rather than from the type code.
+  const match = between(app, "function matchShard", "function suggestRow");
+  assert.match(match, /isSeries: !!row\[3\]/);
+  assert.doesNotMatch(match, /row\[3\] !== 1/);
+});
