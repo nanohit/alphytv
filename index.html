@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <title>Alphy TV — каталог фильмов и сериалов.</title>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260827-ortdubs">
+  <link rel="stylesheet" href="/styles.css?v=20260828-index">
 </head>
 <body>
   <div id="bookmarkBanner" class="bookmark-banner hidden">Добавьте сайт в закладки</div>
@@ -35,7 +35,9 @@
       </div>
       <div class="search-box">
         <input type="text" id="searchInput" spellcheck="false" autocomplete="off"
-               placeholder="Поиск фильмов, сериалов, мультфильмов и аниме">
+               placeholder="Поиск фильмов, сериалов, мультфильмов и аниме"
+               role="combobox" aria-expanded="false" aria-controls="searchSuggest">
+        <div id="searchSuggest" class="search-suggest hidden" role="listbox" aria-label="Подсказки"></div>
         <button class="search-button" id="searchBtn" type="button" aria-label="Поиск">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="11" cy="11" r="7"></circle>
@@ -209,12 +211,12 @@
   </dialog>
 
   <!-- Versioned so persistent/privacy browsers cannot keep the pre-CORS-search client. -->
-  <script src="/identity.js?v=20260827-ortdubs"></script>
-  <script src="/foryou.js?v=20260827-ortdubs"></script>
-  <script src="/catalog-cache.js?v=20260827-ortdubs"></script>
-  <script src="/shaka-smooth.js?v=20260827-ortdubs"></script>
-  <script src="/app.js?v=20260827-ortdubs"></script>
-  <script src="/catalog.js?v=20260827-ortdubs"></script>
-  <script src="/keypool.js?v=20260827-ortdubs"></script>
+  <script src="/identity.js?v=20260828-index"></script>
+  <script src="/foryou.js?v=20260828-index"></script>
+  <script src="/catalog-cache.js?v=20260828-index"></script>
+  <script src="/shaka-smooth.js?v=20260828-index"></script>
+  <script src="/app.js?v=20260828-index"></script>
+  <script src="/catalog.js?v=20260828-index"></script>
+  <script src="/keypool.js?v=20260828-index"></script>
 </body>
 </html>

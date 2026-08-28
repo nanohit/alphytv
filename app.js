@@ -169,6 +169,7 @@
     logoBtn: document.getElementById("logoBtn"),
     searchInput: document.getElementById("searchInput"),
     searchBtn: document.getElementById("searchBtn"),
+    searchSuggest: document.getElementById("searchSuggest"),
     bookmarksToggle: document.getElementById("bookmarksToggle"),
     bookmarksNavCount: document.getElementById("bookmarksNavCount"),
     settingsPanel: document.getElementById("settingsPanel"),
@@ -2055,7 +2056,7 @@ parent.postMessage({
       const url = new URL(endpoint);
       for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value);
       try {
-        const response = await fetchWithTimeout(url.href, { timeoutMs: 9000 });
+        const response = await fetchWithTimeout(url.href, {}, 9000);
         if (!response.ok) throw new Error(`liftw relay ${response.status}`);
         const payload = await response.json();
         if (payload?.error) throw new Error(String(payload.error));
@@ -2150,7 +2151,7 @@ parent.postMessage({
         // Our own relay is fetched plainly; a third-party host still goes
         // through the null-origin sandbox so it never learns who is watching.
         const html = viaRelay
-          ? await (await fetchWithTimeout(url, { timeoutMs: 12000 })).text()
+          ? await (await fetchWithTimeout(url, {}, 12000)).text()
           : await fetchThirdPartyText(url, {
             preferSandbox: true,
             directFallback: false,
@@ -9573,6 +9574,306 @@ addEventListener('message', async (event) => {
   // =====================================================================
   // Search input + onscreen controls
   // =====================================================================
+  // =====================================================================
+  // Search suggestions
+  //
+  // Two tiers, because one network round trip is already too slow to feel
+  // instant: reaching a shard and coming back costs ~560ms before any work is
+  // done, so anything server-backed can only ever be "fast", never "instant".
+  //
+  //  0. Local — the curated catalogue is already in memory, plus history and
+  //     bookmarks. Matched in-process, 0ms, and every hit carries its target so
+  //     picking one opens it with no resolve at all.
+  //  1. The LiftW relay, debounced, appended underneath. The box is never empty
+  //     while it waits because tier 0 has already filled it.
+  //
+  // PoiskKino is deliberately absent: it is the metered quota that runs out,
+  // and a debounced query still fires several requests. It stays on Enter.
+  // =====================================================================
+  // The mirrored catalogue: 81,700 titles, one shard per first letter, fetched
+  // once and then matched locally. It is served from Supabase rather than the
+  // Cloudflare Worker that builds it because Workers are throttled from Russia.
+  const TITLES_INDEX_URL = "https://xoathqkggcuyoyutxwri.supabase.co/functions/v1/titles";
+  const TITLES_SHARD_TTL_MS = 7 * 24 * 3600e3;
+  const SUGGEST_DEBOUNCE_MS = 260;
+  const SUGGEST_MIN_REMOTE = 3;
+  const SUGGEST_LOCAL_LIMIT = 6;
+  const SUGGEST_REMOTE_LIMIT = 6;
+  let suggestIndex = null;
+  let suggestTimer = null;
+  let suggestToken = 0;
+  let suggestActive = -1;
+  let suggestRows = [];
+
+  const suggestFold = (value) => String(value || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+
+  function buildSuggestIndex() {
+    const out = [];
+    const seen = new Set();
+    const push = (entry, source) => {
+      const title = String(entry?.title || "").trim();
+      if (!title || !entry?.target) return;
+      const key = `${suggestFold(title)}|${entry.year || ""}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({
+        title,
+        year: String(entry.year || ""),
+        isSeries: !!entry.isSeries,
+        poster: entry.poster || "",
+        target: entry.target,
+        source,
+        folded: suggestFold(title),
+      });
+    };
+    // History and bookmarks first: a title the viewer already knows beats a catalogue
+    // entry they have never opened, and the dedupe above keeps the first one.
+    for (const entry of loadList(STORE_HISTORY).slice(0, 60)) push(entry, "history");
+    for (const entry of loadList(STORE_BOOKMARKS)) push(entry, "bookmark");
+    for (const entry of window.alphyCatalog?.suggestItems?.() || []) push(entry, "catalog");
+    suggestIndex = out;
+    return out;
+  }
+
+  function matchLocalSuggest(query) {
+    const folded = suggestFold(query);
+    if (!folded) return [];
+    const index = suggestIndex || buildSuggestIndex();
+    const scored = [];
+    for (const entry of index) {
+      // Rank by how early the match starts: a title that begins with what was
+      // typed is what the viewer meant; a match buried mid-word rarely is.
+      // Beginning of the title, or beginning of any word in it. A match buried
+      // mid-word is almost never what was meant — "мис" finding "Программисты"
+      // reads as a bug, not as a helpful extra result.
+      let score = -1;
+      if (entry.folded.startsWith(folded)) score = 0;
+      else if (entry.folded.includes(` ${folded}`)) score = 1;
+      if (score < 0) continue;
+      if (entry.source === "history") score -= 0.3;
+      else if (entry.source === "bookmark") score -= 0.2;
+      scored.push({ entry, score });
+    }
+    scored.sort((a, b) => a.score - b.score || a.entry.title.localeCompare(b.entry.title, "ru"));
+    return scored.slice(0, SUGGEST_LOCAL_LIMIT).map((item) => item.entry);
+  }
+
+  // Shards live in IndexedDB: a busy letter is ~100KB, which localStorage would
+  // both refuse and evict. Held in memory too, so repeat keystrokes cost nothing.
+  const shardMemory = new Map();
+  let shardDb = null;
+
+  function shardStore() {
+    if (shardDb) return shardDb;
+    shardDb = new Promise((resolve) => {
+      let request;
+      try { request = indexedDB.open("alphy-titles", 1); } catch { resolve(null); return; }
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains("shards")) request.result.createObjectStore("shards");
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+    });
+    return shardDb;
+  }
+
+  async function readShard(letter) {
+    const db = await shardStore();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      try {
+        const request = db.transaction("shards", "readonly").objectStore("shards").get(letter);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => resolve(null);
+      } catch { resolve(null); }
+    });
+  }
+
+  async function writeShard(letter, value) {
+    const db = await shardStore();
+    if (!db) return;
+    try { db.transaction("shards", "readwrite").objectStore("shards").put(value, letter); }
+    catch { /* a full or unavailable store must not break search */ }
+  }
+
+  async function loadShard(letter) {
+    if (shardMemory.has(letter)) return shardMemory.get(letter);
+    const cached = await readShard(letter);
+    if (cached && Date.now() - cached.at < TITLES_SHARD_TTL_MS) {
+      shardMemory.set(letter, cached.rows);
+      return cached.rows;
+    }
+    const response = await fetchWithTimeout(
+      `${TITLES_INDEX_URL}?i=${encodeURIComponent(letter)}`, {}, 12000,
+    );
+    if (!response.ok) throw new Error(`index ${response.status}`);
+    const rows = await response.json();
+    shardMemory.set(letter, rows);
+    writeShard(letter, { at: Date.now(), rows });
+    return rows;
+  }
+
+  // [name, year, slug, type, embed_id, kp] — deliberately positional: at 81,700
+  // rows the key names would be most of the payload.
+  function matchShard(rows, query) {
+    const folded = suggestFold(query);
+    if (!folded) return [];
+    const out = [];
+    for (const row of rows) {
+      const name = suggestFold(row[0]);
+      const score = name.startsWith(folded) ? 0 : (name.includes(` ${folded}`) ? 1 : -1);
+      if (score < 0) continue;
+      out.push({ score, entry: {
+        title: row[0], year: String(row[1] || ""), slug: row[2],
+        isSeries: row[3] !== 1, poster: "", liftId: row[4] || null, kpId: row[5] || "",
+        source: "index", folded: name,
+      } });
+      if (out.length > 400) break;
+    }
+    // `a || b ? 1 : -1` parses as `(a || b) ? 1 : -1`, so the score was collapsed
+    // to a bare truthiness test and the year never compared at all — the list
+    // came out in near-random order. Comparator arms must return numbers.
+    out.sort((a, b) => (a.score - b.score) || ((Number(b.entry.year) || 0) - (Number(a.entry.year) || 0)));
+    return out.slice(0, SUGGEST_REMOTE_LIMIT).map((item) => item.entry);
+  }
+
+  function suggestRow(entry) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `suggest-row suggest-${entry.source}`;
+    const title = document.createElement("span");
+    title.className = "suggest-title";
+    title.textContent = entry.title;
+    const meta = document.createElement("span");
+    meta.className = "suggest-meta";
+    meta.textContent = [entry.year, entry.isSeries ? "сериал" : "фильм"].filter(Boolean).join(" · ");
+    row.append(title, meta);
+    row.addEventListener("mousedown", (event) => {
+      // mousedown, not click: the input's blur would close the list first.
+      event.preventDefault();
+      chooseSuggest(entry);
+    });
+    return row;
+  }
+
+  function chooseSuggest(entry) {
+    closeSuggest();
+    el.searchInput.value = entry.title;
+    if (entry.source === "index") {
+      openIndexSuggestion(entry);
+      return;
+    }
+    if (entry.target) {
+      // A local hit already knows where it lives, so it opens with no resolve.
+      openCuratedItem({
+        title: entry.title, year: entry.year, poster: entry.poster,
+        isSeries: entry.isSeries, target: entry.target,
+      });
+      return;
+    }
+    onSearchSubmit();
+  }
+
+  // The index knows the player id for a title the backfill has reached, and only
+  // a slug otherwise. The slug is resolved server-side because the catalogue host
+  // does not resolve from Russia at all.
+  async function openIndexSuggestion(entry) {
+    let liftId = entry.liftId;
+    if (!liftId) {
+      showPlayerLoading();
+      try {
+        const response = await fetchWithTimeout(
+          `${TITLES_INDEX_URL}/resolve?slug=${encodeURIComponent(entry.slug)}`, {}, 15000,
+        );
+        const payload = await response.json();
+        liftId = payload?.embed_id || null;
+        if (!liftId) throw new Error(payload?.error || "нет плеера");
+      } catch (error) {
+        showError(new Error(`Не удалось открыть: ${error.message}`));
+        return;
+      }
+    }
+    const target = liftwTarget(liftId);
+    if (entry.kpId) target.kpId = entry.kpId;
+    openCuratedItem({
+      title: entry.title, year: entry.year, poster: "",
+      isSeries: entry.isSeries, kpId: entry.kpId || "", target,
+    });
+  }
+
+  function renderSuggest(local, remote) {
+    const host = el.searchSuggest;
+    if (!host) return;
+    suggestRows = [];
+    const frag = document.createDocumentFragment();
+    for (const entry of local) {
+      const row = suggestRow(entry);
+      suggestRows.push({ entry, row });
+      frag.appendChild(row);
+    }
+    if (remote.length) {
+      if (local.length) {
+        const rule = document.createElement("div");
+        rule.className = "suggest-rule";
+        rule.textContent = "ещё в источниках";
+        frag.appendChild(rule);
+      }
+      for (const entry of remote) {
+        const row = suggestRow(entry);
+        suggestRows.push({ entry, row });
+        frag.appendChild(row);
+      }
+    }
+    host.replaceChildren(frag);
+    suggestActive = -1;
+    host.classList.toggle("hidden", !suggestRows.length);
+  }
+
+  function closeSuggest() {
+    clearTimeout(suggestTimer);
+    suggestToken += 1;
+    suggestActive = -1;
+    suggestRows = [];
+    el.searchSuggest?.replaceChildren();
+    el.searchSuggest?.classList.add("hidden");
+  }
+
+  function moveSuggest(delta) {
+    if (!suggestRows.length) return false;
+    suggestActive = (suggestActive + delta + suggestRows.length) % suggestRows.length;
+    suggestRows.forEach(({ row }, index) => row.classList.toggle("active", index === suggestActive));
+    suggestRows[suggestActive].row.scrollIntoView({ block: "nearest" });
+    return true;
+  }
+
+  function onSuggestInput() {
+    const query = el.searchInput.value.trim();
+    clearTimeout(suggestTimer);
+    const token = ++suggestToken;
+    if (query.length < 1 || /^https?:\/\//i.test(query)) {
+      closeSuggest();
+      return;
+    }
+    const local = matchLocalSuggest(query);
+    renderSuggest(local, []);
+    if (query.length < SUGGEST_MIN_REMOTE) return;
+    suggestTimer = setTimeout(() => {
+      loadShard(suggestFold(query)[0])
+        .then((rows) => {
+          if (token !== suggestToken || el.searchInput.value.trim() !== query) return;
+          const seen = new Set(local.map((entry) => `${suggestFold(entry.title)}|${entry.year}`));
+          const remote = matchShard(rows, query)
+            .filter((entry) => !seen.has(`${suggestFold(entry.title)}|${entry.year}`));
+          renderSuggest(local, remote);
+        })
+        .catch((error) => log("suggest-index-warn", error.message));
+    }, SUGGEST_DEBOUNCE_MS);
+  }
+
   function onSearchSubmit() {
     const value = el.searchInput.value.trim();
     if (!value) return;
@@ -9793,7 +10094,25 @@ addEventListener('message', async (event) => {
       warmNewdeafConnections();
       warmCollapsConnections();
     });
-    el.searchInput.addEventListener("keydown", (e) => { if (e.key === "Enter") onSearchSubmit(); });
+    el.searchInput.addEventListener("input", onSuggestInput);
+    el.searchInput.addEventListener("blur", () => setTimeout(closeSuggest, 120));
+    el.searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" && moveSuggest(1)) { e.preventDefault(); return; }
+      if (e.key === "ArrowUp" && moveSuggest(-1)) { e.preventDefault(); return; }
+      if (e.key === "Escape" && suggestRows.length) { e.preventDefault(); closeSuggest(); return; }
+      if (e.key !== "Enter") return;
+      // A highlighted suggestion wins over the raw text: the viewer picked it.
+      if (suggestActive >= 0 && suggestRows[suggestActive]) {
+        e.preventDefault();
+        chooseSuggest(suggestRows[suggestActive].entry);
+        return;
+      }
+      closeSuggest();
+      onSearchSubmit();
+    });
+    // The catalogue arrives after boot and can be refreshed later, so the index
+    // is invalidated rather than built once and left stale.
+    window.addEventListener("alphy:catalog-refreshed", () => { suggestIndex = null; });
     el.bookmarksToggle.addEventListener("click", () => go("/bookmarks"));
     el.reviewsToggle?.addEventListener("click", () => {
       const collapsed = !el.reviewsSection?.classList.contains("collapsed");

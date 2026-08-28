@@ -34,6 +34,11 @@ const PER_PAGE = 100;
 // current sleep, and the lease expires on its own.
 const BUDGET_MS = 105_000;
 const BACKOFF_STEPS_MS = [60_000, 300_000, 900_000, 3_600_000];
+// Where browsers actually read the index from. Cloudflare Workers are throttled
+// from Russia, which is the audience, so the crawler builds here and publishes
+// there; Supabase is already proven reachable from RU by the other relays.
+const PUBLISH_URL = "https://xoathqkggcuyoyutxwri.supabase.co/functions/v1/titles";
+const PUBLISH_BATCH = 500;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // SQLite's lower() is ASCII-only, so folding has to happen here or every
@@ -129,17 +134,19 @@ async function crawlCatalog(env, db, deadline) {
     const base = (page - 1) * PER_PAGE;
     // Insert leaves kp alone on conflict: phase 2's work must survive a re-crawl.
     const statement = db.prepare(
-      `insert into titles (id, name, year, type, slug, rank, seen, initial)
-       values (?, ?, ?, ?, ?, ?, ?, ?)
+      `insert into titles (id, name, year, type, slug, rank, seen, initial, rate_kp, rate_imdb)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        on conflict(id) do update set
          name = excluded.name, year = excluded.year, type = excluded.type,
          slug = excluded.slug, rank = excluded.rank, seen = excluded.seen,
-         initial = excluded.initial`,
+         initial = excluded.initial, rate_kp = excluded.rate_kp,
+         rate_imdb = excluded.rate_imdb, dirty = 1`,
     );
     await db.batch(items.map((item, index) => statement.bind(
       Number(item.id), String(item.name || "").trim(),
       Number(item.year) || null, Number(item.type) || null,
       String(item.slug || ""), base + index, seen, initialOf(item.name),
+      Number(item.rate?.kinopoisk) || null, Number(item.rate?.imdb) || null,
     )));
 
     page += 1;
@@ -160,8 +167,16 @@ async function crawlCatalog(env, db, deadline) {
 async function fillKpIds(env, db, deadline) {
   const spacing = Number(env.SPACING_MS || 2000);
   const batch = Number(env.BATCH || 25);
+  // NOT the catalogue's own order. `sortBy` is ignored upstream — every value
+  // returns newest-first — so following it spent the first five thousand
+  // requests on 2026 announcements, a third of which have no player at all and
+  // most of which are not on Kinopoisk yet. A title that already carries a
+  // Kinopoisk rating is one that exists and is worth resolving first.
   const pending = await db.prepare(
-    "select id, slug from titles where kp is null and tries < 3 and slug <> '' order by rank asc limit ?",
+    `select id, slug from titles
+     where kp is null and tries < 3 and slug <> ''
+     order by (rate_kp is null), rate_kp desc, year desc
+     limit ?`,
   ).bind(batch).all();
   const rows = pending?.results ?? [];
   let done = 0;
@@ -201,7 +216,7 @@ async function fillKpIds(env, db, deadline) {
     const kp = /^\d+$/.test(raw) && raw !== "0" ? raw : "";
     // The id the player actually needs, which is not the one the catalogue lists.
     const embed = Number(String(view.video?.embedUrl || "").match(/\/(\d+)/)?.[1]) || null;
-    await db.prepare("update titles set kp = ?, embed_id = ? where id = ?")
+    await db.prepare("update titles set kp = ?, embed_id = ?, dirty = 1 where id = ?")
       .bind(kp, embed, row.id).run();
     done += 1;
     await noteSuccess(db);
@@ -209,6 +224,42 @@ async function fillKpIds(env, db, deadline) {
     await sleep(spacing);
   }
   return done;
+}
+
+// Rows are published as they change rather than in a nightly dump: a dump would
+// mean the index is stale for a day after every crawl, and this costs nothing —
+// it is our own server, not the source's.
+async function publish(env, db, deadline) {
+  if (!env.PUSH_TOKEN) return 0;
+  let sent = 0;
+  while (Date.now() < deadline) {
+    const rows = await db.prepare(
+      `select id, name, year, type, slug, initial, embed_id, kp, rate_kp
+       from titles where dirty = 1 limit ?`,
+    ).bind(PUBLISH_BATCH).all();
+    const list = rows?.results ?? [];
+    if (!list.length) break;
+    const response = await fetch(PUBLISH_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-push-token": env.PUSH_TOKEN },
+      body: JSON.stringify(list.map((r) => ({
+        id: r.id, name: r.name, year: r.year, type: r.type, slug: r.slug,
+        initial: r.initial, embed_id: r.embed_id, kp: r.kp, rate_kp: r.rate_kp,
+      }))),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      await setMeta(db, "last_publish_error", `${new Date().toISOString()} ${response.status}`);
+      break;
+    }
+    // Only cleared after the write is confirmed, so a failed push is simply
+    // retried next run rather than silently losing rows.
+    const ids = list.map((r) => r.id).join(",");
+    await db.prepare(`update titles set dirty = 0 where id in (${ids})`).run();
+    sent += list.length;
+  }
+  if (sent) await setMeta(db, "published_at", Date.now());
+  return sent;
 }
 
 async function runOnce(env) {
@@ -253,7 +304,8 @@ async function runOnce(env) {
       return { pages };
     }
     const filled = await fillKpIds(env, db, deadline);
-    return { filled };
+    const published = await publish(env, db, Date.now() + 20_000);
+    return { filled, published };
   } finally {
     await setMeta(db, "running_until", "0");
   }
@@ -296,6 +348,9 @@ async function status(db) {
       без_первой_буквы: Number((await db.prepare(
         "select count(*) as n from titles where initial is null").first())?.n || 0),
       последний_тик: bag.last_tick || null,
+      ждут_публикации: Number((await db.prepare(
+        "select count(*) as n from titles where dirty = 1").first())?.n || 0),
+      ошибка_публикации: bag.last_publish_error || null,
       последняя_ошибка: bag.last_error || null,
       последняя_мелкая_ошибка: bag.last_soft_error || null,
       пропущено_битых: Number((await db.prepare(
@@ -340,13 +395,21 @@ export default {
       const letter = decodeURIComponent(url.pathname.slice("/index/".length)).replace(/\.json$/, "");
       if ([...letter].length !== 1) return json({ error: "one letter" }, 400);
       const rows = await env.DB.prepare(
-        "select id, embed_id, name, year, type, kp from titles where initial = ? order by rank asc",
+        // Announcements with no player are excluded once we know that: offering
+        // one is a dead end. Rows not yet resolved stay in — they are probably
+        // playable and cost only a resolve when opened.
+        `select id, embed_id, slug, name, year, type, kp from titles
+         where initial = ? and not (kp is not null and embed_id is null)
+         order by year desc, name asc`,
       ).bind(initialOf(letter)).all();
       return new Response(
-        // embed_id where known, the catalogue id otherwise: a row that has not
-        // been through phase 2 yet is still worth showing, it just costs a
-        // resolve when opened.
-        JSON.stringify((rows?.results ?? []).map((r) => [r.name, r.year, r.embed_id || r.id, r.type, r.kp || ""])),
+        // The slug is what makes a suggestion openable without phase 2 having
+        // reached it: one /franchise/view/ on click returns both the player id
+        // and the kpId, which is what opening any title costs anyway. That is
+        // why the index is usable in full today while the backfill is at 6%.
+        JSON.stringify((rows?.results ?? []).map((r) => [
+          r.name, r.year, r.slug, r.type, r.embed_id || null, r.kp || "",
+        ])),
         {
           headers: {
             "Content-Type": "application/json; charset=utf-8",

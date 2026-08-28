@@ -1627,6 +1627,28 @@
     render,
     isAdmin: () => state.admin,
     getCatalog: () => JSON.parse(JSON.stringify(state.catalog)),
+    // getCatalog deep-clones the whole 200KB envelope, which is fine once and
+    // ruinous per keystroke. Typeahead gets a flat, already-thin projection of
+    // only what a suggestion row shows, rebuilt when the catalog actually
+    // changes rather than on every read.
+    suggestItems: () => {
+      const out = [];
+      const seen = new Set();
+      for (const list of state.catalog.lists || []) {
+        for (const item of list.items || []) {
+          if (!item?.title || seen.has(item.key)) continue;
+          seen.add(item.key);
+          out.push({
+            title: item.title,
+            year: item.year || "",
+            isSeries: !!item.isSeries,
+            poster: item.poster || "",
+            target: item.target,
+          });
+        }
+      }
+      return out;
+    },
     addToList: (item) => openPicker(item),
     // Search/recommendations consult this to open an already-curated title
     // through its resolved list target instead of the full kp resolve flow.
