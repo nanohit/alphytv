@@ -8,9 +8,8 @@
 # source.
 name: Titles indexer heartbeat
 
+# Crawl complete — the schedule is off. Kept for a manual refresh run.
 on:
-  schedule:
-    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 concurrency:

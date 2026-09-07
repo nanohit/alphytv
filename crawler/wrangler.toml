@@ -5,8 +5,11 @@ workers_dev = true
 
 # One invocation per minute. Each does a small, paced batch and exits, so a
 # killed or overlapping run loses at most that batch — the cursor is in D1.
-[triggers]
-crons = ["*/2 * * * *"]
+# Crawl finished 2026-08-28 — the catalogue is mirrored and the kpId backfill
+# reached its useful depth. Re-enable only to refresh; note that phase 2 full
+# scans D1 on every batch, which is what blew the free row-read limit.
+# [triggers]
+# crons = ["*/2 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
