@@ -9712,6 +9712,13 @@ addEventListener('message', async (event) => {
       };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => resolve(null);
+      // `open` can fire none of the three: another tab holding an older version
+      // blocks it, and a pending deleteDatabase wedges it indefinitely. Without
+      // this the awaited promise never settles and search stops working
+      // entirely — silently, and until the tab is closed. The cache is an
+      // optimisation; losing it must cost a network fetch, not the feature.
+      request.onblocked = () => resolve(null);
+      setTimeout(() => resolve(null), 3000);
     });
     return shardDb;
   }

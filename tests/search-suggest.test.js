@@ -375,3 +375,13 @@ test("an unchanged list is not rebuilt, and the divider carries no caption", asy
   assert.doesNotMatch(render, /ещё в источниках/);
   assert.doesNotMatch(app, /ещё в источниках/);
 });
+
+test("a wedged IndexedDB costs the cache, not the search", async () => {
+  const app = await source();
+  const store = between(app, "function shardStore()", "async function readShard");
+  // open() can fire none of success/error: another tab on an older version
+  // blocks it, and a pending deleteDatabase wedges it until the tab closes.
+  // An unsettled promise there stops every shard fetch, silently.
+  assert.match(store, /onblocked = \(\) => resolve\(null\)/);
+  assert.match(store, /setTimeout\(\(\) => resolve\(null\)/);
+});
