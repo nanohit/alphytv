@@ -172,10 +172,25 @@ async function fillKpIds(env, db, deadline) {
   // requests on 2026 announcements, a third of which have no player at all and
   // most of which are not on Kinopoisk yet. A title that already carries a
   // Kinopoisk rating is one that exists and is worth resolving first.
+  //
+  // The ordering is bare `rate_kp desc` and must stay that way: SQLite sorts
+  // NULL below every value, so DESC already puts unrated titles last, and the
+  // explicit `(rate_kp is null)` term that used to lead it was both redundant
+  // and the reason no index could serve the sort. Without one this full-scanned
+  // all 81,702 rows every two minutes and exhausted D1's daily read limit in
+  // under a day. `titles_pending` is a partial index whose predicate matches
+  // this WHERE exactly — change either and the index silently stops being used.
+  // `kp is null` alone permanently skipped 10,827 rows: origin_name was added to
+  // this write after the crawl was already thousands of titles deep, and a row
+  // that had its kp by then was never asked again. Those are the earliest rows,
+  // which — because phase 2 runs in rating order — are the most-watched titles
+  // on the site: Интерстеллар and Оппенгеймер both carry a kp and a player id
+  // and no original name at all, so neither can be found by typing its English
+  // title. Anything still missing either field is pending.
   const pending = await db.prepare(
     `select id, slug from titles
-     where kp is null and tries < 3 and slug <> ''
-     order by (rate_kp is null), rate_kp desc, year desc
+     where (kp is null or origin_name is null) and tries < 3 and slug <> ''
+     order by rate_kp desc, year desc
      limit ?`,
   ).bind(batch).all();
   const rows = pending?.results ?? [];
@@ -225,9 +240,12 @@ async function fillKpIds(env, db, deadline) {
     // signal: the type codes do not separate them (1,2 are films; 3,4,5 all have
     // seasons), which is why half the suggestions were mislabelled.
     const isSeries = (view.season || view.seasonLast) ? 1 : 0;
+    // "" rather than null for the same reason as kp: a Russian film has no
+    // original title, and null now means "never asked". Leaving it null would
+    // put every such row back in the pending set on every single run, forever.
     await db.prepare(
       "update titles set kp = ?, embed_id = ?, origin_name = ?, is_series = ?, dirty = 1 where id = ?",
-    ).bind(kp, embed, String(view.originName || "") || null, isSeries, row.id).run();
+    ).bind(kp, embed, String(view.originName || ""), isSeries, row.id).run();
     done += 1;
     await noteSuccess(db);
     if (Date.now() + spacing >= deadline) break;
