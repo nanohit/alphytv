@@ -165,6 +165,20 @@ Deno.serve(async (req) => {
   if (url.pathname.endsWith("/resolve")) {
     const slug = (url.searchParams.get("slug") ?? "").trim();
     if (!/^[a-z0-9-]{1,120}$/i.test(slug)) return json({ error: "bad slug" }, 400);
+    // The slug has to be one we already hold, and this is not a formality: the
+    // shape of it was the only gate, so any string of letters and dashes drove
+    // an unauthenticated, unthrottled request at api.zombie-film.live from our
+    // address. This function sat next to a crawler built entirely around not
+    // doing that. Now an unknown slug costs the source nothing.
+    //
+    // It also gives us the row id, so the write below is by primary key. Asking
+    // PostgREST to filter on slug instead was a sequential scan of all 81,702
+    // rows — 1035ms measured — on the write half of every single resolve.
+    const known = await fetch(`${REST}?select=id&slug=eq.${encodeURIComponent(slug)}&limit=1`,
+      { headers: HEADERS });
+    if (!known.ok) return json({ error: "index unavailable" }, 502);
+    const id = (await known.json())[0]?.id;
+    if (!id) return json({ error: "unknown slug" }, 404);
     const ask = async (season: string) => {
       const query = new URLSearchParams({ slug, findBy: "init", all: "false", season, _format: "json" });
       const upstream = await fetch(
@@ -190,10 +204,15 @@ Deno.serve(async (req) => {
       // reached, so without this a title stays marked as a film forever even
       // after we have just proved otherwise by resolving its season.
       const isSeries = !!view.season || !!view.seasonLast;
-      await fetch(`${REST}?slug=eq.${encodeURIComponent(slug)}`, {
+      await fetch(`${REST}?id=eq.${id}`, {
         method: "PATCH", headers: { ...HEADERS, Prefer: "return=minimal" },
         body: JSON.stringify({
-          embed_id: embed, kp, origin_name: view.originName ?? null, is_series: isSeries,
+          embed_id: embed, kp,
+          // "" rather than null, matching the crawler: null means "never asked",
+          // so writing it for a Russian film with no original title put the row
+          // straight back into the crawler's pending set — every time, forever.
+          origin_name: String(view.originName ?? ""),
+          is_series: isSeries,
         }),
       }).catch(() => {});
       return json({
@@ -219,9 +238,27 @@ Deno.serve(async (req) => {
   if ([...letter].length !== 1) return json({ error: "one letter expected" }, 400);
   const folded = letter.toLowerCase().replace(/ё/, "е");
   // Only reached for a letter whose Storage object is missing — a brand new
-  // initial, or the moment before the first build. Correct but slow, by design.
+  // initial, or the moment right after a version bump. Serve it, and write the
+  // object on the way out so the miss happens once for that letter rather than
+  // once per viewer: every reader after this one gets the CDN copy and the
+  // database stays out of the read path.
   try {
-    return json(await shardRows(folded), 200, "public, max-age=86400");
+    const rows = await shardRows(folded);
+    // Only a letter that actually has titles earns an object. Otherwise any
+    // single character anyone asks for would create one.
+    if (rows.length) {
+      await fetch(`${STORAGE}/${BUCKET}/${shardPath(folded)}`, {
+        method: "POST",
+        headers: {
+          apikey: KEY, Authorization: `Bearer ${KEY}`,
+          "Content-Type": "application/json",
+          "Cache-Control": "public, max-age=86400",
+          "x-upsert": "true",
+        },
+        body: JSON.stringify(rows),
+      }).catch(() => { /* serving the reader matters more than the cache */ });
+    }
+    return json(rows, 200, "public, max-age=86400");
   } catch {
     return json({ error: "upstream" }, 502);
   }

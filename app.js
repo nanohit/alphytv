@@ -9780,18 +9780,34 @@ addEventListener('message', async (event) => {
     return response.json();
   }
 
-  async function loadShard(rawLetter) {
+  // In flight, by letter. The debounce only cancels a timer that has not fired
+  // yet: once a load starts, the next keystroke schedules another 260ms later,
+  // and a cold shard takes longer than that on anything but a fast connection.
+  // Measured with 2s of latency, one letter was fetched three times in
+  // parallel — 2.3MB down the wire for a 776KB object. The token guard keeps a
+  // stale answer off the screen; it does nothing about the duplicate request.
+  const shardInFlight = new Map();
+
+  function loadShard(rawLetter) {
     const letter = `${rawLetter}:${TITLES_SHARD_VERSION}`;
-    if (shardMemory.has(letter)) return shardMemory.get(letter);
-    const cached = await readShard(letter);
-    if (cached && Date.now() - cached.at < TITLES_SHARD_TTL_MS) {
-      shardMemory.set(letter, cached.rows);
-      return cached.rows;
-    }
-    const rows = await fetchShard(rawLetter);
-    shardMemory.set(letter, rows);
-    writeShard(letter, { at: Date.now(), rows });
-    return rows;
+    if (shardMemory.has(letter)) return Promise.resolve(shardMemory.get(letter));
+    const pending = shardInFlight.get(letter);
+    if (pending) return pending;
+    const load = (async () => {
+      const cached = await readShard(letter);
+      if (cached && Date.now() - cached.at < TITLES_SHARD_TTL_MS) {
+        shardMemory.set(letter, cached.rows);
+        return cached.rows;
+      }
+      const rows = await fetchShard(rawLetter);
+      shardMemory.set(letter, rows);
+      writeShard(letter, { at: Date.now(), rows });
+      return rows;
+    })();
+    shardInFlight.set(letter, load);
+    // Cleared either way: a failed load must not pin the letter to a rejected
+    // promise for the rest of the session.
+    return load.finally(() => shardInFlight.delete(letter));
   }
 
   // [name, year, slug, isSeries, embed_id, kp, originName] — deliberately
@@ -9833,7 +9849,12 @@ addEventListener('message', async (event) => {
         isSeries: !!row[3], poster: "", liftId: row[4] || null, kpId: row[5] || "",
         originName: row[6] || "", source: "index", folded: name,
       } });
-      if (out.length > 400) break;
+      // No cap here. Stopping at the first 400 candidates decided them by the
+      // order the shard happens to be in — year descending — so an exact match
+      // older than four hundred newer partial ones could never reach the sort
+      // below. «при» already has 1,168 candidates in one shard. It costs
+      // nothing to keep them all: the loop walks the whole shard either way,
+      // and sorting a thousand entries is well under a millisecond.
     }
     // `a || b ? 1 : -1` parses as `(a || b) ? 1 : -1`, so the score was collapsed
     // to a bare truthiness test and the year never compared at all — the list

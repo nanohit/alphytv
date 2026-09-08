@@ -123,7 +123,7 @@ test("a local hit opens without a resolve, and the list is rebuilt when the cata
 
 test("an index shard is fetched once per letter and then matched locally", async () => {
   const app = await source();
-  const block = between(app, "async function loadShard", "function matchShard");
+  const block = between(app, "function loadShard", "function matchShard");
   // Two caches, both needed: memory so repeat keystrokes cost nothing at all,
   // IndexedDB so a reload does not re-download ~100KB. localStorage would refuse
   // a shard that size and evict it besides.
@@ -140,7 +140,7 @@ test("the index is served from Supabase, not from the Worker that builds it", as
   assert.match(app, /TITLES_INDEX_URL = "https:\/\/[a-z]+\.supabase\.co/);
   // Scoped to the suggestion path: a legacy resolver constant elsewhere in the
   // file still names workers.dev and has nothing to do with this.
-  const block = between(app, "async function loadShard", "function suggestRow");
+  const block = between(app, "function loadShard", "function suggestRow");
   assert.doesNotMatch(block, /workers\.dev/);
 });
 
@@ -263,7 +263,7 @@ test("a shard holds titles matching either initial, and old cached shards are di
   // has to reach the object path too, or a new shape would overwrite objects
   // that browsers and the CDN are still serving from the old one.
   assert.match(app, /TITLES_SHARD_VERSION = \d+/);
-  const load = between(app, "async function loadShard", "function suggestScore");
+  const load = between(app, "function loadShard", "function suggestScore");
   assert.match(load, /`\$\{rawLetter\}:\$\{TITLES_SHARD_VERSION\}`/);
   const object = between(app, "const shardObject =", "const shardHostOrder");
   assert.match(object, /v\$\{TITLES_SHARD_VERSION\}/);
@@ -271,7 +271,7 @@ test("a shard holds titles matching either initial, and old cached shards are di
 
 test("shards are read as static objects, not from the function", async () => {
   const app = await source();
-  const fetchShard = between(app, "async function fetchShard", "async function loadShard");
+  const fetchShard = between(app, "async function fetchShard", "const shardInFlight");
   // Cloudflare fronts Supabase Functions with cf-cache-status: DYNAMIC and never
   // caches one, so a shard served by the function re-read Postgres for every
   // viewer — measured at 2.25s against 0.20s for the cached Storage object.
@@ -384,4 +384,54 @@ test("a wedged IndexedDB costs the cache, not the search", async () => {
   // An unsettled promise there stops every shard fetch, silently.
   assert.match(store, /onblocked = \(\) => resolve\(null\)/);
   assert.match(store, /setTimeout\(\(\) => resolve\(null\)/);
+});
+
+test("a cold shard is fetched once however fast the viewer types", async () => {
+  const app = await source();
+  const load = between(app, "const shardInFlight", "// [name, year, slug");
+  // The debounce only cancels a timer that has not fired. Once a load starts,
+  // the next keystroke schedules another 260ms later, and a cold shard takes
+  // longer than that on a phone — measured at three parallel fetches of one
+  // 776KB object.
+  assert.match(load, /shardInFlight\.get\(letter\)/);
+  assert.match(load, /if \(pending\) return pending/);
+  assert.match(load, /shardInFlight\.set\(letter, load\)/);
+  // A rejected load must not pin the letter for the rest of the session.
+  assert.match(load, /\.finally\(\(\) => shardInFlight\.delete\(letter\)\)/);
+});
+
+test("concurrent loads of one letter share a single fetch", async () => {
+  const app = await source();
+  const slice = (a, b) => app.slice(app.indexOf(a), app.indexOf(b));
+  let fetches = 0;
+  const harness = new Function("hooks", [
+    "const { onFetch, TITLES_SHARD_VERSION } = hooks;",
+    "const shardMemory = new Map();",
+    "const readShard = async () => null;",
+    "const writeShard = () => {};",
+    "const TITLES_SHARD_TTL_MS = 1e9;",
+    "const fetchShard = async () => { onFetch(); await new Promise(r => setTimeout(r, 40)); return [['x']]; };",
+    slice("  // In flight, by letter.", "  // [name, year, slug"),
+    "return loadShard;",
+  ].join("\n"))({ onFetch: () => { fetches += 1; }, TITLES_SHARD_VERSION: 2 });
+
+  const all = await Promise.all(["п", "п", "п", "п"].map((l) => harness(l)));
+  assert.equal(fetches, 1, "four concurrent asks for one letter must cost one fetch");
+  assert.deepEqual(all[0], [["x"]]);
+  // And once it is in memory, later asks cost nothing at all.
+  await harness("п");
+  assert.equal(fetches, 1);
+  // A different letter is still its own fetch.
+  await harness("с");
+  assert.equal(fetches, 2);
+});
+
+test("an older exact match is not lost behind newer partial ones", async () => {
+  // 500 newer titles that merely start with the query, and the exact match last
+  // — the order a shard actually arrives in, year descending. Capping the
+  // candidate list before ranking dropped the only row that mattered.
+  const rows = [];
+  for (let i = 0; i < 500; i += 1) rows.push([`Че${i} и другие`, 2026, `c${i}`, 0, i, "", ""]);
+  rows.push(["Че!", 1969, "che", 0, 999, "", ""]);
+  assert.equal(realMatchShard(rows, "че")[0].title, "Че!");
 });

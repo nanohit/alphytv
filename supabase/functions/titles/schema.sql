@@ -19,6 +19,12 @@ create table if not exists titles (
 create index if not exists titles_initial on titles (initial);
 create index if not exists titles_origin_initial on titles (origin_initial);
 
+-- /resolve looks a title up by slug, and until this existed that was a
+-- sequential scan of all 81,702 rows — 1035ms measured — on the write half of
+-- every resolve. Unique because slugs are (81,702 of 81,702 distinct), and
+-- because the lookup wants exactly one row to then PATCH by primary key.
+create unique index if not exists titles_slug on titles (slug);
+
 -- One trigger owns both initials.
 --
 -- `origin_initial` exists because routing on the Russian name alone meant an
