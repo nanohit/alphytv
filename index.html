@@ -8,8 +8,16 @@
   <meta name="referrer" content="no-referrer">
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <title>Alphy TV — каталог фильмов и сериалов.</title>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260908-sug5">
+  <!-- Loaded without blocking first paint. A stylesheet from another origin
+       holds rendering until it answers, so a single foreign host being slow or
+       unreachable is a blank page rather than a page in the fallback font — and
+       for an audience that reaches half the internet through a filter, that is
+       not a hypothetical. media=print makes it a non-blocking fetch that is
+       promoted to the real stylesheet once it lands. -->
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+        rel="stylesheet" media="print" onload="this.media='all'">
+  <link rel="stylesheet" href="/styles.css?v=20260909-sug9">
 </head>
 <body>
   <div id="bookmarkBanner" class="bookmark-banner hidden">Добавьте сайт в закладки</div>
