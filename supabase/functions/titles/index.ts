@@ -99,16 +99,21 @@ Deno.serve(async (req) => {
     return json({ rows: Number(r.headers.get("content-range")?.split("/")[1] ?? 0) });
   }
 
-  // A shard. One letter in, every title starting with it out.
+  // A shard. One letter in, every title starting with it out — by its Russian
+  // name OR by its original one, so "Good Will…" and "Умница Уилл…" reach the
+  // same row. Routing on the Russian initial alone made an English query load a
+  // shard the title could not possibly be in, which is why Latin search found
+  // nothing at all rather than merely finding less.
   const letter = (url.searchParams.get("i") ?? "").trim();
   if ([...letter].length !== 1) return json({ error: "one letter expected" }, 400);
   const folded = letter.toLowerCase().replace(/ё/, "е");
+  const shardFilter = `or=(initial.eq.${encodeURIComponent(folded)},origin_initial.eq.${encodeURIComponent(folded)})`;
 
   const rows: unknown[] = [];
   // PostgREST caps a page; a busy letter runs to several thousand titles.
   for (let from = 0; from < 20000; from += 1000) {
     const response = await fetch(
-      `${REST}?select=name,origin_name,year,slug,is_series,embed_id,kp&initial=eq.${encodeURIComponent(folded)}&order=year.desc.nullslast,name.asc`,
+      `${REST}?select=name,origin_name,year,slug,is_series,embed_id,kp&${shardFilter}&order=year.desc.nullslast,name.asc`,
       { headers: { ...HEADERS, Range: `${from}-${from + 999}` } },
     );
     if (!response.ok) return json({ error: "upstream" }, 502);

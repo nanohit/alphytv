@@ -9595,6 +9595,11 @@ addEventListener('message', async (event) => {
   // Cloudflare Worker that builds it because Workers are throttled from Russia.
   const TITLES_INDEX_URL = "https://xoathqkggcuyoyutxwri.supabase.co/functions/v1/titles";
   const TITLES_SHARD_TTL_MS = 7 * 24 * 3600e3;
+  // Bumped when the shard payload changes shape or contents. Shards live in the
+  // viewer's IndexedDB for a week, so without this a browser that cached a
+  // Russian-only shard would keep answering English queries with nothing until
+  // that week ran out.
+  const TITLES_SHARD_VERSION = 2;
   const SUGGEST_DEBOUNCE_MS = 260;
   const SUGGEST_MIN_REMOTE = 3;
   const SUGGEST_LOCAL_LIMIT = 6;
@@ -9620,6 +9625,10 @@ addEventListener('message', async (event) => {
       const key = `${suggestFold(title)}|${entry.year || ""}`;
       if (seen.has(key)) return;
       seen.add(key);
+      // History keeps a metadata snapshot, so a title already watched can be
+      // found by its English name too — and shows it, the same as an index row.
+      const originName = String(entry?.originName || entry?.originalTitle
+        || entry?.meta?.originalTitle || "").trim();
       out.push({
         title,
         year: String(entry.year || ""),
@@ -9627,7 +9636,9 @@ addEventListener('message', async (event) => {
         poster: entry.poster || "",
         target: entry.target,
         source,
+        originName,
         folded: suggestFold(title),
+        foldedOrigin: suggestFold(originName),
       });
     };
     // History and bookmarks first: a title the viewer already knows beats a catalogue
@@ -9646,13 +9657,18 @@ addEventListener('message', async (event) => {
     const scored = [];
     for (const entry of index) {
       // Rank by how early the match starts: a title that begins with what was
-      // typed is what the viewer meant; a match buried mid-word rarely is.
-      // Beginning of the title, or beginning of any word in it. A match buried
-      // mid-word is almost never what was meant — "мис" finding "Программисты"
-      // reads as a bug, not as a helpful extra result.
+      // typed is what the viewer meant; a match buried mid-word rarely is —
+      // "мис" finding "Программисты" reads as a bug, not as a helpful extra.
       let score = -1;
       if (entry.folded.startsWith(folded)) score = 0;
       else if (entry.folded.includes(` ${folded}`)) score = 1;
+      // Same for the original title, half a step behind so it only breaks ties.
+      if (entry.foldedOrigin && entry.foldedOrigin !== entry.folded) {
+        let originScore = -1;
+        if (entry.foldedOrigin.startsWith(folded)) originScore = 0.5;
+        else if (entry.foldedOrigin.includes(` ${folded}`)) originScore = 1.5;
+        if (originScore >= 0 && (score < 0 || originScore < score)) score = originScore;
+      }
       if (score < 0) continue;
       if (entry.source === "history") score -= 0.3;
       else if (entry.source === "bookmark") score -= 0.2;
@@ -9700,7 +9716,8 @@ addEventListener('message', async (event) => {
     catch { /* a full or unavailable store must not break search */ }
   }
 
-  async function loadShard(letter) {
+  async function loadShard(rawLetter) {
+    const letter = `${rawLetter}:${TITLES_SHARD_VERSION}`;
     if (shardMemory.has(letter)) return shardMemory.get(letter);
     const cached = await readShard(letter);
     if (cached && Date.now() - cached.at < TITLES_SHARD_TTL_MS) {
@@ -9708,7 +9725,7 @@ addEventListener('message', async (event) => {
       return cached.rows;
     }
     const response = await fetchWithTimeout(
-      `${TITLES_INDEX_URL}?i=${encodeURIComponent(letter)}`, {}, 12000,
+      `${TITLES_INDEX_URL}?i=${encodeURIComponent(rawLetter)}&v=${TITLES_SHARD_VERSION}`, {}, 12000,
     );
     if (!response.ok) throw new Error(`index ${response.status}`);
     const rows = await response.json();
@@ -9717,21 +9734,39 @@ addEventListener('message', async (event) => {
     return rows;
   }
 
-  // [name, year, slug, type, embed_id, kp] — deliberately positional: at 81,700
-  // rows the key names would be most of the payload.
+  // [name, year, slug, isSeries, embed_id, kp, originName] — deliberately
+  // positional: at 81,700 rows the key names would be most of the payload.
+
+  // Exact first, then start-of-title, then start-of-word. A match buried
+  // mid-word is almost never what was meant.
+  const suggestScore = (folded, candidate) => {
+    if (!candidate) return -1;
+    if (candidate === folded) return 0;
+    if (candidate.startsWith(folded)) return 1;
+    if (candidate.includes(` ${folded}`)) return 2;
+    return -1;
+  };
+
   function matchShard(rows, query) {
     const folded = suggestFold(query);
     if (!folded) return [];
     const out = [];
     for (const row of rows) {
       const name = suggestFold(row[0]);
-      // Exact title first. Ordering purely by recency put «Брат 3» (2022) above
-      // «Брат» (1997) and pushed the film actually being searched for off the
-      // list entirely — for a short, famous title that reads as broken.
-      let score = -1;
-      if (name === folded) score = 0;
-      else if (name.startsWith(folded)) score = 1;
-      else if (name.includes(` ${folded}`)) score = 2;
+      // Ordering purely by recency put «Брат 3» (2022) above «Брат» (1997) and
+      // pushed the film actually being searched for off the list entirely — for
+      // a short, famous title that reads as broken.
+      let score = suggestScore(folded, name);
+      // The original title is searched as well, or the shard would carry English
+      // names it could never match: someone typing "Good Will Hunting" gets
+      // «Умница Уилл Хантинг», which is the whole point of mirroring both. Half
+      // a step behind an equally good Russian match, so the two orderings only
+      // ever break a tie rather than reshuffle the list.
+      const origin = row[6] ? suggestFold(row[6]) : "";
+      if (origin && origin !== name) {
+        const originScore = suggestScore(folded, origin);
+        if (originScore >= 0 && (score < 0 || originScore + 0.5 < score)) score = originScore + 0.5;
+      }
       if (score < 0) continue;
       out.push({ score, entry: {
         title: row[0], year: String(row[1] || ""), slug: row[2],

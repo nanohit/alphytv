@@ -10,3 +10,4 @@ worker/package-lock.json
 scripts/fixed-catalog.json
 soap-movies.json.tmp
 var/collaps-4k*/
+supabase/.temp/

@@ -10,24 +10,30 @@ const between = (t, a, b) => t.slice(t.indexOf(a), t.indexOf(b));
 const fold = (v) => String(v || "").toLowerCase().replace(/ё/g, "е")
   .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 
-function rank(index, query) {
-  const folded = fold(query);
-  if (!folded) return [];
-  const scored = [];
-  for (const e of index) {
-    let score = -1;
-    if (e.folded.startsWith(folded)) score = 0;
-    else if (e.folded.includes(` ${folded}`)) score = 1;
-    if (score < 0) continue;
-    if (e.source === "history") score -= 0.3;
-    else if (e.source === "bookmark") score -= 0.2;
-    scored.push({ e, score });
-  }
-  scored.sort((a, b) => a.score - b.score || a.e.title.localeCompare(b.e.title, "ru"));
-  return scored.map((s) => s.e.title);
-}
+const idx = (rows) => rows.map(([title, source = "catalog", origin = ""]) => ({
+  title, source, folded: fold(title), originName: origin, foldedOrigin: fold(origin),
+}));
 
-const idx = (rows) => rows.map(([title, source = "catalog"]) => ({ title, source, folded: fold(title) }));
+// Both tiers are exercised through the real matchers rather than copies of them:
+// a duplicate here would keep passing after app.js changed underneath it, which
+// is exactly how English search shipped broken in the first place.
+const { matchLocal, matchShard: realMatchShard } = await (async () => {
+  const app = await source();
+  const slice = (a, b) => app.slice(app.indexOf(a), app.indexOf(b));
+  const body = [
+    slice("const suggestFold = (value)", "function buildSuggestIndex"),
+    "const SUGGEST_LOCAL_LIMIT = 6, SUGGEST_REMOTE_LIMIT = 6;",
+    "let suggestIndex = [];",
+    slice("  function matchLocalSuggest", "  // Shards live in IndexedDB"),
+    slice("  // Exact first, then start-of-title", "function suggestRow(entry)"),
+    "return { matchShard, matchLocal: (index, query) => {",
+    "  suggestIndex = index; return matchLocalSuggest(query);",
+    "} };",
+  ].join("\n");
+  return new Function(body)();
+})();
+
+const rank = (index, query) => matchLocal(index, query).map((e) => e.title);
 
 test("a title that starts with what was typed outranks one where it starts a later word", () => {
   const index = idx([["Мистер Робот"], ["Загадочный мистер Фокс"], ["Мистерия"]]);
@@ -129,8 +135,8 @@ test("the index is served from Supabase, not from the Worker that builds it", as
 test("a suggestion without a known player id still opens", async () => {
   const app = await source();
   const block = between(app, "async function openIndexSuggestion", "function renderSuggest");
-  // The backfill has reached 6% of the catalogue, so most rows carry only a
-  // slug. Resolving it has to happen server-side: api.zombie-film.live does not
+  // The backfill has reached under half the catalogue, so most rows carry only
+  // a slug. Resolving it has to happen server-side: api.zombie-film.live does not
   // resolve from Russia at all.
   assert.match(block, /if \(!liftId\)/);
   assert.match(block, /\/resolve\?slug=/);
@@ -190,4 +196,66 @@ test("a suggestion row shows no type label, and a series still opens", async () 
   const match = between(app, "function matchShard", "function suggestRow");
   assert.match(match, /isSeries: !!row\[3\]/);
   assert.doesNotMatch(match, /row\[3\] !== 1/);
+});
+
+test("a title is found by its original name, not only its Russian one", () => {
+  // [name, year, slug, isSeries, embed_id, kp, originName]
+  const rows = [
+    ["Умница Уилл Хантинг", 1997, "umnica-uill-hanting", 0, null, "", "Good Will Hunting"],
+    ["Гуд бай, Ленин!", 2003, "gud-bay-lenin", 0, 11, "", "Good Bye Lenin!"],
+  ];
+  assert.deepEqual(realMatchShard(rows, "good will hu").map((e) => e.title), ["Умница Уилл Хантинг"]);
+  // Case and punctuation in the original title decide nothing either.
+  assert.deepEqual(realMatchShard(rows, "GOOD BYE LENIN").map((e) => e.title), ["Гуд бай, Ленин!"]);
+  // ...and the Russian name still works, unchanged.
+  assert.deepEqual(realMatchShard(rows, "умница").map((e) => e.title), ["Умница Уилл Хантинг"]);
+});
+
+test("an original-title match ranks just behind an equally good Russian one", () => {
+  const rows = [
+    ["Северное сияние", 2020, "severnoe", 0, 1, "", "Northern Lights"],
+    ["Разделение", 2022, "razdelenie", 1, 2, "", "Severance"],
+  ];
+  // Both are prefix matches for "sever"; the Russian name wins the tie, but the
+  // original title is still offered rather than dropped.
+  assert.deepEqual(
+    realMatchShard(rows, "север").map((e) => e.title),
+    ["Северное сияние"],
+  );
+  assert.deepEqual(
+    realMatchShard(rows, "sever").map((e) => e.title),
+    ["Разделение"],
+  );
+});
+
+test("a match buried inside a word of the original title is not a match", () => {
+  const rows = [["Овердрайв", 2017, "overdrive", 0, 1, "", "Overdrive"]];
+  assert.deepEqual(realMatchShard(rows, "drive"), []);
+  assert.deepEqual(realMatchShard(rows, "over").map((e) => e.title), ["Овердрайв"]);
+});
+
+test("a row with no original title is unaffected by original-title matching", () => {
+  const rows = [["Брат", 1997, "brat", 0, 1, "", ""], ["Брат 3", 2022, "brat-3", 0, 2, "", null]];
+  assert.deepEqual(realMatchShard(rows, "брат").map((e) => e.title), ["Брат", "Брат 3"]);
+});
+
+test("a shard holds titles matching either initial, and old cached shards are discarded", async () => {
+  const app = await source();
+  // Routing on the Russian initial alone is what made English search find
+  // nothing: "Good…" loaded the shard of titles whose RUSSIAN name starts with
+  // g, which «Умница Уилл Хантинг» is not in and never could be.
+  const fn = await readFile(new URL("../supabase/functions/titles/index.ts", import.meta.url), "utf8");
+  assert.match(fn, /or=\(initial\.eq\.\$\{[^}]+\},origin_initial\.eq\.\$\{[^}]+\}\)/);
+  // Shards sit in the viewer's IndexedDB for a week, so changing what a shard
+  // contains has to invalidate the copies already out there.
+  assert.match(app, /TITLES_SHARD_VERSION = \d+/);
+  const load = between(app, "async function loadShard", "function suggestScore");
+  assert.match(load, /`\$\{rawLetter\}:\$\{TITLES_SHARD_VERSION\}`/);
+  assert.match(load, /v=\$\{TITLES_SHARD_VERSION\}/);
+});
+
+test("something already watched is findable by its English name too", () => {
+  const index = idx([["Разделение", "history", "Severance"], ["Севастополь", "catalog"]]);
+  assert.deepEqual(rank(index, "severance"), ["Разделение"]);
+  assert.deepEqual(rank(index, "сев"), ["Севастополь"]);
 });
