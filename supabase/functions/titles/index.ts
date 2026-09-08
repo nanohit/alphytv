@@ -80,13 +80,18 @@ Deno.serve(async (req) => {
     }
     const max = Math.min(Number(url.searchParams.get("max")) || 6, 20);
     const only = (url.searchParams.get("letters") ?? "").trim();
+    // The whole queue, which cannot exceed the number of distinct initials. The
+    // timestamps are read BEFORE anything is built and remembered, because the
+    // delete afterwards is conditional on them — see below.
+    const queued: { letter: string; marked_at: string }[] = await (await fetch(
+      `${DIRTY}?select=letter,marked_at&order=marked_at.asc`, { headers: HEADERS },
+    )).json();
+    const marks = new Map(queued.map((r) => [r.letter, r.marked_at]));
     // An explicit list is for a full rebuild after a shape change; normally the
     // queue decides, so only letters whose rows actually moved are rewritten.
     const letters = only
       ? [...only].map(fold).filter((l, i, a) => a.indexOf(l) === i).slice(0, max)
-      : (await (await fetch(
-          `${DIRTY}?select=letter&order=marked_at.asc&limit=${max}`, { headers: HEADERS },
-        )).json()).map((r: { letter: string }) => r.letter);
+      : queued.slice(0, max).map((r) => r.letter);
 
     const built: string[] = [];
     const failed: string[] = [];
@@ -109,9 +114,20 @@ Deno.serve(async (req) => {
         built.push(letter);
         // Cleared only after the object is written, so a failed build is simply
         // retried on the next tick rather than silently dropping a letter.
-        await fetch(`${DIRTY}?letter=eq.${encodeURIComponent(letter)}`, {
-          method: "DELETE", headers: { ...HEADERS, Prefer: "return=minimal" },
-        });
+        //
+        // And only if nothing re-marked the letter since we read the queue. The
+        // unconditional delete lost updates: a change landing while a letter was
+        // being built found the letter already queued, changed nothing — the
+        // insert ignored duplicates — and was then deleted along with the mark it
+        // never got to make. The row was in Postgres and in no shard, and nothing
+        // would notice until something else happened to touch that letter.
+        const mark = marks.get(letter);
+        if (mark) {
+          await fetch(
+            `${DIRTY}?letter=eq.${encodeURIComponent(letter)}&marked_at=eq.${encodeURIComponent(mark)}`,
+            { method: "DELETE", headers: { ...HEADERS, Prefer: "return=minimal" } },
+          );
+        }
       } catch (error) {
         failed.push(`${letter}: ${String(error).slice(0, 80)}`);
       }
@@ -138,23 +154,12 @@ Deno.serve(async (req) => {
       body: JSON.stringify(rows),
     });
     if (!response.ok) return json({ error: await response.text() }, 502);
-    // Which shards this batch invalidated. Both initials, because a row appears
-    // in the shard for its Russian name and in the one for its original title.
-    const touched = new Set<string>();
-    for (const row of rows as Record<string, string>[]) {
-      for (const name of [row.name, row.origin_name]) {
-        const first = String(name ?? "").replace(/[^\p{L}\p{N}]+/gu, "").trim()[0];
-        if (first) touched.add(fold(first));
-      }
-    }
-    if (touched.size) {
-      await fetch(`${DIRTY}?on_conflict=letter`, {
-        method: "POST",
-        headers: { ...HEADERS, Prefer: "resolution=ignore-duplicates,return=minimal" },
-        body: JSON.stringify([...touched].map((letter) => ({ letter }))),
-      }).catch(() => {});
-    }
-    return json({ ok: true, rows: rows.length, dirty: touched.size });
+    // Nothing is queued here. Invalidation belongs to the database: a trigger on
+    // `titles` marks the shards of every row that changes, so /resolve and any
+    // future writer get it for free instead of each having to remember. Working
+    // it out here meant /resolve — which writes to the same table — queued
+    // nothing at all, and its write-back reached no viewer.
+    return json({ ok: true, rows: rows.length });
   }
 
   // Turn a slug into something playable. The client cannot do this itself:

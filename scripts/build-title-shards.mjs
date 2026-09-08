@@ -1,7 +1,7 @@
 // Full rebuild of the search-index shards into Supabase Storage.
 //
-// Day to day nothing runs this: the crawler's ingest marks the letters a batch
-// touched and the `titles` function rebuilds only those. This is the operator
+// Day to day nothing runs this: a trigger on `titles` marks the shards of every
+// row that changes and the `titles` function rebuilds only those. This is the operator
 // path — a shape change, a new mirror project, or a bucket that was emptied —
 // and it is deliberately a plain script rather than a function, because a full
 // build is ~100 letters of ten PostgREST pages each and has no business inside a
@@ -133,6 +133,13 @@ async function copyFromPrimary(letter) {
   return response.text();
 }
 
+// Read before building, for the same reason the function does: the delete after
+// an upload is conditional on the mark not having moved, so a change that lands
+// mid-build leaves the letter queued instead of being deleted along with it.
+const marks = new Map(MIRROR ? [] : (await (await fetch(
+  `${BASE}/rest/v1/shard_dirty?select=letter,marked_at`, { headers: HEADERS },
+)).json()).map((r) => [r.letter, r.marked_at]));
+
 console.log(`${letters.length} letters -> ${BASE}/storage/v1/object/public/${BUCKET}/v${SHARD_VERSION}/`);
 let bytes = 0;
 let biggest = { letter: "", kb: 0 };
@@ -143,10 +150,13 @@ for (const letter of letters) {
   const kb = Math.round(body.length / 1024);
   if (kb > biggest.kb) biggest = { letter, kb };
   process.stdout.write(`  ${letter} ${kb}KB\n`);
-  // Clear the queue entry: a letter just built is not dirty, whoever queued it.
-  // A mirror has no queue — it has no database at all.
-  if (!MIRROR) {
-    await fetch(`${BASE}/rest/v1/shard_dirty?letter=eq.${encodeURIComponent(letter)}`,
+  // Clear the queue entry, but only if nothing re-marked the letter while it was
+  // being built. A mirror has no queue — it has no database at all.
+  const mark = marks.get(letter);
+  if (!MIRROR && mark) {
+    await fetch(
+      `${BASE}/rest/v1/shard_dirty?letter=eq.${encodeURIComponent(letter)}` +
+      `&marked_at=eq.${encodeURIComponent(mark)}`,
       { method: "DELETE", headers: { ...HEADERS, Prefer: "return=minimal" } }).catch(() => {});
   }
 }

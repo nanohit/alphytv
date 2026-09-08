@@ -57,13 +57,71 @@ create trigger titles_initials_trg
   before insert or update of name, origin_name on titles
   for each row execute function titles_set_initials();
 
--- The rebuild queue. Ingest marks the letters a batch touched, /build pops them,
--- so a push rewrites only the shards it actually changed. At most one row per
--- distinct initial, so it never grows.
+-- The rebuild queue. /build pops letters from it, so a write rewrites only the
+-- shards it actually changed. At most one row per distinct initial, so it never
+-- grows.
 create table if not exists shard_dirty (
   letter    text primary key,
   marked_at timestamptz not null default now()
 );
+
+-- Invalidation belongs here and not in whoever writes the row.
+--
+-- It started life as a set computed inside the ingest handler, which meant
+-- /resolve — a second writer to the same table — queued nothing at all. Rows it
+-- wrote reached Postgres and no shard, so its whole purpose ("write it back and
+-- the next viewer gets it for free") bought nothing: viewers read a Storage
+-- snapshot, and the next one paid another request to the source for the same
+-- title. A trigger cannot be forgotten by a writer that did not exist yet.
+create or replace function titles_mark_shard_dirty() returns trigger
+language plpgsql as $fn$
+begin
+  -- DISTINCT is load-bearing. A row whose Russian and original initials are the
+  -- same letter — or whose initials did not change across an update, which is
+  -- most updates — proposes the same key twice in one statement, and ON CONFLICT
+  -- DO UPDATE then aborts with "cannot affect row a second time". That fails the
+  -- caller's write, not just the bookkeeping.
+  insert into shard_dirty (letter, marked_at)
+  select distinct letter, now() from (values
+    (new.initial), (new.origin_initial),
+    -- The shards a renamed row is LEAVING are stale too, so both sides count.
+    (case when tg_op = 'UPDATE' then old.initial end),
+    (case when tg_op = 'UPDATE' then old.origin_initial end)
+  ) as v(letter)
+  where letter is not null
+  -- Never ignore-duplicates. Bumping the timestamp is what tells a build already
+  -- in flight that its snapshot is stale: the builder deletes the queue entry
+  -- only if the mark still matches the one it read before it started. With
+  -- ignore-duplicates the second mark changed nothing and the unconditional
+  -- delete then threw it away — the change sat in Postgres, in no shard, and
+  -- nothing noticed until something else happened to touch that letter.
+  on conflict (letter) do update set marked_at = excluded.marked_at;
+  return null;
+end
+$fn$;
+
+-- Two triggers, because a WHEN clause cannot see TG_OP — it may reference only
+-- OLD and NEW, and OLD does not exist on an insert.
+drop trigger if exists titles_shard_dirty_ins on titles;
+drop trigger if exists titles_shard_dirty_upd on titles;
+
+create trigger titles_shard_dirty_ins
+  after insert on titles
+  for each row execute function titles_mark_shard_dirty();
+
+create trigger titles_shard_dirty_upd
+  after update of name, year, slug, is_series, embed_id, kp, origin_name on titles
+  for each row
+  -- Only what a shard actually carries, plus the two initials that decide which
+  -- shard carries it. A write that changes none of them invalidates nothing.
+  when (
+    (old.name, old.year, old.slug, old.is_series, old.embed_id, old.kp,
+     old.origin_name, old.initial, old.origin_initial)
+    is distinct from
+    (new.name, new.year, new.slug, new.is_series, new.embed_id, new.kp,
+     new.origin_name, new.initial, new.origin_initial)
+  )
+  execute function titles_mark_shard_dirty();
 
 -- The distinct initials, as one cheap read. Asking `titles` for them instead
 -- silently answers with the letters of the first thousand rows — PostgREST caps
