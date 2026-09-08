@@ -34,7 +34,7 @@ const REF = MIRROR || args.get("project") || PRIMARY;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const BUCKET = "index";
 // Must match TITLES_SHARD_VERSION in app.js and SHARD_VERSION in the function.
-const SHARD_VERSION = 2;
+const SHARD_VERSION = 3;
 const BASE = `https://${REF}.supabase.co`;
 const HEADERS = { apikey: KEY, Authorization: `Bearer ${KEY}` };
 
@@ -52,13 +52,13 @@ if (MIRROR && !args.has("letters") && !PRIMARY_KEY) {
 }
 
 // A letter names its object by codepoint, so the path is plain ASCII whatever
-// the alphabet. The index holds 86 distinct initials — Cyrillic, Latin, CJK.
+// the alphabet. The index is keyed by 97 distinct letters — Cyrillic, Latin, CJK.
 const shardPath = (letter) => `v${SHARD_VERSION}/${letter.codePointAt(0).toString(16)}.json`;
 const fold = (letter) => letter.toLowerCase().replace(/ё/, "е");
 
 async function rows(letter) {
-  const filter =
-    `or=(initial.eq.${encodeURIComponent(letter)},origin_initial.eq.${encodeURIComponent(letter)})`;
+  // Every word's first letter, not just the title's — see schema.sql.
+  const filter = `shard_keys=cs.${encodeURIComponent(`{"${letter}"}`)}`;
   const out = [];
   for (let from = 0; from < 20000; from += 1000) {
     const response = await fetch(

@@ -29,7 +29,7 @@ const STORAGE = `${Deno.env.get("SUPABASE_URL")}/storage/v1/object`;
 const BUCKET = "index";
 // Bumped with the client's TITLES_SHARD_VERSION: a shape change writes to a new
 // prefix instead of overwriting objects that viewers have already cached.
-const SHARD_VERSION = 2;
+const SHARD_VERSION = 3;
 // A letter names its object by codepoint, so a path is plain ASCII whatever the
 // alphabet — the index holds 97 distinct initials, Cyrillic and Latin and CJK.
 const shardPath = (letter: string) =>
@@ -41,8 +41,12 @@ const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 // Positional, and the order is the client's contract:
 // [name, year, slug, isSeries, embedId, kp, originName]
 async function shardRows(folded: string) {
-  const filter =
-    `or=(initial.eq.${encodeURIComponent(folded)},origin_initial.eq.${encodeURIComponent(folded)})`;
+  // Array-contains, not a single initial. A title belongs to the shard of every
+  // word it contains, in either language: routing on one initial meant
+  // «Пираты Карибского моря» existed only in shard п, so typing «карибского»
+  // fetched shard к and the row never reached the matcher — which has always
+  // been able to match it.
+  const filter = `shard_keys=cs.${encodeURIComponent(`{"${folded}"}`)}`;
   const rows: unknown[] = [];
   // PostgREST caps a page; the busiest letter runs to nine thousand titles.
   for (let from = 0; from < 20000; from += 1000) {
@@ -179,11 +183,25 @@ Deno.serve(async (req) => {
     // It also gives us the row id, so the write below is by primary key. Asking
     // PostgREST to filter on slug instead was a sequential scan of all 81,702
     // rows — 1035ms measured — on the write half of every single resolve.
-    const known = await fetch(`${REST}?select=id&slug=eq.${encodeURIComponent(slug)}&limit=1`,
+    const known = await fetch(
+      `${REST}?select=id,name,embed_id,kp,origin_name,is_series&slug=eq.${encodeURIComponent(slug)}&limit=1`,
       { headers: HEADERS });
     if (!known.ok) return json({ error: "index unavailable" }, 502);
-    const id = (await known.json())[0]?.id;
-    if (!id) return json({ error: "unknown slug" }, 404);
+    const row = (await known.json())[0];
+    if (!row) return json({ error: "unknown slug" }, 404);
+    // Already resolved: answer from our own table. Every valid slug is public —
+    // they are printed in the shards anyone can download — so a resolve that
+    // always went upstream was an unmetered way to drive traffic at the source
+    // through us, and it also charged a viewer a 1-2s round trip for something
+    // we already knew. Reached far more often than it looks, because a viewer's
+    // cached shard can be a week older than the table.
+    if (row.embed_id) {
+      return json({
+        slug, embed_id: row.embed_id, kp: row.kp ?? "", name: row.name ?? "",
+        origin_name: row.origin_name ?? "", is_series: !!row.is_series, cached: true,
+      }, 200, "public, max-age=3600");
+    }
+    const id = row.id;
     const ask = async (season: string) => {
       const query = new URLSearchParams({ slug, findBy: "init", all: "false", season, _format: "json" });
       const upstream = await fetch(

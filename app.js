@@ -9610,11 +9610,14 @@ addEventListener('message', async (event) => {
     "https://xoathqkggcuyoyutxwri.supabase.co/storage/v1/object/public/index",
   ];
   const TITLES_SHARD_TTL_MS = 7 * 24 * 3600e3;
+  // Below this the cached copy is used without asking. Above it, it is still
+  // used immediately and a conditional request refreshes it in the background.
+  const TITLES_SHARD_FRESH_MS = 30 * 60e3;
   // Bumped when the shard payload changes shape or contents. Shards live in the
   // viewer's IndexedDB for a week, so without this a browser that cached a
   // Russian-only shard would keep answering English queries with nothing until
   // that week ran out.
-  const TITLES_SHARD_VERSION = 2;
+  const TITLES_SHARD_VERSION = 3;
   const SUGGEST_DEBOUNCE_MS = 260;
   const SUGGEST_MIN_REMOTE = 3;
   const SUGGEST_LOCAL_LIMIT = 6;
@@ -9759,15 +9762,20 @@ addEventListener('message', async (event) => {
       TITLES_SHARD_HOSTS[(start + i) % TITLES_SHARD_HOSTS.length]);
   };
 
-  async function fetchShard(rawLetter) {
+  async function fetchShard(rawLetter, etag = "") {
     for (const host of shardHostOrder(rawLetter)) {
       try {
-        const response = await fetchWithTimeout(`${host}/${shardObject(rawLetter)}`, {}, 12000);
+        const response = await fetchWithTimeout(`${host}/${shardObject(rawLetter)}`,
+          etag ? { headers: { "If-None-Match": etag } } : {}, 12000);
+        // Unchanged since the copy we hold. Storage answers this in ~0.2s with
+        // no body at all, which is what makes revalidating cheap enough to do
+        // on every session.
+        if (response.status === 304) return { rows: null, etag };
         // A missing object answers 400 with a NoSuchKey body, not 404, so only
         // a real payload counts as an answer.
         if (response.ok) {
           const rows = await response.json();
-          if (Array.isArray(rows)) return rows;
+          if (Array.isArray(rows)) return { rows, etag: response.headers.get("ETag") || "" };
         }
       } catch { /* try the next mirror */ }
     }
@@ -9777,7 +9785,7 @@ addEventListener('message', async (event) => {
       `${TITLES_INDEX_URL}?i=${encodeURIComponent(rawLetter)}&v=${TITLES_SHARD_VERSION}`, {}, 15000,
     );
     if (!response.ok) throw new Error(`index ${response.status}`);
-    return response.json();
+    return { rows: await response.json(), etag: "" };
   }
 
   // In flight, by letter. The debounce only cancels a timer that has not fired
@@ -9788,6 +9796,25 @@ addEventListener('message', async (event) => {
   // stale answer off the screen; it does nothing about the duplicate request.
   const shardInFlight = new Map();
 
+  // Refresh a cached shard in the background. Nothing waits on it: the rows
+  // already returned are what this keystroke uses, and the next one picks up
+  // whatever landed. A failure leaves the cached copy exactly as it was.
+  function revalidateShard(rawLetter, letter, etag) {
+    if (shardInFlight.has(`~${letter}`)) return;
+    const done = fetchShard(rawLetter, etag)
+      .then(({ rows, etag: fresh }) => {
+        // 304: still current, so only the timestamp moves — otherwise every
+        // session after the first would revalidate again.
+        const kept = rows || shardMemory.get(letter);
+        if (!kept) return;
+        if (rows) shardMemory.set(letter, rows);
+        writeShard(letter, { at: Date.now(), rows: kept, etag: fresh || etag });
+      })
+      .catch(() => { /* the cached copy stands */ })
+      .finally(() => shardInFlight.delete(`~${letter}`));
+    shardInFlight.set(`~${letter}`, done);
+  }
+
   function loadShard(rawLetter) {
     const letter = `${rawLetter}:${TITLES_SHARD_VERSION}`;
     if (shardMemory.has(letter)) return Promise.resolve(shardMemory.get(letter));
@@ -9797,11 +9824,20 @@ addEventListener('message', async (event) => {
       const cached = await readShard(letter);
       if (cached && Date.now() - cached.at < TITLES_SHARD_TTL_MS) {
         shardMemory.set(letter, cached.rows);
+        // Served straight from the cache, then refreshed behind the viewer's
+        // back. Storage objects come back `no-cache` whatever we upload them
+        // with, so the CDN already revalidates and a rebuilt shard is visible
+        // there at once — but this copy is the viewer's own and had nothing
+        // checking it for a week. A title resolved on Monday was not findable
+        // by its original name until the following Monday.
+        if (Date.now() - cached.at > TITLES_SHARD_FRESH_MS) {
+          revalidateShard(rawLetter, letter, cached.etag || "");
+        }
         return cached.rows;
       }
-      const rows = await fetchShard(rawLetter);
+      const { rows, etag } = await fetchShard(rawLetter);
       shardMemory.set(letter, rows);
-      writeShard(letter, { at: Date.now(), rows });
+      writeShard(letter, { at: Date.now(), rows, etag });
       return rows;
     })();
     shardInFlight.set(letter, load);

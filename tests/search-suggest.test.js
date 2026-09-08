@@ -257,7 +257,10 @@ test("a shard holds titles matching either initial, and old cached shards are di
   // nothing: "Good…" loaded the shard of titles whose RUSSIAN name starts with
   // g, which «Умница Уилл Хантинг» is not in and never could be.
   const fn = await readFile(new URL("../supabase/functions/titles/index.ts", import.meta.url), "utf8");
-  assert.match(fn, /or=\(initial\.eq\.\$\{[^}]+\},origin_initial\.eq\.\$\{[^}]+\}\)/);
+  // A title belongs to the shard of every word it contains, in either language,
+  // so the query is an array-contains rather than a pair of initials. Routing is
+  // covered end to end in search-routing.test.js.
+  assert.match(fn, /shard_keys=cs\.\$\{encodeURIComponent\(`\{"\$\{folded\}"\}`\)\}/);
   // Shards sit in the viewer's IndexedDB for a week, so changing what a shard
   // contains has to invalidate the copies already out there — and the version
   // has to reach the object path too, or a new shape would overwrite objects
@@ -410,7 +413,8 @@ test("concurrent loads of one letter share a single fetch", async () => {
     "const readShard = async () => null;",
     "const writeShard = () => {};",
     "const TITLES_SHARD_TTL_MS = 1e9;",
-    "const fetchShard = async () => { onFetch(); await new Promise(r => setTimeout(r, 40)); return [['x']]; };",
+    "const TITLES_SHARD_FRESH_MS = 1e9;",
+    "const fetchShard = async () => { onFetch(); await new Promise(r => setTimeout(r, 40)); return { rows: [['x']], etag: 'e1' }; };",
     slice("  // In flight, by letter.", "  // [name, year, slug"),
     "return loadShard;",
   ].join("\n"))({ onFetch: () => { fetches += 1; }, TITLES_SHARD_VERSION: 2 });
