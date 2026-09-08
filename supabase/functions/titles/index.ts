@@ -74,15 +74,20 @@ Deno.serve(async (req) => {
       const raw = String(view.kpId ?? "");
       const kp = /^\d+$/.test(raw) && raw !== "0" ? raw : "";
       if (!embed) return json({ error: "no player for this title" }, 404);
-      // Write it back so the next viewer gets it from the index for free.
+      // Write it back so the next viewer gets it from the index for free. The
+      // series flag has to go with it: the crawler only set it on rows it
+      // reached, so without this a title stays marked as a film forever even
+      // after we have just proved otherwise by resolving its season.
+      const isSeries = !!view.season || !!view.seasonLast;
       await fetch(`${REST}?slug=eq.${encodeURIComponent(slug)}`, {
         method: "PATCH", headers: { ...HEADERS, Prefer: "return=minimal" },
-        body: JSON.stringify({ embed_id: embed, kp, origin_name: view.originName ?? null }),
+        body: JSON.stringify({
+          embed_id: embed, kp, origin_name: view.originName ?? null, is_series: isSeries,
+        }),
       }).catch(() => {});
       return json({
         slug, embed_id: embed, kp,
-        name: view.name ?? "", origin_name: view.originName ?? "",
-        is_series: !!view.season || !!view.seasonLast,
+        name: view.name ?? "", origin_name: view.originName ?? "", is_series: isSeries,
       }, 200, "public, max-age=3600");
     } catch (error) {
       return json({ error: String(error).slice(0, 120) }, 502);
