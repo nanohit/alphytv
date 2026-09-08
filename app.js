@@ -9609,6 +9609,10 @@ addEventListener('message', async (event) => {
   let suggestToken = 0;
   let suggestActive = -1;
   let suggestRows = [];
+  // The last set of index hits, kept across keystrokes so the next character
+  // narrows the list in place rather than emptying it for a quarter second.
+  let suggestRemote = [];
+  let suggestSignature = null;
 
   const suggestFold = (value) => String(value || "")
     .toLowerCase()
@@ -9715,6 +9719,9 @@ addEventListener('message', async (event) => {
     try { db.transaction("shards", "readwrite").objectStore("shards").put(value, letter); }
     catch { /* a full or unavailable store must not break search */ }
   }
+
+  const shardInMemory = (rawLetter) =>
+    shardMemory.get(`${rawLetter}:${TITLES_SHARD_VERSION}`) || null;
 
   async function loadShard(rawLetter) {
     const letter = `${rawLetter}:${TITLES_SHARD_VERSION}`;
@@ -9857,9 +9864,17 @@ addEventListener('message', async (event) => {
     });
   }
 
+  const suggestKey = (entry) => `${entry.source}|${suggestFold(entry.title)}|${entry.year}`;
+
   function renderSuggest(local, remote) {
     const host = el.searchSuggest;
     if (!host) return;
+    // Rebuilding an identical list is what made the dropdown blink on every
+    // keystroke: the rows were torn down and recreated even when they were the
+    // same rows. Same list, same DOM — and the highlighted row survives.
+    const signature = [...local, ...remote].map(suggestKey).join("\n");
+    if (signature === suggestSignature && host.firstChild) return;
+    suggestSignature = signature;
     suggestRows = [];
     const frag = document.createDocumentFragment();
     for (const entry of local) {
@@ -9868,10 +9883,11 @@ addEventListener('message', async (event) => {
       frag.appendChild(row);
     }
     if (remote.length) {
+      // A heavier line, not a caption: the two groups differ in where they came
+      // from, which the viewer neither knows nor needs to.
       if (local.length) {
         const rule = document.createElement("div");
         rule.className = "suggest-rule";
-        rule.textContent = "ещё в источниках";
         frag.appendChild(rule);
       }
       for (const entry of remote) {
@@ -9890,6 +9906,8 @@ addEventListener('message', async (event) => {
     suggestToken += 1;
     suggestActive = -1;
     suggestRows = [];
+    suggestRemote = [];
+    suggestSignature = null;
     el.searchSuggest?.replaceChildren();
     el.searchSuggest?.classList.add("hidden");
   }
@@ -9902,6 +9920,21 @@ addEventListener('message', async (event) => {
     return true;
   }
 
+  // A local hit and an index hit for the same film are the same film.
+  const withoutLocal = (remote, local) => {
+    const seen = new Set(local.map((entry) => `${suggestFold(entry.title)}|${entry.year}`));
+    return remote.filter((entry) => !seen.has(`${suggestFold(entry.title)}|${entry.year}`));
+  };
+
+  // What the rows already on screen still match, now that another character has
+  // been typed. Cheap — they are at most six — and it turns the wait for a cold
+  // shard into the list narrowing rather than the list vanishing.
+  const stillMatching = (entries, query) => {
+    const folded = suggestFold(query);
+    return entries.filter((entry) => suggestScore(folded, entry.folded) >= 0
+      || suggestScore(folded, suggestFold(entry.originName)) >= 0);
+  };
+
   function onSuggestInput() {
     const query = el.searchInput.value.trim();
     clearTimeout(suggestTimer);
@@ -9911,16 +9944,30 @@ addEventListener('message', async (event) => {
       return;
     }
     const local = matchLocalSuggest(query);
-    renderSuggest(local, []);
-    if (query.length < SUGGEST_MIN_REMOTE) return;
+    if (query.length < SUGGEST_MIN_REMOTE) {
+      suggestRemote = [];
+      renderSuggest(local, suggestRemote);
+      return;
+    }
+    // The shard for this letter is usually already in memory by the second
+    // keystroke, and then there is nothing to wait for: matching it here means
+    // the list simply changes, with no empty frame in between and no timer.
+    const warm = shardInMemory(suggestFold(query)[0]);
+    if (warm) {
+      suggestRemote = withoutLocal(matchShard(warm, query), local);
+      renderSuggest(local, suggestRemote);
+      return;
+    }
+    // Cold shard: keep showing what is still right rather than blanking the
+    // list for the length of the debounce.
+    suggestRemote = stillMatching(suggestRemote, query);
+    renderSuggest(local, suggestRemote);
     suggestTimer = setTimeout(() => {
       loadShard(suggestFold(query)[0])
         .then((rows) => {
           if (token !== suggestToken || el.searchInput.value.trim() !== query) return;
-          const seen = new Set(local.map((entry) => `${suggestFold(entry.title)}|${entry.year}`));
-          const remote = matchShard(rows, query)
-            .filter((entry) => !seen.has(`${suggestFold(entry.title)}|${entry.year}`));
-          renderSuggest(local, remote);
+          suggestRemote = withoutLocal(matchShard(rows, query), local);
+          renderSuggest(local, suggestRemote);
         })
         .catch((error) => log("suggest-index-warn", error.message));
     }, SUGGEST_DEBOUNCE_MS);

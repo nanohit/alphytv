@@ -26,11 +26,23 @@ const { matchLocal, matchShard: realMatchShard } = await (async () => {
     "let suggestIndex = [];",
     slice("  function matchLocalSuggest", "  // Shards live in IndexedDB"),
     slice("  // Exact first, then start-of-title", "function suggestRow(entry)"),
-    "return { matchShard, matchLocal: (index, query) => {",
+    slice("  // A local hit and an index hit", "  function onSuggestInput"),
+    "return { matchShard, stillMatching, withoutLocal, matchLocal: (index, query) => {",
     "  suggestIndex = index; return matchLocalSuggest(query);",
     "} };",
   ].join("\n");
   return new Function(body)();
+})();
+
+const { stillMatching, withoutLocal } = await (async () => {
+  const app = await source();
+  const slice = (a, b) => app.slice(app.indexOf(a), app.indexOf(b));
+  return new Function([
+    slice("const suggestFold = (value)", "function buildSuggestIndex"),
+    slice("  // Exact first, then start-of-title", "  function matchShard"),
+    slice("  // A local hit and an index hit", "  function onSuggestInput"),
+    "return { stillMatching, withoutLocal };",
+  ].join("\n"))();
 })();
 
 const rank = (index, query) => matchLocal(index, query).map((e) => e.title);
@@ -258,4 +270,56 @@ test("something already watched is findable by its English name too", () => {
   const index = idx([["Разделение", "history", "Severance"], ["Севастополь", "catalog"]]);
   assert.deepEqual(rank(index, "severance"), ["Разделение"]);
   assert.deepEqual(rank(index, "сев"), ["Севастополь"]);
+});
+
+test("another character narrows the list on screen instead of emptying it", () => {
+  // What is already rendered when a cold shard is still being fetched. Keeping
+  // the rows that still match is the difference between the list narrowing and
+  // the list blinking out for the length of the debounce.
+  const shown = [
+    { title: "Атака Титанов: Последняя атака", folded: "атака титанов последняя атака", originName: "" },
+    { title: "Атака титанов: Потерянные девочки", folded: "атака титанов потерянные девочки", originName: "Shingeki no Kyojin: Lost Girls" },
+    { title: "Атакама", folded: "атакама", originName: "Atacama" },
+  ];
+  assert.deepEqual(stillMatching(shown, "атака тита").map((e) => e.title),
+    ["Атака Титанов: Последняя атака", "Атака титанов: Потерянные девочки"]);
+  // A row kept only by its original title survives too.
+  assert.deepEqual(stillMatching(shown, "shingeki").map((e) => e.title),
+    ["Атака титанов: Потерянные девочки"]);
+  // And a character that rules everything out does empty it, rather than
+  // leaving stale rows standing.
+  assert.deepEqual(stillMatching(shown, "атакаz"), []);
+});
+
+test("a film already shown from history is not repeated by the index", () => {
+  const local = [{ title: "Разделение", year: "2022" }];
+  const remote = [
+    { title: "Разделение", year: "2022" },
+    { title: "Разделение", year: "2009" },
+  ];
+  assert.deepEqual(withoutLocal(remote, local).map((e) => e.year), ["2009"]);
+});
+
+test("a warm shard answers on the keystroke, with no timer and no empty frame", async () => {
+  const app = await source();
+  const block = between(app, "function onSuggestInput", "function onSearchSubmit()");
+  // The shard for a letter is in memory from the second keystroke onward, so
+  // there is nothing to wait for and nothing to clear in the meantime.
+  assert.match(block, /const warm = shardInMemory\(/);
+  const warmPath = block.slice(block.indexOf("const warm ="), block.indexOf("// Cold shard"));
+  assert.match(warmPath, /renderSuggest\(local, suggestRemote\)/);
+  assert.doesNotMatch(warmPath, /setTimeout/);
+  // Nothing on any path renders an empty remote list just to refill it.
+  assert.doesNotMatch(block, /renderSuggest\(local, \[\]\)/);
+});
+
+test("an unchanged list is not rebuilt, and the divider carries no caption", async () => {
+  const app = await source();
+  const render = between(app, "function renderSuggest", "function closeSuggest");
+  // Recreating identical rows is a repaint and loses the highlighted row.
+  assert.match(render, /signature === suggestSignature/);
+  // The two groups differ only in where the rows came from, which is ours to
+  // know and not the viewer's.
+  assert.doesNotMatch(render, /ещё в источниках/);
+  assert.doesNotMatch(app, /ещё в источниках/);
 });

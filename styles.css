@@ -1348,7 +1348,10 @@ body.admin-mode .curated-row .card.drop-after .card-media {
 }
 .suggest-row:last-child { border-bottom: 0; }
 .suggest-row:hover, .suggest-row.active { background: rgba(255,255,255,.07); }
-.suggest-title { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.suggest-title {
+  flex: 0 1 auto; min-width: 0; max-width: 72%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* The year sits immediately after the title rather than pinned to the right
    edge: at the far end it read as a separate column and the eye had to travel
    for it. Lighter than the title, but not as quiet as the original name. */
@@ -1360,17 +1363,29 @@ body.admin-mode .curated-row .card.drop-after .card-media {
 /* Titles already watched or saved are the likeliest pick, so they read as
    knowns rather than as another row of search results. */
 .suggest-history .suggest-title, .suggest-bookmark .suggest-title { color: var(--accent); }
+/* Just a heavier version of the line between rows. The negative margin eats the
+   1px border of the row above so the two do not stack into a 3px band. */
 .suggest-rule {
-  padding: 6px 13px; color: var(--muted); font-size: 10px;
-  letter-spacing: .1em; text-transform: uppercase;
-  background: rgba(255,255,255,.03);
-  border-block: 1px solid rgba(255,255,255,.05);
+  height: 2px; margin-top: -1px; flex: none;
+  background: rgba(255,255,255,.18);
 }
 
-/* On a phone the header is narrow enough that matching the input exactly leaves
-   the list looking cramped and slightly off-centre, so there it spans the row
-   and only the right edge stays aligned. */
+/* On a phone the field itself is only ~170px — logo, search and bookmark
+   buttons take the rest of the row — so matching its width left titles cut to
+   four words. The list is anchored by its right edge to the container instead
+   and spans the full content width; 90px is the two 40px buttons and the two
+   5px gaps between them and the field. */
 @media (max-width: 560px) {
-  .search-suggest { left: -54px; }
-  .suggest-title { max-width: 55%; }
+  .search-suggest { left: auto; right: -90px; width: calc(100vw - 24px); }
+  /* Two lines rather than one: a title, its year beside it, and the original
+     name under both. Everything fits at a readable size, and nothing but a
+     genuinely long title is ever clipped. */
+  .suggest-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline; column-gap: 8px; row-gap: 1px;
+    padding: 8px 12px; font-size: 13.5px;
+  }
+  .suggest-title { grid-column: 1; max-width: none; }
+  .suggest-year { grid-column: 2; }
+  .suggest-origin { grid-column: 1 / -1; font-size: 11.5px; }
 }
