@@ -1,24 +1,65 @@
-// Serves the mirrored catalogue as one shard per first letter.
+// Builds the mirrored catalogue into one static shard per first letter, and
+// serves a shard directly as a fallback.
 //
-// It lives here rather than on the Cloudflare Worker that builds it because
-// Workers are throttled from Russia, which is the audience. The crawler stays on
-// Cloudflare — it only ever talks to the source, never to a viewer.
+// It lives here rather than on the Cloudflare Worker that builds the index
+// because Workers are throttled from Russia, which is the audience. The crawler
+// stays on Cloudflare — it only ever talks to the source, never to a viewer.
 //
-// A shard is downloaded once and then matched in the browser, so the only
-// latency that matters is this one fetch; everything after it is local.
+// Viewers do NOT normally reach this function at all. Cloudflare sits in front
+// of Supabase Functions with `cf-cache-status: DYNAMIC` — it never caches a
+// function response, whatever Cache-Control says — so every shard request used
+// to re-run this code and re-read Postgres: 1.7-2.3s and up to ten PostgREST
+// pages for one letter, per viewer, forever. Storage objects ARE cached by that
+// same CDN (measured: MISS then HIT, 0.13s), so the shards are written there and
+// the browser reads them directly. This function is then only the builder, plus
+// the fallback for a letter whose object does not exist yet.
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 const REST = `${Deno.env.get("SUPABASE_URL")}/rest/v1/titles`;
+const DIRTY = `${Deno.env.get("SUPABASE_URL")}/rest/v1/shard_dirty`;
 const KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const HEADERS = { apikey: KEY, Authorization: `Bearer ${KEY}`, "Content-Type": "application/json" };
 // The crawler proves itself with this rather than the service key, which must
 // never leave Supabase.
 const PUSH_TOKEN = Deno.env.get("PUSH_TOKEN") ?? "";
+const STORAGE = `${Deno.env.get("SUPABASE_URL")}/storage/v1/object`;
+const BUCKET = "index";
+// Bumped with the client's TITLES_SHARD_VERSION: a shape change writes to a new
+// prefix instead of overwriting objects that viewers have already cached.
+const SHARD_VERSION = 2;
+// A letter names its object by codepoint, so a path is plain ASCII whatever the
+// alphabet — the index holds 97 distinct initials, Cyrillic and Latin and CJK.
+const shardPath = (letter: string) =>
+  `v${SHARD_VERSION}/${letter.codePointAt(0)!.toString(16)}.json`;
+const fold = (letter: string) => letter.toLowerCase().replace(/ё/, "е");
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+// Positional, and the order is the client's contract:
+// [name, year, slug, isSeries, embedId, kp, originName]
+async function shardRows(folded: string) {
+  const filter =
+    `or=(initial.eq.${encodeURIComponent(folded)},origin_initial.eq.${encodeURIComponent(folded)})`;
+  const rows: unknown[] = [];
+  // PostgREST caps a page; the busiest letter runs to nine thousand titles.
+  for (let from = 0; from < 20000; from += 1000) {
+    const response = await fetch(
+      `${REST}?select=name,origin_name,year,slug,is_series,embed_id,kp&${filter}` +
+      `&order=year.desc.nullslast,name.asc`,
+      { headers: { ...HEADERS, Range: `${from}-${from + 999}` } },
+    );
+    if (!response.ok) throw new Error(`upstream ${response.status}`);
+    const page = await response.json();
+    rows.push(...page.map((r: Record<string, unknown>) => [
+      r.name, r.year, r.slug, r.is_series ? 1 : 0, r.embed_id, r.kp ?? "", r.origin_name ?? "",
+    ]));
+    if (page.length < 1000) break;
+  }
+  return rows;
+}
 
 const json = (body: unknown, status = 200, cache = "no-store") =>
   new Response(JSON.stringify(body), {
@@ -29,6 +70,60 @@ const json = (body: unknown, status = 200, cache = "no-store") =>
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   const url = new URL(req.url);
+
+  // Rebuild shards into Storage. Bounded per call — an edge function has a
+  // budget and the busiest letter is ten PostgREST pages — so the crawler simply
+  // calls it again on its next tick until `remaining` reaches zero.
+  if (url.pathname.endsWith("/build")) {
+    if (!PUSH_TOKEN || req.headers.get("x-push-token") !== PUSH_TOKEN) {
+      return json({ error: "forbidden" }, 403);
+    }
+    const max = Math.min(Number(url.searchParams.get("max")) || 6, 20);
+    const only = (url.searchParams.get("letters") ?? "").trim();
+    // An explicit list is for a full rebuild after a shape change; normally the
+    // queue decides, so only letters whose rows actually moved are rewritten.
+    const letters = only
+      ? [...only].map(fold).filter((l, i, a) => a.indexOf(l) === i).slice(0, max)
+      : (await (await fetch(
+          `${DIRTY}?select=letter&order=marked_at.asc&limit=${max}`, { headers: HEADERS },
+        )).json()).map((r: { letter: string }) => r.letter);
+
+    const built: string[] = [];
+    const failed: string[] = [];
+    for (const letter of letters) {
+      try {
+        const body = JSON.stringify(await shardRows(letter));
+        const upload = await fetch(`${STORAGE}/${BUCKET}/${shardPath(letter)}`, {
+          method: "POST",
+          headers: {
+            apikey: KEY, Authorization: `Bearer ${KEY}`,
+            "Content-Type": "application/json",
+            // A day at the CDN. The client keeps its own copy for a week and a
+            // shape change moves to a new prefix, so staleness cannot outlive it.
+            "Cache-Control": "public, max-age=86400",
+            "x-upsert": "true",
+          },
+          body,
+        });
+        if (!upload.ok) throw new Error(`storage ${upload.status}`);
+        built.push(letter);
+        // Cleared only after the object is written, so a failed build is simply
+        // retried on the next tick rather than silently dropping a letter.
+        await fetch(`${DIRTY}?letter=eq.${encodeURIComponent(letter)}`, {
+          method: "DELETE", headers: { ...HEADERS, Prefer: "return=minimal" },
+        });
+      } catch (error) {
+        failed.push(`${letter}: ${String(error).slice(0, 80)}`);
+      }
+    }
+    const left = await fetch(`${DIRTY}?select=letter`, {
+      headers: { ...HEADERS, Prefer: "count=exact", Range: "0-0" },
+    });
+    return json({
+      built, failed,
+      remaining: Number(left.headers.get("content-range")?.split("/")[1] ?? 0),
+    });
+  }
 
   // Ingest, from the Cloudflare crawler only.
   if (req.method === "POST") {
@@ -43,7 +138,23 @@ Deno.serve(async (req) => {
       body: JSON.stringify(rows),
     });
     if (!response.ok) return json({ error: await response.text() }, 502);
-    return json({ ok: true, rows: rows.length });
+    // Which shards this batch invalidated. Both initials, because a row appears
+    // in the shard for its Russian name and in the one for its original title.
+    const touched = new Set<string>();
+    for (const row of rows as Record<string, string>[]) {
+      for (const name of [row.name, row.origin_name]) {
+        const first = String(name ?? "").replace(/[^\p{L}\p{N}]+/gu, "").trim()[0];
+        if (first) touched.add(fold(first));
+      }
+    }
+    if (touched.size) {
+      await fetch(`${DIRTY}?on_conflict=letter`, {
+        method: "POST",
+        headers: { ...HEADERS, Prefer: "resolution=ignore-duplicates,return=minimal" },
+        body: JSON.stringify([...touched].map((letter) => ({ letter }))),
+      }).catch(() => {});
+    }
+    return json({ ok: true, rows: rows.length, dirty: touched.size });
   }
 
   // Turn a slug into something playable. The client cannot do this itself:
@@ -107,25 +218,11 @@ Deno.serve(async (req) => {
   const letter = (url.searchParams.get("i") ?? "").trim();
   if ([...letter].length !== 1) return json({ error: "one letter expected" }, 400);
   const folded = letter.toLowerCase().replace(/ё/, "е");
-  const shardFilter = `or=(initial.eq.${encodeURIComponent(folded)},origin_initial.eq.${encodeURIComponent(folded)})`;
-
-  const rows: unknown[] = [];
-  // PostgREST caps a page; a busy letter runs to several thousand titles.
-  for (let from = 0; from < 20000; from += 1000) {
-    const response = await fetch(
-      `${REST}?select=name,origin_name,year,slug,is_series,embed_id,kp&${shardFilter}&order=year.desc.nullslast,name.asc`,
-      { headers: { ...HEADERS, Range: `${from}-${from + 999}` } },
-    );
-    if (!response.ok) return json({ error: "upstream" }, 502);
-    const page = await response.json();
-    // Positional, and the order is the client's contract:
-    // [name, year, slug, isSeries, embedId, kp, originName]
-    rows.push(...page.map((r: Record<string, unknown>) => [
-      r.name, r.year, r.slug, r.is_series ? 1 : 0, r.embed_id, r.kp ?? "", r.origin_name ?? "",
-    ]));
-    if (page.length < 1000) break;
+  // Only reached for a letter whose Storage object is missing — a brand new
+  // initial, or the moment before the first build. Correct but slow, by design.
+  try {
+    return json(await shardRows(folded), 200, "public, max-age=86400");
+  } catch {
+    return json({ error: "upstream" }, 502);
   }
-  // A day: the catalogue gains a handful of titles a day and the client keeps
-  // its own copy anyway.
-  return json(rows, 200, "public, max-age=86400");
 });

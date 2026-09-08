@@ -9594,6 +9594,21 @@ addEventListener('message', async (event) => {
   // once and then matched locally. It is served from Supabase rather than the
   // Cloudflare Worker that builds it because Workers are throttled from Russia.
   const TITLES_INDEX_URL = "https://xoathqkggcuyoyutxwri.supabase.co/functions/v1/titles";
+  // Shards are read as static objects from Supabase Storage, never from the
+  // function above. Cloudflare fronts Supabase Functions with
+  // `cf-cache-status: DYNAMIC` — it does not cache a function response whatever
+  // Cache-Control says — so every shard fetch used to re-run the function and
+  // re-read Postgres: 2.25s and up to ten queries per letter, per viewer.
+  // Storage objects go through the same CDN and are cached: 0.20s, brotli, and
+  // the database is not touched at all.
+  //
+  // More than one host here turns into a ring routed by the letter, the same
+  // shape as the Letterboxd and LiftW relays: a project's free egress is finite,
+  // and spreading the letters across accounts multiplies it while making any one
+  // project's failure a failover rather than an outage.
+  const TITLES_SHARD_HOSTS = [
+    "https://xoathqkggcuyoyutxwri.supabase.co/storage/v1/object/public/index",
+  ];
   const TITLES_SHARD_TTL_MS = 7 * 24 * 3600e3;
   // Bumped when the shard payload changes shape or contents. Shards live in the
   // viewer's IndexedDB for a week, so without this a browser that cached a
@@ -9723,6 +9738,41 @@ addEventListener('message', async (event) => {
   const shardInMemory = (rawLetter) =>
     shardMemory.get(`${rawLetter}:${TITLES_SHARD_VERSION}`) || null;
 
+  // An object is named by the letter's codepoint, so the path is plain ASCII
+  // whatever the alphabet — the index holds 86 distinct initials, Cyrillic and
+  // Latin and CJK, and several of them are not URL-safe.
+  const shardObject = (letter) =>
+    `v${TITLES_SHARD_VERSION}/${letter.codePointAt(0).toString(16)}.json`;
+
+  // A letter always starts at the same host, so its CDN entry is worth having,
+  // and letters spread evenly. The rest of the ring is failover.
+  const shardHostOrder = (letter) => {
+    const start = letter.codePointAt(0) % TITLES_SHARD_HOSTS.length;
+    return TITLES_SHARD_HOSTS.map((_, i) =>
+      TITLES_SHARD_HOSTS[(start + i) % TITLES_SHARD_HOSTS.length]);
+  };
+
+  async function fetchShard(rawLetter) {
+    for (const host of shardHostOrder(rawLetter)) {
+      try {
+        const response = await fetchWithTimeout(`${host}/${shardObject(rawLetter)}`, {}, 12000);
+        // A missing object answers 400 with a NoSuchKey body, not 404, so only
+        // a real payload counts as an answer.
+        if (response.ok) {
+          const rows = await response.json();
+          if (Array.isArray(rows)) return rows;
+        }
+      } catch { /* try the next mirror */ }
+    }
+    // The function builds a shard live. Only reached for a letter that has never
+    // been built — a brand new initial — so it is correct but slow, by design.
+    const response = await fetchWithTimeout(
+      `${TITLES_INDEX_URL}?i=${encodeURIComponent(rawLetter)}&v=${TITLES_SHARD_VERSION}`, {}, 15000,
+    );
+    if (!response.ok) throw new Error(`index ${response.status}`);
+    return response.json();
+  }
+
   async function loadShard(rawLetter) {
     const letter = `${rawLetter}:${TITLES_SHARD_VERSION}`;
     if (shardMemory.has(letter)) return shardMemory.get(letter);
@@ -9731,11 +9781,7 @@ addEventListener('message', async (event) => {
       shardMemory.set(letter, cached.rows);
       return cached.rows;
     }
-    const response = await fetchWithTimeout(
-      `${TITLES_INDEX_URL}?i=${encodeURIComponent(rawLetter)}&v=${TITLES_SHARD_VERSION}`, {}, 12000,
-    );
-    if (!response.ok) throw new Error(`index ${response.status}`);
-    const rows = await response.json();
+    const rows = await fetchShard(rawLetter);
     shardMemory.set(letter, rows);
     writeShard(letter, { at: Date.now(), rows });
     return rows;

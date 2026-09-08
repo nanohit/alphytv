@@ -42,9 +42,14 @@ const PUBLISH_BATCH = 500;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // SQLite's lower() is ASCII-only, so folding has to happen here or every
-// Cyrillic shard comes back empty. ё and й are folded together with е and и the
-// same way the client's matcher does, or the two would disagree about shards.
-const initialOf = (name) => (String(name || "").trim()[0] || "").toLowerCase().replace(/ё/, "е");
+// Cyrillic shard comes back empty. ё is folded to е the same way the client's
+// matcher does, or the two would disagree about shards.
+//
+// Leading punctuation is dropped for the same reason: the client strips it
+// before it picks a letter, so «Авария» – дочь мента filed under « was in a
+// shard no viewer can ever ask for. 101 titles were invisible that way.
+const initialOf = (name) =>
+  (String(name || "").replace(/[^\p{L}\p{N}]+/gu, "").trim()[0] || "").toLowerCase().replace(/ё/, "е");
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 async function getMeta(db, key, fallback = null) {
@@ -292,6 +297,32 @@ async function publish(env, db, deadline) {
   return sent;
 }
 
+// Turn the rows just published into static shards. Viewers read those objects
+// from a CDN and never reach a function or the database, so this is what makes
+// a push visible. Bounded on the far side — it rebuilds a few letters per call —
+// and it is simply asked again on the next tick until nothing is left dirty.
+async function rebuildShards(env, db) {
+  if (!env.PUSH_TOKEN) return null;
+  try {
+    const response = await fetch(`${PUBLISH_URL}/build?max=6`, {
+      method: "POST",
+      headers: { "x-push-token": env.PUSH_TOKEN },
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!response.ok) throw new Error(`http ${response.status}`);
+    const body = await response.json();
+    if (body?.failed?.length) {
+      await setMeta(db, "last_build_error", `${new Date().toISOString()} ${body.failed[0]}`);
+    }
+    return body;
+  } catch (error) {
+    // A build that did not happen is not a reason to stop crawling: the letters
+    // stay queued and the next tick tries again.
+    await setMeta(db, "last_build_error", `${new Date().toISOString()} ${String(error).slice(0, 160)}`);
+    return null;
+  }
+}
+
 async function runOnce(env) {
   const db = env.DB;
   const pausedUntil = Number(await getMeta(db, "paused_until", "0"));
@@ -335,7 +366,8 @@ async function runOnce(env) {
     }
     const filled = await fillKpIds(env, db, deadline);
     const published = await publish(env, db, Date.now() + 20_000);
-    return { filled, published };
+    const shards = await rebuildShards(env, db);
+    return { filled, published, shards };
   } finally {
     await setMeta(db, "running_until", "0");
   }

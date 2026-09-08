@@ -259,11 +259,63 @@ test("a shard holds titles matching either initial, and old cached shards are di
   const fn = await readFile(new URL("../supabase/functions/titles/index.ts", import.meta.url), "utf8");
   assert.match(fn, /or=\(initial\.eq\.\$\{[^}]+\},origin_initial\.eq\.\$\{[^}]+\}\)/);
   // Shards sit in the viewer's IndexedDB for a week, so changing what a shard
-  // contains has to invalidate the copies already out there.
+  // contains has to invalidate the copies already out there — and the version
+  // has to reach the object path too, or a new shape would overwrite objects
+  // that browsers and the CDN are still serving from the old one.
   assert.match(app, /TITLES_SHARD_VERSION = \d+/);
   const load = between(app, "async function loadShard", "function suggestScore");
   assert.match(load, /`\$\{rawLetter\}:\$\{TITLES_SHARD_VERSION\}`/);
-  assert.match(load, /v=\$\{TITLES_SHARD_VERSION\}/);
+  const object = between(app, "const shardObject =", "const shardHostOrder");
+  assert.match(object, /v\$\{TITLES_SHARD_VERSION\}/);
+});
+
+test("shards are read as static objects, not from the function", async () => {
+  const app = await source();
+  const fetchShard = between(app, "async function fetchShard", "async function loadShard");
+  // Cloudflare fronts Supabase Functions with cf-cache-status: DYNAMIC and never
+  // caches one, so a shard served by the function re-read Postgres for every
+  // viewer — measured at 2.25s against 0.20s for the cached Storage object.
+  assert.match(fetchShard, /shardHostOrder\(rawLetter\)/);
+  assert.match(fetchShard, /shardObject\(rawLetter\)/);
+  assert.match(app, /TITLES_SHARD_HOSTS = \[/);
+  assert.match(between(app, "const TITLES_SHARD_HOSTS", "const TITLES_SHARD_TTL_MS"),
+    /storage\/v1\/object\/public/);
+  // The function stays reachable, but only after every mirror has been tried:
+  // it is the answer for a letter whose object has never been built.
+  assert.ok(fetchShard.indexOf("TITLES_INDEX_URL") > fetchShard.indexOf("shardHostOrder"));
+  // A missing object answers 400 with a NoSuchKey body, so `ok` is not enough
+  // on its own to call something a shard.
+  assert.match(fetchShard, /Array\.isArray\(rows\)/);
+});
+
+test("a letter always starts at the same mirror, and every mirror is tried", () => {
+  // The ring, extracted rather than restated: with one host it is a no-op, and
+  // adding a project has to keep a letter pinned to one CDN entry.
+  const order = (hosts, letter) => {
+    const start = letter.codePointAt(0) % hosts.length;
+    return hosts.map((_, i) => hosts[(start + i) % hosts.length]);
+  };
+  const hosts = ["a", "b", "c", "d"];
+  assert.deepEqual(order(["only"], "п"), ["only"]);
+  // Stable per letter…
+  assert.deepEqual(order(hosts, "п"), order(hosts, "п"));
+  // …and every host is reachable as a fallback, none dropped.
+  assert.deepEqual([...order(hosts, "т")].sort(), hosts);
+  // Letters do not all land on the same host.
+  const heads = new Set([..."абвгдежзик"].map((l) => order(hosts, l)[0]));
+  assert.ok(heads.size > 1, "letters must spread across the ring");
+});
+
+test("an object is named by codepoint, so any alphabet gives an ASCII path", async () => {
+  const app = await source();
+  const shardObject = new Function("TITLES_SHARD_VERSION", [
+    between(app, "const shardObject =", "const shardHostOrder"),
+    "return shardObject;",
+  ].join("\n"))(2);
+  assert.equal(shardObject("п"), "v2/43f.json");
+  assert.equal(shardObject("a"), "v2/61.json");
+  // Not URL-safe as a path segment, and exactly why the codepoint is used.
+  assert.equal(shardObject("«"), "v2/ab.json");
 });
 
 test("something already watched is findable by its English name too", () => {
