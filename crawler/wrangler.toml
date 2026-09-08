@@ -3,13 +3,18 @@ main = "src/index.js"
 compatibility_date = "2026-06-14"
 workers_dev = true
 
-# One invocation per minute. Each does a small, paced batch and exits, so a
-# killed or overlapping run loses at most that batch — the cursor is in D1.
-# Crawl finished 2026-08-28 — the catalogue is mirrored and the kpId backfill
-# reached its useful depth. Re-enable only to refresh; note that phase 2 full
-# scans D1 on every batch, which is what blew the free row-read limit.
-# [triggers]
-# crons = ["*/2 * * * *"]
+# One invocation every two minutes. Each does a small, paced batch and exits, so
+# a killed or overlapping run loses at most that batch — the cursor is in D1.
+#
+# This block is declared rather than commented out because it is ON. Commenting
+# it out does NOT remove the schedule from Cloudflare — wrangler only writes the
+# triggers a config declares and leaves an existing schedule alone — so the
+# "stopped" crawl of 2026-08-28 in fact kept firing every two minutes for eleven
+# days while the file said otherwise. To actually stop it, delete the schedule on
+# the account:
+#   wrangler triggers deploy   (with an empty crons list), or the dashboard.
+[triggers]
+crons = ["*/2 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
