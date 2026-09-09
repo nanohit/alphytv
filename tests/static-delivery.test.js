@@ -82,20 +82,35 @@ test("the synopsis is measured only after the panel is visible", async () => {
   assert.ok(reveal >= 0 && measure > reveal, "reveal has to come before the measurement");
 });
 
-test("on a phone the text column cannot outgrow the poster", async () => {
+test("the synopsis is cut between lines, never through one", async () => {
   const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
   const mobile = styles.slice(styles.indexOf("@media (max-width: 560px)"));
   // The poster's height has to be computable from its width, or the column
   // beside it has nothing to size itself against.
   assert.match(mobile, /\.meta-poster \{ width: 100%; aspect-ratio: 2 \/ 3; \}/);
   assert.match(mobile, /--meta-poster-w: clamp\(/);
-  assert.match(mobile, /\.meta-body \{ max-height: calc\(var\(--meta-poster-w\) \* 1\.5\); overflow: hidden; \}/);
-  // Expanding the synopsis has to escape that cap, or "ещё" would open into a
-  // clipped box and read as broken.
-  assert.match(mobile, /\.meta-body:has\(\.meta-desc\.open\) \{ max-height: none/);
-  // Only the synopsis gives; the toggle must never be the thing that shrinks.
-  assert.match(mobile, /\.meta-desc \{[^}]*flex: 1 1 auto/);
-  assert.match(mobile, /\.meta-desc-toggle \{[^}]*flex: none/);
+  // A pixel cap on the column cut a line of letters in half. Lines are the only
+  // unit that can be cut cleanly, so the count is what is computed.
+  assert.doesNotMatch(mobile, /\.meta-body \{[^}]*max-height/);
+  assert.match(styles, /-webkit-line-clamp: var\(--desc-lines, 6\)/);
+  assert.match(app, /desc\.style\.setProperty\("--desc-lines"/);
+  // A custom property, not an inline line-clamp: an inline clamp would outrank
+  // `.meta-desc.open` and the expanded synopsis would stay clamped.
+  assert.doesNotMatch(app, /style\.webkitLineClamp\s*=/);
+  assert.match(styles, /\.meta-desc\.open \{ -webkit-line-clamp: unset/);
+  // It needs real boxes, so it runs after the panel is revealed.
+  const reveal = app.indexOf('el.metaPanel.classList.remove("hidden")');
+  assert.ok(app.indexOf("fitMetaSynopsis();", reveal) > reveal, "measure after reveal");
+});
+
+test("rating figures share the row instead of huddling in the middle", async () => {
+  const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  const mobile = styles.slice(styles.indexOf("@media (max-width: 560px)"));
+  // Equal shares, so two figures are spaced the same way three are. Centring
+  // them with no gap put two almost touching and braided three together.
+  assert.match(mobile, /\.meta-ratings \.rt \{ flex: 1 1 0/);
+  assert.doesNotMatch(mobile, /\.meta-ratings \{[^}]*justify-content: center/);
   // Three figures — a film with a Letterboxd score — stay on one line.
   assert.match(mobile, /\.meta-ratings \{[^}]*flex-wrap: nowrap/);
 });

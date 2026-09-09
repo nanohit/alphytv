@@ -6332,6 +6332,10 @@ parent.postMessage({
     // title from inside the app hid the bug, because the panel was already
     // visible by then. Reading scrollHeight forces the reflow this needs.
     el.metaPanel.classList.remove("hidden");
+    // Both of the measurements below need real boxes, so both come after the
+    // reveal — and this one first, because it decides the height the other one
+    // is then asked about.
+    fitMetaSynopsis();
     // The synopsis is clamped rather than scrolled: a scroll region inside a
     // sidebar hides that there is more text and clips the last line mid-height.
     // The toggle only appears when the text is actually longer than the clamp.
@@ -6347,6 +6351,51 @@ parent.postMessage({
     fillLetterboxdBadge(view, target);
     scheduleWatchExtras(target);
   }
+
+  // How many whole lines of synopsis fit beside the poster.
+  //
+  // The narrow layout stands the text column next to the poster, and letting it
+  // run past the bottom leaves a notch of dead space beside the last lines.
+  // Capping the column's height instead was worse: it cut through the middle of
+  // a line of letters. Lines are the only unit that can be cut cleanly, so the
+  // count is what gets computed — CSS cannot, because how many fit depends on
+  // whether the title wrapped and whether this title has ratings at all.
+  //
+  // Written as a custom property rather than an inline line-clamp so that
+  // `.meta-desc.open` still wins when the viewer expands it.
+  function fitMetaSynopsis() {
+    const panel = el.metaPanel;
+    const desc = panel?.querySelector(".meta-desc");
+    const poster = panel?.querySelector(".meta-poster");
+    const body = panel?.querySelector(".meta-body");
+    if (!desc || !poster || !body) return;
+    if (!window.matchMedia?.("(max-width: 560px)").matches) {
+      desc.style.removeProperty("--desc-lines");
+      return;
+    }
+    const posterHeight = poster.getBoundingClientRect().height;
+    if (!posterHeight) return;
+    // Everything in the column that is not the synopsis, gaps and margins
+    // included — measured rather than added up, so nothing has to be kept in
+    // sync with the stylesheet.
+    const others = body.getBoundingClientRect().height - desc.getBoundingClientRect().height;
+    const lineHeight = parseFloat(getComputedStyle(desc).lineHeight);
+    if (!Number.isFinite(lineHeight) || lineHeight <= 0) return;
+    const lines = Math.floor((posterHeight - others) / lineHeight);
+    // Two lines even when the arithmetic says less: a title long enough to eat
+    // the whole column is better slightly overhanging than reduced to nothing.
+    desc.style.setProperty("--desc-lines", String(Math.max(2, lines)));
+  }
+
+  // The count depends on the width, so it is recomputed when the width changes —
+  // rotating a phone is the ordinary case.
+  let fitSynopsisTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(fitSynopsisTimer);
+    fitSynopsisTimer = setTimeout(() => {
+      if (el.metaPanel && !el.metaPanel.classList.contains("hidden")) fitMetaSynopsis();
+    }, 150);
+  });
 
   function linkImdbBadge(imdbId, target, token) {
     if (!imdbTitleUrl(imdbId) || isStale(token) || !state.currentTarget) return;

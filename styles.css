@@ -874,7 +874,11 @@ body.admin-mode .meta-info { display: flex; }
 .meta-ratings .rt span { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
 .meta-desc {
   font-size: 11px; line-height: 1.45; color: #cfcfcf;
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden;
+  display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden;
+  /* A count, never a height: clipping to a pixel height cuts a line through the
+     middle of its letters. The narrow layout works out how many lines actually
+     fit and sets this; everything else keeps the default. */
+  -webkit-line-clamp: var(--desc-lines, 6);
 }
 .meta-desc.open { -webkit-line-clamp: unset; overflow: visible; }
 .meta-desc-toggle {
@@ -1184,10 +1188,13 @@ body.admin-mode .meta-info { display: flex; }
      couple of lines, before the credits started. The synopsis is the only part
      that gives, so it is the only flexible one; the toggle never shrinks, or a
      long synopsis would push "ещё" out of reach. */
-  .meta-body { max-height: calc(var(--meta-poster-w) * 1.5); overflow: hidden; }
-  .meta-body:has(.meta-desc.open) { max-height: none; overflow: visible; }
-  .meta-desc { font-size: 12px; -webkit-line-clamp: 4; flex: 1 1 auto; min-height: 0; }
-  .meta-desc-toggle { font-size: 11px; flex: none; }
+  /* No height cap here. Capping the column clipped the synopsis mid-line — half
+     a row of letters, with "ещё" under it. fitMetaSynopsis() sets --desc-lines
+     from the space the poster actually leaves, so the cut always lands between
+     lines and the ellipsis appears where it should. 4 is the fallback for the
+     moment before it runs. */
+  .meta-desc { font-size: 12px; --desc-lines: 4; }
+  .meta-desc-toggle { font-size: 11px; }
   .meta-panel .mp-title { font-size: 18px; line-height: 1.2; }
   .meta-panel .mp-sub { font-size: 12px; gap: 5px; }
   .meta-panel .mp-age { font-size: 10px; padding: 1px 5px; }
@@ -1195,8 +1202,11 @@ body.admin-mode .meta-info { display: flex; }
      of them — a film with a Letterboxd score — still sit on one line in the
      narrowest column this layout produces; wrapping put the third figure on a
      row of its own and broke the row into two unequal halves. */
-  .meta-ratings { justify-content: center; flex-wrap: nowrap; gap: 0; }
-  .meta-ratings .rt { padding: 0 6px; min-width: 0; }
+  /* Equal shares of the column rather than a huddle in the middle of it. Centred
+     with no gap, two figures sat almost touching and three read as one braid;
+     giving each the same width spaces them by the count, whatever it is. */
+  .meta-ratings { flex-wrap: nowrap; gap: 0; }
+  .meta-ratings .rt { flex: 1 1 0; min-width: 0; padding: 0 4px; }
   .meta-ratings .rt + .rt { border-left: 1px solid var(--stroke); }
   .meta-ratings .rt b { font-size: 20px; }
   .meta-ratings .rt span { font-size: 8px; letter-spacing: 0; white-space: nowrap; }
