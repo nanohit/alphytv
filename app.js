@@ -6324,6 +6324,14 @@ parent.postMessage({
         isSeries,
       });
     }
+    // Revealed before the synopsis is measured, and that order is the whole
+    // point: `.hidden` is `display: none`, and a display:none element reports
+    // scrollHeight and clientHeight as 0, so the overflow test below compared
+    // 0 > 2 and never fired. On a cold load the "ещё" toggle simply never
+    // appeared and the rest of the description was unreachable; opening another
+    // title from inside the app hid the bug, because the panel was already
+    // visible by then. Reading scrollHeight forces the reflow this needs.
+    el.metaPanel.classList.remove("hidden");
     // The synopsis is clamped rather than scrolled: a scroll region inside a
     // sidebar hides that there is more text and clips the last line mid-height.
     // The toggle only appears when the text is actually longer than the clamp.
@@ -6336,7 +6344,6 @@ parent.postMessage({
         toggle.textContent = open ? "свернуть" : "ещё";
       });
     }
-    el.metaPanel.classList.remove("hidden");
     fillLetterboxdBadge(view, target);
     scheduleWatchExtras(target);
   }

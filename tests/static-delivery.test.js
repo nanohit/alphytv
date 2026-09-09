@@ -68,3 +68,16 @@ test("the meta panel has a fixed set of children, each owning one grid cell", as
   // a phone instead of being squeezed into the text column beside it.
   assert.match(styles, /\.meta-facts \{\s*\n\s*grid-column: 1 \/ -1;/);
 });
+
+test("the synopsis is measured only after the panel is visible", async () => {
+  const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const start = app.indexOf("// Revealed before the synopsis is measured");
+  assert.ok(start > 0, "the ordering must stay deliberate and explained");
+  const block = app.slice(start, app.indexOf("fillLetterboxdBadge", start));
+  // `.hidden` is `display: none`, and a display:none element reports both
+  // scrollHeight and clientHeight as 0 — so measuring first compared 0 > 2 and
+  // the "ещё" toggle never appeared on a cold load.
+  const reveal = block.indexOf('el.metaPanel.classList.remove("hidden")');
+  const measure = block.indexOf("descNode.scrollHeight > descNode.clientHeight");
+  assert.ok(reveal >= 0 && measure > reveal, "reveal has to come before the measurement");
+});
