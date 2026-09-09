@@ -97,3 +97,59 @@ test("no backend module talks to Collaps — that path belongs to the viewer's b
     );
   }
 });
+
+// Subtitles on the HDRezka fallback used to be a plain cross-origin fetch, which
+// sends `Origin: https://alphy.tv` however the referrer policy is set — Origin is
+// not governed by it. Turning subtitles on therefore announced the site to
+// Voidboost. Both allowlists have to agree, and the child's copy lives inside a
+// template literal where one missing backslash silently changes the regex, so the
+// child predicate is extracted and executed rather than pattern-matched.
+function childAllowlist(source) {
+  // Anchored inside sandboxFetchText: playOrtifiedCleanroom builds a srcdoc too,
+  // and that one interpolates, so a bare search for the first `iframe.srcdoc`
+  // evaluates the wrong template.
+  const fn = source.indexOf("function sandboxFetchText");
+  const start = source.indexOf("iframe.srcdoc = `", fn) + "iframe.srcdoc = ".length;
+  const end = source.indexOf("`;", start + 1) + 1;
+  const html = new Function(`return ${source.slice(start, end)}`)();
+  const from = html.indexOf("const allowed =") + "const allowed =".length;
+  const expression = html.slice(from, html.indexOf(");", from) + 1);
+  return new Function("host", "target", `return ${expression}`);
+}
+
+test("the subtitle CDN is reachable through the sandbox, and both allowlists agree", async () => {
+  const helpers = await privacyHelpers();
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const childAllows = childAllowlist(source);
+  const target = { protocol: "https:", pathname: "/1/2/3.vtt" };
+
+  for (const host of ["static.voidboost.com", "static.voidboost.one", "static.voidboost.cc"]) {
+    const url = `https://${host}/x/y.vtt`;
+    assert.equal(helpers.isOpaqueFetchUrl(url), true, `parent must allow ${host}`);
+    assert.equal(childAllows(host, target), true, `child must allow ${host}`);
+  }
+  // Only the one subdomain, and only over https — not the registrable domain,
+  // not a lookalike, not the stream host (native <video> needs no CORS there).
+  for (const host of [
+    "voidboost.com",
+    "stream.voidboost.one",
+    "static.voidboost.com.evil.example",
+    "evil-static.voidboost.com",
+  ]) {
+    const url = `https://${host}/x/y.vtt`;
+    assert.equal(helpers.isOpaqueFetchUrl(url), false, `parent must reject ${host}`);
+    assert.equal(childAllows(host, target), false, `child must reject ${host}`);
+  }
+  assert.equal(helpers.isOpaqueFetchUrl("http://static.voidboost.com/x.vtt"), false);
+  assert.equal(childAllows("static.voidboost.com", { protocol: "http:", pathname: "/x.vtt" }), false);
+});
+
+test("HDRezka subtitles never fall back to a direct fetch", async () => {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const start = source.indexOf("async function attachRezkaSubtitles");
+  const end = source.indexOf("function renderRezkaControls", start);
+  const block = source.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(block, /sandboxFetchText\(sub\.url/);
+  assert.doesNotMatch(block, /\bfetch\(sub\.url/);
+});

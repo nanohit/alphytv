@@ -5829,9 +5829,15 @@ parent.postMessage({
   async function attachRezkaSubtitles(video, subs, token) {
     const loaded = await Promise.all((subs || []).map(async (sub) => {
       try {
-        const res = await fetch(sub.url, { cache: "no-store" });
-        if (!res.ok) return null;
-        const raw = (await res.text()).replace(/^﻿/, "");
+        // Through the sandbox, not directly. A plain cross-origin fetch sends
+        // `Origin: https://alphy.tv` no matter what the referrer policy says —
+        // Origin is not covered by it — so turning subtitles on announced this
+        // site to Voidboost on every use. The opaque origin makes it
+        // `Origin: null` instead; the host answers `ACAO: *`, so nothing else
+        // about the request changes. No direct fallback, for the same reason as
+        // Collaps: a privacy boundary that degrades into leaking is not one.
+        const raw = (await sandboxFetchText(sub.url, "rezka-subs", 12000))
+          .replace(/^﻿/, "");
         if (!raw.trim()) return null;
         const vtt = /^WEBVTT/i.test(raw.trim()) ? raw : subtitleTextToVtt(raw, "srt");
         return { sub, vtt };
@@ -8427,7 +8433,8 @@ addEventListener('message', async (event) => {
       ((host === 'embed.liftw.ws' || host === 'lift3.ws') && /^\\/embed\\/movie\\/\\d+$/.test(target.pathname)) ||
       host === 'api.ortified.ws' ||
       host === 'api.zenithjs.ws' ||
-      host === 'newdeaf.co' || host.endsWith('.newdeaf.co')
+      host === 'newdeaf.co' || host.endsWith('.newdeaf.co') ||
+      /^static\\.voidboost\\.[a-z]{2,6}$/.test(host)
     );
     if (!allowed) throw new Error('Blocked sandbox URL');
     const response = await fetch(data.url, { cache: 'no-store', credentials: 'omit', mode: 'cors', referrerPolicy: 'no-referrer' });
@@ -8452,7 +8459,13 @@ addEventListener('message', async (event) => {
         ((host === "embed.liftw.ws" || host === "lift3.ws") && /^\/embed\/movie\/\d+$/.test(url.pathname)) ||
         host === "api.ortified.ws" ||
         host === "api.zenithjs.ws" ||
-        host === "newdeaf.co" || host.endsWith(".newdeaf.co")
+        host === "newdeaf.co" || host.endsWith(".newdeaf.co") ||
+        // HDRezka's subtitle CDN. Matched by pattern rather than one literal
+        // host because Voidboost rotates the TLD (streams have already moved
+        // .cc -> .one); pinning `static.voidboost.com` would fail closed and
+        // silently drop subtitles the next time it moves. Still only the one
+        // `static.` subdomain, never the whole domain.
+        /^static\.voidboost\.[a-z]{2,6}$/.test(host)
       );
     } catch {
       return false;
