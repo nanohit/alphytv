@@ -849,13 +849,19 @@ async function handleRezkaResolve(request, env, url) {
   const year = (url.searchParams.get("year") || "").trim();
   const translator = (url.searchParams.get("translator") || "").trim();
 
-  if (!kp && !id && !title) {
-    return json(request, env, { ok: false, error: "missing_kp_id_or_title" }, 400);
-  }
+  // Shape first, then sufficiency: `?kp=abc` should say the kp is malformed, not
+  // that a title is missing.
   if (kp && !/^\d+$/.test(kp)) return json(request, env, { ok: false, error: "invalid_kp" }, 400);
   if (id && !/^\d+$/.test(id)) return json(request, env, { ok: false, error: "invalid_id" }, 400);
   if (translator && !/^\d+$/.test(translator)) {
     return json(request, env, { ok: false, error: "invalid_translator" }, 400);
+  }
+  // A title (or a Rezka id) is required, not just a kpId. Turning a bare kpId
+  // into a title meant asking Collaps from this host, which put our own egress IP
+  // in front of a source on every resolve; the caller holds a title in every path
+  // that reaches here. `kp` is still accepted and echoed back as a label.
+  if (!id && !title) {
+    return json(request, env, { ok: false, error: "missing_id_or_title" }, 400);
   }
 
   const client = new RezkaClient({

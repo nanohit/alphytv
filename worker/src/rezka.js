@@ -19,7 +19,6 @@
 // when it is blocked we return only the single resolved dub and no switcher.
 
 const DEFAULT_REZKA_BASE = "https://hdrzk.org/";
-const COLLAPS_PLAYLIST = "https://plapi.cdnvideohub.com/api/v1/player/sv/playlist";
 const APP_VERSION = "2.2.5";
 // The common Russian dubs, tried in order until one returns a real stream. This is
 // only the *fallback* order when no explicit translator is requested and the film
@@ -279,19 +278,6 @@ export class RezkaClient {
     return parseSearchResults(await response.text());
   }
 
-  async kinoPoiskMetadata(kpId) {
-    if (!/^\d+$/.test(String(kpId))) throw new Error("KinoPoisk ID must be numeric");
-    const url = new URL(COLLAPS_PLAYLIST);
-    url.searchParams.set("pub", "1");
-    url.searchParams.set("aggr", "kp");
-    url.searchParams.set("id", String(kpId));
-    const response = await this.fetchWithTimeout(url, { headers: { "User-Agent": USER_AGENT } });
-    if (!response.ok) throw new Error(`KinoPoisk title lookup failed: HTTP ${response.status}`);
-    const json = await response.json();
-    if (!json.titleName) throw new Error(`No title metadata found for KinoPoisk ID ${kpId}`);
-    return { kpId: Number(kpId), ...parseTitleYear(json.titleName) };
-  }
-
   // Best-effort dub list from the film page. Never throws — a WAF 403 just means
   // "no switcher available", it must not fail the whole resolve.
   async fetchTranslators(movieUrl) {
@@ -386,10 +372,15 @@ export class RezkaClient {
     } else if (title) {
       // Title+year is the fast path: no KinoPoisk->title lookup needed.
       lookup = { kpId: kpId ? Number(kpId) : null, title: String(title).trim(), year: year ? Number(year) : null };
-    } else if (kpId) {
-      lookup = await this.kinoPoiskMetadata(kpId);
     } else {
-      throw new Error("Provide kp, title, or id");
+      // A bare kpId used to be turned into a title by asking Collaps for it. That
+      // was the only place this backend spoke to a source directly, and it undid
+      // the point of the viewer-side sandbox: Collaps saw one datacenter IP, with
+      // one fixed User-Agent, once per Rezka resolve — a far better correlation
+      // handle than anything the browser path leaks. Rezka is searched by title
+      // regardless, and every caller that matters already holds one, so the lookup
+      // is deleted rather than moved to another host.
+      throw new Error("Provide title (with optional year) or a Rezka id");
     }
     if (!movie) {
       const results = await this.search(lookup.title);

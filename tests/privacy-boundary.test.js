@@ -79,3 +79,21 @@ test("Ortified playback keeps its compatible unsandboxed iframe and fetch fallba
   assert.doesNotMatch(block, /iframe\.sandbox\s*=/);
   assert.doesNotMatch(block, /directFallback:\s*false/);
 });
+
+// The viewer's browser reaches Collaps through an opaque-origin sandbox, so the
+// source sees `Origin: null` and no Referer — measured on the wire, not assumed.
+// That whole arrangement was undone by one line on the server: the Rezka resolver
+// turned a bare kpId into a title by asking Collaps from Deno, handing it a
+// datacenter IP with a fixed User-Agent once per resolve. The browser leaks an IP
+// per viewer; the backend leaked one identity for all of them, which is worse.
+// This asserts across the whole backend, not just the file it was found in.
+test("no backend module talks to Collaps — that path belongs to the viewer's browser", async () => {
+  for (const file of ["index.js", "rezka.js", "zona-runtime-and-loader.js"]) {
+    const source = await readFile(new URL(`../worker/src/${file}`, import.meta.url), "utf8");
+    const code = source.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    assert.ok(
+      !/cdnvideohub/i.test(code),
+      `worker/src/${file} must not reach Collaps from the server`,
+    );
+  }
+});

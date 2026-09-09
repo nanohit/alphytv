@@ -6003,22 +6003,21 @@ parent.postMessage({
 
   async function tryRezkaLastResort(target, meta, token, opts = {}) {
     if (!rezkaLastResortEnabled()) return false;
-    const kpId = opts.kpId || (target?.kind === "kp" ? target.kpId : null) || meta?.kpId || null;
     const title = cleanMovieTitle(opts.title || movieTitle(meta) || target?.title || "");
     const year = opts.year || meta?.year || target?.year || null;
-    if (!kpId && !title) return false;
+    // A bare kpId is no longer enough. The resolver used to turn one into a title
+    // by asking Collaps, which meant OUR server hit a source directly on every
+    // Rezka resolve — one datacenter IP, one fixed UA, perfectly correlatable —
+    // while the whole browser-side design exists to keep that from happening.
+    // Rezka only searches by title anyway, and by the time this runs every caller
+    // that can succeed already has one; without a title there is nothing to search.
+    if (!title) return false;
     // A series episode picker is out of scope for the fallback — HDRezka series
     // need per-episode get_stream calls the resolver does not yet make.
     if (target?.isSeries || meta?.isSeries || opts.serialSelection) return false;
     try {
       const savedDub = opts.histKey ? savedRezkaPref(opts.histKey, "rezkaTranslator") : null;
-      // Title+year is the resolver's fast path (no KinoPoisk->title lookup).
-      const request = {
-        title: title || null,
-        year: title ? year : null,
-        kpId: title ? null : kpId,
-        translator: savedDub,
-      };
+      const request = { title, year: year || null, translator: savedDub };
       const resolved = savedDub
         ? await resolveRezka(request).catch(() => resolveRezka({ ...request, translator: null }))
         : await resolveRezka(request);

@@ -13,9 +13,12 @@ Endpoints:
   Kinopoisk ID to `https://api.zenithjs.ws/embed/movie/<id>`.
 - `GET /zenith?id=2097` -> Zenith sources plus the normalized serial playlist
   (`current`, seasons, episodes, and per-episode DASH/HLS URLs).
-- `GET /resolve-rezka?title=...&year=...` -> anonymous 360p/480p/720p MP4 and
-  subtitle URLs. Production must call this through `resolver-deno/main.js`,
-  which forwards the viewer IP used by the Voidboost signature. The Cloudflare
+- `GET /resolve-rezka?title=...&year=...` (or `?id=<rezkaId>`) -> anonymous
+  360p/480p/720p MP4 and subtitle URLs. A title or a Rezka id is required: a
+  bare `kp` is rejected, because turning one into a title meant asking Collaps
+  from this host and that was the only place the backend touched a source
+  itself. Production must call this through `resolver-deno/main.js`, which
+  forwards the viewer IP used by the Voidboost signature. The Cloudflare
   deployment rejects this route because its outbound client-IP header is
   rewritten for the PoP.
 

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import worker from "../worker/src/index.js";
 import {
@@ -131,11 +132,30 @@ test("chooseSearchResult never upgrades a partial title or the wrong remake", ()
 
 // --- Endpoint validation (hermetic: rejects before any upstream call) ----------
 
-test("/resolve-rezka rejects a request with no kp/id/title", async () => {
+test("/resolve-rezka rejects a request with no id/title", async () => {
   const res = await worker.fetch(new Request("http://local/resolve-rezka"), env);
   const body = await res.json();
   assert.equal(res.status, 400);
-  assert.equal(body.error, "missing_kp_id_or_title");
+  assert.equal(body.error, "missing_id_or_title");
+});
+
+// The resolver used to accept a bare kpId and ask Collaps what it was called.
+// That single call was the only time this backend spoke to a source itself, so it
+// handed Collaps a datacenter IP with a fixed User-Agent once per Rezka resolve —
+// a cleaner correlation handle than anything the sandboxed browser path leaks.
+// Rejecting kp-only is what keeps it deleted: a future caller cannot quietly
+// reintroduce the lookup by passing kp and hoping for the best.
+test("/resolve-rezka refuses a kp-only request instead of looking the title up", async () => {
+  const res = await worker.fetch(new Request("http://local/resolve-rezka?kp=258687"), env);
+  const body = await res.json();
+  assert.equal(res.status, 400);
+  assert.equal(body.error, "missing_id_or_title");
+});
+
+test("the Rezka resolver never contacts Collaps", async () => {
+  const source = await readFile(new URL("../worker/src/rezka.js", import.meta.url), "utf8");
+  assert.ok(!/cdnvideohub/i.test(source), "rezka.js must not reference the Collaps host");
+  assert.ok(!/kinoPoiskMetadata/.test(source), "the kpId->title lookup must stay deleted");
 });
 
 test("/resolve-rezka rejects a non-numeric kp", async () => {
