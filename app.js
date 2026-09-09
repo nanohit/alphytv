@@ -219,6 +219,7 @@
     videoEl: null,
     currentTarget: null,
     audioNames: [],
+    blockedAudioNames: [],
     sources: {},
     opravar: null,
     serial: null,
@@ -2090,6 +2091,7 @@ parent.postMessage({
       id: String(id),
       sources: parsed.sources,
       audioNames: parsed.meta.audioNames || [],
+      blockedAudioNames: parsed.meta.blockedAudioNames || [],
       textTracks: liftwTextTracks(html),
       meta: liftwMeta(info),
       playlist: { current: parsed.playlist?.current || null, seasons },
@@ -5380,6 +5382,7 @@ parent.postMessage({
 
     state.sources = sources;
     state.audioNames = (episode?.audioNames?.length ? episode.audioNames : parsed.audioNames) || [];
+    state.blockedAudioNames = parsed.blockedAudioNames || [];
     const histKey = canonicalHistoryKey(target, meta);
     const serial = selection
       ? { provider: "liftw", liftId: String(safeId), histKey, seasons, selection, switching: false }
@@ -6861,6 +6864,7 @@ parent.postMessage({
     // series showing the manifest's own ru0..ru7 instead of LostFilm/Кубик в
     // кубе/Eng.Original. A movie has no episode and keeps the document names.
     state.audioNames = (episode?.audioNames?.length ? episode.audioNames : parsed.meta.audioNames) || [];
+    state.blockedAudioNames = parsed.meta.blockedAudioNames || [];
     if (selection) {
       target.season = selection.season;
       target.episode = selection.episode;
@@ -7134,6 +7138,7 @@ parent.postMessage({
 
     state.sources = sources;
     state.audioNames = parsed.meta.audioNames || [];
+    state.blockedAudioNames = parsed.meta.blockedAudioNames || [];
     if (!media) throw new Error("Zenith embed не отдал dash/hls");
     if (selection) persistSerialSelection(target, selection);
     await shakaTask;
@@ -7221,10 +7226,17 @@ parent.postMessage({
     if (opts.audioLang) {
       try {
         const saved = String(opts.audioLang);
-        const match = (player.getVariantTracks?.() || []).find((track) => audioTag(track) === saved);
-        if (match) selectShakaAudio(player, match);
-        else player.selectAudioLanguage(saved);
+        const choices = shakaAudioChoices(player.getVariantTracks?.() || [], true);
+        const match = choices.find((choice) => audioTag(choice.track) === saved);
+        if (match && !match.blocked) selectShakaAudio(player, match.track);
+        else if (!match && !isBlockedAudioName(saved)) player.selectAudioLanguage(saved);
       } catch { /* ignore */ }
+    }
+    const activeChoice = shakaAudioChoices(player.getVariantTracks?.() || [], true)
+      .find((choice) => choice.track.active);
+    if (activeChoice?.blocked) {
+      const fallback = shakaAudioChoices(player.getVariantTracks?.() || []).find(Boolean);
+      if (fallback) selectShakaAudio(player, fallback.track);
     }
     if (opts.resume > 5) { try { video.currentTime = opts.resume; } catch { /* ignore */ } }
     video.playbackRate = state.playbackRate;
@@ -7450,10 +7462,11 @@ parent.postMessage({
       // (rus0/rus1/rus2), which Shaka surfaces as `label`. Keying on language
       // alone collapsed five dubs into three buttons under the wrong names.
       // Providers that ship no labels group exactly as before.
-      const audioChoices = groupBy(variants, (track) => `${track.language || ""}|${track.label || ""}|${(track.roles || []).join(",")}`);
-      addTrackGroup("Озвучка", audioChoices, (track, index) => {
+      const audioChoices = shakaAudioChoices(variants);
+      addTrackGroup("Озвучка", audioChoices, (choice) => {
+        const { track, name } = choice;
         const btn = document.createElement("button");
-        btn.textContent = audioNameFor(track, index);
+        btn.textContent = name;
         if (track.active) btn.className = "active";
         btn.addEventListener("click", () => {
           selectShakaAudio(player, track);
@@ -8933,11 +8946,18 @@ addEventListener('message', async (event) => {
     if (currentEpisode) Object.assign(sources, currentEpisode.sources);
     const titleMatch = text.match(/\btitle\s*:\s*("(?:(?:\\.|[^"\\])*)"|'(?:(?:\\.|[^'\\])*)')/);
     const audioMatch = text.match(/\baudio\s*:\s*\{\s*["']?names["']?\s*:\s*\[([^\]]*)\]/);
+    const soundBlockMatch = text.match(/\bsoundBlock\s*:\s*("(?:(?:\\.|[^"\\])*)"|'(?:(?:\\.|[^'\\])*)')/);
+    const rawAudioNames = audioMatch
+      ? [...audioMatch[1].matchAll(/("(?:(?:\\.|[^"\\])*)"|'(?:(?:\\.|[^'\\])*)')/g)].map((match) => decodeJsString(match[1]))
+      : [];
     return {
       sources,
       meta: {
         title: titleMatch ? decodeJsString(titleMatch[1]) : "",
-        audioNames: audioMatch ? [...audioMatch[1].matchAll(/"([^"]+)"|'([^']+)'/g)].map((m) => m[1] || m[2]) : [],
+        audioNames: normalizeAudioNames(rawAudioNames),
+        blockedAudioNames: soundBlockMatch
+          ? decodeJsString(soundBlockMatch[1]).split(",").map((name) => compact(name)).filter(Boolean)
+          : [],
       },
       playlist,
     };
@@ -9340,10 +9360,15 @@ addEventListener('message', async (event) => {
 
   function embedAudioNames(episode) {
     const names = Array.isArray(episode?.audioNames) ? episode.audioNames : episode?.audio?.names;
+    return normalizeAudioNames(names);
+  }
+
+  function normalizeAudioNames(names) {
+    // The manifest suffix (rus0, eng7) addresses this array by position. Keep
+    // empty/blocked slots in place or every name after one shifts to a wrong dub.
     return (Array.isArray(names) ? names : [])
-      .map((name) => compact(name).slice(0, 60))
-      .filter(Boolean)
-      .slice(0, 24);
+      .slice(0, 24)
+      .map((name) => compact(name).slice(0, 60));
   }
 
   function embedTextTracks(episode) {
@@ -9537,6 +9562,27 @@ addEventListener('message', async (event) => {
     if (names[fallbackIndex]) return names[fallbackIndex];
     return (typeof track === "string" ? track : track?.label || language) || "unknown";
   }
+  function normalizedAudioName(value) {
+    return compact(value).replace(/\s+/g, "").toLowerCase();
+  }
+  function isBlockedAudioName(value) {
+    const name = normalizedAudioName(value);
+    if (!name) return false;
+    // Older cached parses predate blockedAudioNames. `delete` is player-venom's
+    // own sentinel, never a user-facing dub, so keep that fallback permanent.
+    return name === "delete" || (state.blockedAudioNames || []).some((blocked) => normalizedAudioName(blocked) === name);
+  }
+  function shakaAudioChoices(variants, includeBlocked = false) {
+    const grouped = groupBy(
+      variants,
+      (track) => `${track.language || ""}|${track.label || ""}|${(track.roles || []).join(",")}`,
+    );
+    const choices = grouped.map((track, index) => {
+      const name = audioNameFor(track, index);
+      return { track, name, blocked: isBlockedAudioName(name) };
+    });
+    return includeBlocked ? choices : choices.filter((choice) => !choice.blocked);
+  }
   function bitrateLabel(track) {
     return track.bandwidth ? `${(track.bandwidth / 1000000).toFixed(1)} Mbps` : "";
   }
@@ -9559,7 +9605,10 @@ addEventListener('message', async (event) => {
     const map = new Map();
     for (const item of list) {
       const key = keyFn(item);
-      if (!map.has(key)) map.set(key, item);
+      const current = map.get(key);
+      // Shaka returns one variant per quality for each dub. Keep the active
+      // representative so the button follows a switch instead of looking stuck.
+      if (!current || (!current.active && item.active)) map.set(key, item);
     }
     return [...map.values()];
   }
@@ -10605,10 +10654,13 @@ addEventListener('message', async (event) => {
       formatDuration,
       audioTag,
       audioNameFor,
+      isBlockedAudioName,
+      shakaAudioChoices,
       selectShakaAudio,
       // audioNameFor joins manifest tracks to the embed's dub names, which live
       // on state; tests need to seed them.
       setAudioNames: (names) => { state.audioNames = names; },
+      setBlockedAudioNames: (names) => { state.blockedAudioNames = names; },
       setLiftwManifestFetcher: (fetcher) => { liftwManifestFetcher = fetcher; },
       samsungTizenVideoDevice,
       weakVideoDevice,

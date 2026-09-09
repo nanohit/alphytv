@@ -223,6 +223,36 @@ test("every dub is offered under its real name on both ladders", async () => {
   assert.equal(helpers.audioNameFor({}, 0), "unknown");
 });
 
+test("player-venom soundBlock entries never become audio buttons", async () => {
+  const helpers = await liftwSandbox();
+  const parsed = helpers.parseZenithEmbed(`
+    makePlayer({
+      soundBlock: "delete, Broken mix",
+      source: { audio: { "names": ["Main", "", "delete", "Broken mix"] } }
+    });
+  `);
+
+  assert.deepEqual(plain(parsed.meta.audioNames), ["Main", "", "delete", "Broken mix"]);
+  assert.deepEqual(plain(parsed.meta.blockedAudioNames), ["delete", "Broken mix"]);
+
+  helpers.setAudioNames(parsed.meta.audioNames);
+  helpers.setBlockedAudioNames(parsed.meta.blockedAudioNames);
+  const choices = helpers.shakaAudioChoices([
+    { language: "ru", label: "rus0", active: false, height: 480 },
+    { language: "ru", label: "rus0", active: true, height: 1080 },
+    { language: "en", label: "eng2", active: false, height: 1080 },
+    { language: "en", label: "eng3", active: false, height: 1080 },
+  ]);
+
+  assert.deepEqual(plain(choices).map((choice) => choice.name), ["Main"]);
+  assert.equal(choices[0].track.active, true, "the active quality must represent its dub button");
+
+  // Cached parses made before soundBlock support have no block list. The
+  // upstream sentinel is still hidden rather than leaking back until cache TTL.
+  helpers.setBlockedAudioNames([]);
+  assert.equal(helpers.isBlockedAudioName(" DELETE "), true);
+});
+
 test("clicking a dub selects that dub, not merely its language", async () => {
   const helpers = await liftwSandbox();
   const calls = [];
