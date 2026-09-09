@@ -6251,16 +6251,24 @@ parent.postMessage({
       preservedLetterboxd?.dataset.watchToken === String(resolveToken) &&
       preservedLetterboxd?.dataset.targetKey === keyFor(target);
 
-    // Two children only — poster and body. Narrow layouts put them side by side,
-    // and a fixed pair survives the fact that ratings/description/credits are each
-    // individually optional (a grid row-span over a variable number of implicit
-    // rows does not, which is how the two columns used to overlap on phones).
+    // Three children, and always three: poster, body, credits. Narrow layouts put
+    // the first two side by side and let the credits span underneath, which is
+    // what gives the poster room to be worth looking at on a phone.
+    //
+    // A fixed set of children is the point. Ratings, description and credits are
+    // each individually optional, and a grid row-span over a variable number of
+    // implicit rows does not survive that — it is how the two columns used to
+    // overlap on phones. Each child owns exactly one cell instead.
     const kpUrl = kinopoiskFilmUrl(view.kpId);
     let body = `<div class="meta-headline">`;
     body += kpUrl
       ? `<a class="mp-title kp-meta-link" href="${escapeAttr(kpUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(title)}</a>`
       : `<div class="mp-title">${escapeHtml(title)}</div>`;
-    body += `<div class="mp-sub">${escapeHtml(sub)}${age ? `<span class="mp-age">${escapeHtml(age)}</span>` : ""}</div>`;
+    // The age rating reads as part of the same sentence as the year and the kind,
+    // so it is separated the same way they are rather than floated off on its own.
+    body += `<div class="mp-sub">${escapeHtml(sub)}${age
+      ? `<span class="mp-dot" aria-hidden="true">·</span><span class="mp-age">${escapeHtml(age)}</span>`
+      : ""}</div>`;
     body += `</div>`;
     if (kp || imdb) {
       body += `<div class="meta-ratings">`;
@@ -6289,12 +6297,12 @@ parent.postMessage({
         view.people?.directors,
       ) +
       metaPeopleRow("В ролях", (view.cast || []).slice(0, 5), view.people?.cast);
-    if (facts) body += `<dl class="meta-facts">${facts}</dl>`;
+    const factsHtml = facts ? `<dl class="meta-facts">${facts}</dl>` : "";
 
     const posterHtml = poster
       ? `<div class="meta-poster"><img src="${escapeAttr(poster)}" alt=""></div>`
       : "";
-    el.metaPanel.innerHTML = `${posterHtml}<div class="meta-body">${body}</div>`;
+    el.metaPanel.innerHTML = `${posterHtml}<div class="meta-body">${body}</div>${factsHtml}`;
     el.metaPanel.dataset.watchToken = String(resolveToken);
     const nextPoster = el.metaPanel.querySelector(".meta-poster img");
     if (preservedPoster && nextPoster && preservedPoster.getAttribute("src") === nextPoster.getAttribute("src")) {

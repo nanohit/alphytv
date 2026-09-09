@@ -50,3 +50,21 @@ test("large lazy datasets resolve through the immutable asset base", async () =>
   assert.match(app, /__alphyAssetUrl\?\.\("curated-fallback\.json"\)/);
   assert.match(catalogCache, /__alphyAssetUrl\?\.\("curated-fallback\.json"\)/);
 });
+
+test("the meta panel has a fixed set of children, each owning one grid cell", async () => {
+  const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  const start = app.indexOf("// Three children, and always three");
+  const render = app.slice(start, app.indexOf("el.metaPanel.dataset.watchToken", start));
+  // Poster, body, credits — in that order and always all three slots, even when
+  // a title has no credits. Ratings, description and credits are each optional,
+  // and a grid row-span over a variable number of implicit rows does not survive
+  // that: it is how the two columns used to overlap on phones.
+  assert.match(render, /\$\{posterHtml\}<div class="meta-body">\$\{body\}<\/div>\$\{factsHtml\}/);
+  assert.match(render, /const factsHtml = facts \? `<dl class="meta-facts">/);
+  // Nothing may put the credits back inside the body.
+  assert.doesNotMatch(render, /body \+= `<dl class="meta-facts"/);
+  // The credits span the panel, which is what lets them run under the poster on
+  // a phone instead of being squeezed into the text column beside it.
+  assert.match(styles, /\.meta-facts \{\s*\n\s*grid-column: 1 \/ -1;/);
+});

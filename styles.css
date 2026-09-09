@@ -883,9 +883,15 @@ body.admin-mode .meta-info { display: flex; }
 }
 .meta-desc-toggle:hover { color: var(--accent); }
 
+.meta-panel .mp-dot { color: var(--muted); }
+
 /* Жанр / страна / режиссёр / в ролях. A label column keeps the rows scannable
-   at a glance; values wrap freely because casts are long. */
+   at a glance; values wrap freely because casts are long.
+   Spans the panel: on desktop that is the only column anyway, and on a phone it
+   is what lets the credits run under the poster instead of being squeezed into
+   the text column beside it. */
 .meta-facts {
+  grid-column: 1 / -1;
   display: flex; flex-direction: column; gap: 6px; margin: 0;
   padding-top: 11px; border-top: 1px solid var(--stroke);
 }
@@ -1163,10 +1169,32 @@ body.admin-mode .meta-info { display: flex; }
   .add-list-btn { padding: 9px 12px; font-size: 12px; }
   .track-group { gap: 7px; }
   .track-group > strong { width: 100%; min-width: 0; }
-  .meta-panel { grid-template-columns: 92px minmax(0,1fr); column-gap: 11px; }
-  .meta-poster { width: 92px; }
+  /* The poster is the only picture on the page and it was thumbnail-sized, so it
+     takes about a third of the panel and the text column follows it down. */
+  .meta-panel { grid-template-columns: clamp(104px, 34vw, 148px) minmax(0, 1fr); column-gap: 13px; }
+  .meta-poster { width: 100%; }
   .meta-panel img { width: 100%; }
-  .meta-facts .mf-row { grid-template-columns: 56px minmax(0, 1fr); }
+  .meta-panel .mp-title { font-size: 18px; line-height: 1.2; }
+  .meta-panel .mp-sub { font-size: 12px; gap: 5px; }
+  .meta-panel .mp-age { font-size: 10px; padding: 1px 5px; }
+  /* One rule per figure, divided rather than merely spaced: at this size the
+     numbers are large enough that plain gaps read as one run of digits. */
+  .meta-ratings { justify-content: center; flex-wrap: wrap; gap: 0 0; row-gap: 8px; }
+  .meta-ratings .rt { padding: 0 15px; }
+  .meta-ratings .rt + .rt { border-left: 1px solid var(--stroke); }
+  .meta-ratings .rt b { font-size: 25px; }
+  .meta-ratings .rt span { font-size: 9px; }
+  .meta-desc { font-size: 12px; -webkit-line-clamp: 5; }
+  .meta-desc-toggle { font-size: 11px; }
+  /* Full-width rows under the poster. A rule between them does the work the
+     label column used to do alone, so the labels can stop shouting. */
+  .meta-facts { gap: 0; padding-top: 4px; border-top: 0; }
+  .meta-facts .mf-row {
+    grid-template-columns: 92px minmax(0, 1fr);
+    gap: 12px; padding: 9px 0; border-top: 1px solid var(--stroke);
+  }
+  .meta-facts dt { font-size: 12px; text-transform: none; letter-spacing: 0; color: var(--muted-strong); }
+  .meta-facts dd { font-size: 12px; }
   .similar-section { margin-top: 16px; }
   .similar-head h3 { font-size: 15px; }
   .similar-row { grid-auto-columns: var(--mobile-card-width); gap: 6px; }
