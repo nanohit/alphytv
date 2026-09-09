@@ -1199,7 +1199,13 @@ body.admin-mode .meta-info { display: flex; }
      synopsis was closing so far above the bottom of the poster. Out of flow, so
      it takes nothing from the line count; the fade keeps it off the words it
      ends up beside. */
-  .meta-body { position: relative; }
+  /* Its own height, not the row's. The grid stretches a cell to the height of
+     the tallest thing in it — the poster — and the line count can only ever be
+     a whole number, so up to one line of that height is left over below the
+     text. Stretched, the toggle's `bottom: 0` landed in that leftover and read
+     as a stray word in the corner; unstretched, the column ends where the last
+     line does and the toggle sits on it. */
+  .meta-body { position: relative; align-self: start; }
   .meta-desc-toggle {
     position: absolute; right: 0; bottom: 0; margin: 0; padding: 0 0 0 30px;
     font-size: 11px; line-height: 1.45;

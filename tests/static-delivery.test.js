@@ -122,6 +122,11 @@ test('"ещё" sits at the end of the synopsis, not on a line of its own', async
   assert.match(mobile, /background: linear-gradient\(to right/);
   // Expanded there is no last line to sit beside, so it returns to the flow.
   assert.match(mobile, /:has\(\.meta-desc\.open\) \.meta-desc-toggle \{\s*\n\s*position: static/);
+  // And the column must take its own height, not the row's. A whole number of
+  // lines rarely fills the poster exactly, and a stretched column put the
+  // toggle's `bottom: 0` in the leftover below the text — 18px measured, which
+  // reads as a stray word in the corner rather than the end of a sentence.
+  assert.match(mobile, /\.meta-body \{ position: relative; align-self: start; \}/);
 });
 
 test("rating figures share the row instead of huddling in the middle", async () => {
