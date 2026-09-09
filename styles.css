@@ -1170,22 +1170,36 @@ body.admin-mode .meta-info { display: flex; }
   .track-group { gap: 7px; }
   .track-group > strong { width: 100%; min-width: 0; }
   /* The poster is the only picture on the page and it was thumbnail-sized, so it
-     takes about a third of the panel and the text column follows it down. */
-  .meta-panel { grid-template-columns: clamp(104px, 34vw, 148px) minmax(0, 1fr); column-gap: 13px; }
-  .meta-poster { width: 100%; }
-  .meta-panel img { width: 100%; }
+     takes about a third of the panel and the text column runs beside it.
+     A fixed 2:3 — the ratio the cards already use — is what makes its height
+     computable from the column width, which the text column then borrows. */
+  .meta-panel {
+    --meta-poster-w: clamp(100px, 34vw, 148px);
+    grid-template-columns: var(--meta-poster-w) minmax(0, 1fr); column-gap: 13px;
+  }
+  .meta-poster { width: 100%; aspect-ratio: 2 / 3; }
+  .meta-panel img { width: 100%; height: 100%; }
+  /* The text column ends where the poster ends. Left to itself it ran past the
+     bottom of the poster and left a ragged notch of empty space beside the last
+     couple of lines, before the credits started. The synopsis is the only part
+     that gives, so it is the only flexible one; the toggle never shrinks, or a
+     long synopsis would push "ещё" out of reach. */
+  .meta-body { max-height: calc(var(--meta-poster-w) * 1.5); overflow: hidden; }
+  .meta-body:has(.meta-desc.open) { max-height: none; overflow: visible; }
+  .meta-desc { font-size: 12px; -webkit-line-clamp: 4; flex: 1 1 auto; min-height: 0; }
+  .meta-desc-toggle { font-size: 11px; flex: none; }
   .meta-panel .mp-title { font-size: 18px; line-height: 1.2; }
   .meta-panel .mp-sub { font-size: 12px; gap: 5px; }
   .meta-panel .mp-age { font-size: 10px; padding: 1px 5px; }
-  /* One rule per figure, divided rather than merely spaced: at this size the
-     numbers are large enough that plain gaps read as one run of digits. */
-  .meta-ratings { justify-content: center; flex-wrap: wrap; gap: 0 0; row-gap: 8px; }
-  .meta-ratings .rt { padding: 0 15px; }
+  /* One rule per figure, divided rather than merely spaced. Sized so that three
+     of them — a film with a Letterboxd score — still sit on one line in the
+     narrowest column this layout produces; wrapping put the third figure on a
+     row of its own and broke the row into two unequal halves. */
+  .meta-ratings { justify-content: center; flex-wrap: nowrap; gap: 0; }
+  .meta-ratings .rt { padding: 0 6px; min-width: 0; }
   .meta-ratings .rt + .rt { border-left: 1px solid var(--stroke); }
-  .meta-ratings .rt b { font-size: 25px; }
-  .meta-ratings .rt span { font-size: 9px; }
-  .meta-desc { font-size: 12px; -webkit-line-clamp: 5; }
-  .meta-desc-toggle { font-size: 11px; }
+  .meta-ratings .rt b { font-size: 20px; }
+  .meta-ratings .rt span { font-size: 8px; letter-spacing: 0; white-space: nowrap; }
   /* Full-width rows under the poster. A rule between them does the work the
      label column used to do alone, so the labels can stop shouting. */
   .meta-facts { gap: 0; padding-top: 4px; border-top: 0; }

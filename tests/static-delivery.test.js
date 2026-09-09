@@ -81,3 +81,21 @@ test("the synopsis is measured only after the panel is visible", async () => {
   const measure = block.indexOf("descNode.scrollHeight > descNode.clientHeight");
   assert.ok(reveal >= 0 && measure > reveal, "reveal has to come before the measurement");
 });
+
+test("on a phone the text column cannot outgrow the poster", async () => {
+  const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  const mobile = styles.slice(styles.indexOf("@media (max-width: 560px)"));
+  // The poster's height has to be computable from its width, or the column
+  // beside it has nothing to size itself against.
+  assert.match(mobile, /\.meta-poster \{ width: 100%; aspect-ratio: 2 \/ 3; \}/);
+  assert.match(mobile, /--meta-poster-w: clamp\(/);
+  assert.match(mobile, /\.meta-body \{ max-height: calc\(var\(--meta-poster-w\) \* 1\.5\); overflow: hidden; \}/);
+  // Expanding the synopsis has to escape that cap, or "ещё" would open into a
+  // clipped box and read as broken.
+  assert.match(mobile, /\.meta-body:has\(\.meta-desc\.open\) \{ max-height: none/);
+  // Only the synopsis gives; the toggle must never be the thing that shrinks.
+  assert.match(mobile, /\.meta-desc \{[^}]*flex: 1 1 auto/);
+  assert.match(mobile, /\.meta-desc-toggle \{[^}]*flex: none/);
+  // Three figures — a film with a Letterboxd score — stay on one line.
+  assert.match(mobile, /\.meta-ratings \{[^}]*flex-wrap: nowrap/);
+});
