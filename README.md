@@ -12,12 +12,17 @@ Lightweight static MVP for the current playback flow:
 7. Serve admin-curated homepage lists as one public JSON snapshot from Vercel
    Blob CDN.
 
-The Vercel app remains static. The included Cloudflare Worker only resolves
-metadata and IDs; it does not proxy video bytes.
+Vercel serves a small bootstrap document and the existing API functions. The
+versioned frontend payload is read from jsDelivr; video bytes still go directly
+from each provider to the viewer.
 
 ## Deploy Shape
 
-- `index.html`, `styles.css`, `app.js`, `catalog.js` - Vercel static frontend.
+- `index.html` - sub-10 KB Vercel bootstrap. At build time it is pinned to the
+  deployment's full git SHA.
+- `app-shell.html`, CSS, JavaScript and static JSON - fetched from the immutable
+  `cdn.jsdelivr.net/gh/nanohit/alphytv@<sha>/...` release path. Same-origin
+  copies remain in the Vercel output only as a failure fallback.
 - `api/admin/*` - admin-only authentication and catalog writes.
 - `curated-config.json` - public Blob URL; visitors read the snapshot directly
   from Blob CDN and do not invoke a Function or Deno.
@@ -28,6 +33,10 @@ metadata and IDs; it does not proxy video bytes.
 - `resolver-deno/kinopub-main.js` - isolated premium KinoPub control-plane
   resolver intended for a separate Deno app. It returns a short-lived signed
   CDN URL to an authenticated client and never proxies manifests or media.
+
+`npm run build` creates `dist/` and injects `VERCEL_GIT_COMMIT_SHA` into the
+bootstrap. The mutable `catalog-cdn` branch remains the primary public catalog,
+so publishing an admin catalog does not require a frontend deployment.
 
 ## SOAP Movie Catalog
 

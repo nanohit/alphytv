@@ -208,6 +208,6 @@ test("watch reviews use a compact numeric strip and link the heading", async () 
   assert.doesNotMatch(block, /review-stars|reviews-note|Все отзывы на Letterboxd/);
   assert.match(block, /el\.reviewsLink\.href/);
 
-  const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
+  const html = await readFile(new URL("../app-shell.html", import.meta.url), "utf8");
   assert.match(html, /id="reviewsLink"[^>]*>Отзывы<\/a>/);
 });

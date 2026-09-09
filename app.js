@@ -427,7 +427,8 @@
   }
   function loadSoapCatalog() {
     if (soapCatalogLoaded) return soapCatalogLoaded;
-    soapCatalogLoaded = fetch("/soap-movies.json")
+    const catalogUrl = window.__alphyAssetUrl?.("soap-movies.json") || "/soap-movies.json";
+    soapCatalogLoaded = fetch(catalogUrl, { cache: "force-cache", credentials: "omit" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         soapMoviesList = (data && data.movies) || [];
@@ -806,7 +807,10 @@
         let payload = null;
         if (blobUrl) { try { payload = await grab(blobUrl); } catch { /* fall through */ } }
         if (!payload) { try { payload = await grab("/curated-live.json"); } catch { /* fall through */ } }
-        if (!payload) { try { payload = await grab("/curated-fallback.json"); } catch { return []; } }
+        if (!payload) {
+          const fallbackUrl = window.__alphyAssetUrl?.("curated-fallback.json") || "/curated-fallback.json";
+          try { payload = await grab(fallbackUrl); } catch { return []; }
+        }
         const items = [];
         for (const list of payload?.lists || []) {
           for (const item of list?.items || []) if (item?.key) items.push(item);

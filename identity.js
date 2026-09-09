@@ -17,7 +17,7 @@
 (function () {
   "use strict";
 
-  const MAP_URL = "/imdb-map.json";
+  const MAP_URL = window.__alphyAssetUrl?.("imdb-map.json") || "/imdb-map.json";
   const CINEMETA = "https://v3-cinemeta.strem.io/catalog";
   const STORE_PREFIX = "alphy.imdbid.v2:";
   // An id is a permanent fact, so it is kept for a season. A miss is kept far

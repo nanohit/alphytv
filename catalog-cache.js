@@ -1,4 +1,5 @@
-// Instant curated-catalog bootstrap: jsDelivr first, Vercel/Blob only as fallbacks.
+// Instant curated-catalog bootstrap: the live jsDelivr branch first, then the
+// immutable app snapshot and Blob as fallbacks.
 (function () {
   "use strict";
 
@@ -7,7 +8,8 @@
   const ADMIN_CATALOG_PATH = "/api/admin/catalog";
   const PRIMARY_CDN_URL =
     "https://cdn.jsdelivr.net/gh/nanohit/alphytv@catalog-cdn/curated-fallback.json";
-  const VERCEL_FALLBACK_URL = "/curated-fallback.json";
+  const STATIC_FALLBACK_URL =
+    window.__alphyAssetUrl?.("curated-fallback.json") || "/curated-fallback.json";
   const BLOB_MANIFEST_URL =
     "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/current.json";
   const BLOB_HOST_SUFFIX = ".public.blob.vercel-storage.com";
@@ -146,7 +148,7 @@
 
   function loadVercelFallback() {
     if (fallbackPromise) return fallbackPromise;
-    fallbackPromise = fetchCatalogJson(VERCEL_FALLBACK_URL, {
+    fallbackPromise = fetchCatalogJson(STATIC_FALLBACK_URL, {
       cache: "force-cache",
       credentials: "omit",
     }).then((catalog) => {
@@ -233,7 +235,7 @@
     if (requestUrl.pathname === CONFIG_PATH) {
       return jsonResponse({
         blobUrl: PUBLIC_CATALOG_PATH,
-        fallbackUrl: VERCEL_FALLBACK_URL,
+        fallbackUrl: STATIC_FALLBACK_URL,
       });
     }
 

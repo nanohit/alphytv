@@ -3,6 +3,9 @@
 
   const CATALOG_CACHE_VERSION = "20260816-r71";
   const CONFIG_URL = `/curated-config.json?v=${CATALOG_CACHE_VERSION}`;
+  const STATIC_FALLBACK_URL =
+    window.__alphyAssetUrl?.("curated-fallback.json") ||
+    `/curated-fallback.json?v=${CATALOG_CACHE_VERSION}`;
   const ADMIN_CHECK_URL = "/api/admin/check";
   const ADMIN_CATALOG_URL = "/api/admin/catalog";
   const ADMIN_LOGIN_URL = "/api/admin/login";
@@ -19,7 +22,7 @@
       bookmarkBanner: false, bookmarkBannerText: DEFAULT_BANNER_TEXT,
     },
     blobUrl: "",
-    fallbackUrl: `/curated-fallback.json?v=${CATALOG_CACHE_VERSION}`,
+    fallbackUrl: STATIC_FALLBACK_URL,
     admin: false,
     dirty: false,
     saving: false,

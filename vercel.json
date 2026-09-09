@@ -1,4 +1,6 @@
 {
+  "buildCommand": "node scripts/build-web.mjs",
+  "outputDirectory": "dist",
   "cleanUrls": true,
   "git": {
     "deploymentEnabled": {
