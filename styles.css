@@ -1194,7 +1194,21 @@ body.admin-mode .meta-info { display: flex; }
      lines and the ellipsis appears where it should. 4 is the fallback for the
      moment before it runs. */
   .meta-desc { font-size: 12px; --desc-lines: 4; }
-  .meta-desc-toggle { font-size: 11px; }
+  /* "ещё" goes at the end of the synopsis, not on a line of its own. A row plus
+     the column gap cost a line and a half of text, which is most of why the
+     synopsis was closing so far above the bottom of the poster. Out of flow, so
+     it takes nothing from the line count; the fade keeps it off the words it
+     ends up beside. */
+  .meta-body { position: relative; }
+  .meta-desc-toggle {
+    position: absolute; right: 0; bottom: 0; margin: 0; padding: 0 0 0 30px;
+    font-size: 11px; line-height: 1.45;
+    background: linear-gradient(to right, rgba(15, 15, 15, 0), var(--panel) 40%);
+  }
+  /* Expanded, there is no last line to sit beside — back into the flow. */
+  .meta-body:has(.meta-desc.open) .meta-desc-toggle {
+    position: static; padding: 0; background: none; margin-top: -6px;
+  }
   .meta-panel .mp-title { font-size: 18px; line-height: 1.2; }
   .meta-panel .mp-sub { font-size: 12px; gap: 5px; }
   .meta-panel .mp-age { font-size: 10px; padding: 1px 5px; }

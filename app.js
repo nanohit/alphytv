@@ -6375,10 +6375,27 @@ parent.postMessage({
     }
     const posterHeight = poster.getBoundingClientRect().height;
     if (!posterHeight) return;
-    // Everything in the column that is not the synopsis, gaps and margins
-    // included — measured rather than added up, so nothing has to be kept in
-    // sync with the stylesheet.
-    const others = body.getBoundingClientRect().height - desc.getBoundingClientRect().height;
+    // Everything in the column that is not the synopsis.
+    //
+    // Summed from the children rather than taken as (column - synopsis), which
+    // is what this did first and is circular: the grid stretches the column to
+    // the height of the poster, so that subtraction returns whatever the
+    // synopsis already happened to be and the count never moves off its
+    // starting value. The toggle is out of flow on this layout and rightly
+    // contributes nothing.
+    const gap = parseFloat(getComputedStyle(body).rowGap) || 0;
+    let others = 0;
+    let inFlow = 0;
+    for (const child of body.children) {
+      if (child === desc) continue;
+      const box = child.getBoundingClientRect();
+      if (!box.height) continue;
+      const style = getComputedStyle(child);
+      if (style.position === "absolute" || style.position === "fixed") continue;
+      others += box.height + (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
+      inFlow += 1;
+    }
+    others += gap * inFlow;
     const lineHeight = parseFloat(getComputedStyle(desc).lineHeight);
     if (!Number.isFinite(lineHeight) || lineHeight <= 0) return;
     const lines = Math.floor((posterHeight - others) / lineHeight);

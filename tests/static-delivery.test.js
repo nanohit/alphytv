@@ -102,6 +102,26 @@ test("the synopsis is cut between lines, never through one", async () => {
   // It needs real boxes, so it runs after the panel is revealed.
   const reveal = app.indexOf('el.metaPanel.classList.remove("hidden")');
   assert.ok(app.indexOf("fitMetaSynopsis();", reveal) > reveal, "measure after reveal");
+  // The space left over is summed from the children. Taking it as
+  // (column - synopsis) is circular: the grid stretches the column to the
+  // height of the poster, so the subtraction returns whatever the synopsis
+  // already was and the count never moves off its starting value.
+  const fit = app.slice(app.indexOf("function fitMetaSynopsis"), app.indexOf("let fitSynopsisTimer"));
+  assert.match(fit, /for \(const child of body\.children\)/);
+  assert.doesNotMatch(fit, /body\.getBoundingClientRect\(\)\.height - desc/);
+  assert.match(fit, /style\.position === "absolute"/);
+});
+
+test('"ещё" sits at the end of the synopsis, not on a line of its own', async () => {
+  const styles = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  const mobile = styles.slice(styles.indexOf("@media (max-width: 560px)"));
+  // A row of its own plus the column gap cost a line and a half of synopsis,
+  // which is most of why it used to stop so far above the bottom of the poster.
+  assert.match(mobile, /\.meta-desc-toggle \{\s*\n\s*position: absolute; right: 0; bottom: 0/);
+  // Out of flow, so fitMetaSynopsis does not count it against the line budget.
+  assert.match(mobile, /background: linear-gradient\(to right/);
+  // Expanded there is no last line to sit beside, so it returns to the flow.
+  assert.match(mobile, /:has\(\.meta-desc\.open\) \.meta-desc-toggle \{\s*\n\s*position: static/);
 });
 
 test("rating figures share the row instead of huddling in the middle", async () => {
