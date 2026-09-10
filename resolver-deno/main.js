@@ -42,6 +42,7 @@ const env = {
   __recordKeyAttempt: null,
 };
 
+const EGRESS_ISOLATE = crypto.randomUUID().slice(0, 8);
 const KEY_POOL_RUNTIME_TOKEN = Deno.env.get("ALPHY_KEY_POOL_TOKEN") || "";
 const KEY_POOL_RUNTIME_URL =
   Deno.env.get("ALPHY_KEY_POOL_URL") || "https://alphy.tv/api/key-pool/runtime";
@@ -591,6 +592,33 @@ Deno.serve({ port: listenPort }, async (request, info) => {
     // handoff. RezkaClient validates the resulting address again before forwarding.
     headers.set("x-alphy-client-ip", clientIp);
     request = new Request(request, { headers });
+  }
+  // TEMPORARY diagnostic, removed once the Supabase comparison is recorded.
+  // hdrzk.org sees this app's outbound address on every Rezka resolve, so the
+  // question "is one Deno app a single identifiable client?" is answerable only
+  // by looking. Takes no input and reports nothing but its own egress address.
+  if (url.pathname === "/egress" && request.method === "GET") {
+    const echo = async (target) => {
+      try {
+        const response = await fetch(target, {
+          signal: AbortSignal.timeout(6000),
+          headers: { "User-Agent": "curl/8" },
+        });
+        return (await response.text()).trim().slice(0, 64);
+      } catch (error) {
+        return `error: ${String(error?.message || error).slice(0, 60)}`;
+      }
+    };
+    const [v4, any] = await Promise.all([
+      echo("https://api.ipify.org"),
+      echo("https://icanhazip.com"),
+    ]);
+    return new Response(JSON.stringify({
+      region: Deno.env.get("DENO_REGION") || "",
+      deployment: Deno.env.get("DENO_DEPLOYMENT_ID") || "",
+      isolate: EGRESS_ISOLATE,
+      ip: { ipify: v4, icanhazip: any },
+    }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
   }
   if (url.pathname === "/key-pool/status" && request.method === "GET") {
     return keyPoolStatusResponse(request);
