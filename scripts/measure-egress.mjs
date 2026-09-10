@@ -1,10 +1,18 @@
 // How many distinct addresses do we actually have to work with?
 //
 // Reads supabase/functions/egress on every project we run and reports the set of
-// outbound IPs, grouped by project and by region. The point is a decision, not a
-// number: if every project answers with the same address, moving the HDRezka
-// relay onto "the Supabase cluster" buys redundancy of hostnames and nothing at
-// all in addresses, and should be argued for on that basis instead.
+// outbound IPs, grouped by project and by region.
+//
+// Measured 2026-09-10, and the answer was not the one the question assumed:
+//   Supabase Edge  36 calls -> 36 distinct IPv4, one per cold isolate, spanning
+//                  ~11 /16s per project out of a shared AWS eu-central-1 pool.
+//                  The projects' /16s overlap, so it is ONE pool and a single
+//                  project already gets the whole rotation — the cluster of
+//                  accounts is not what buys it. (The IPv6 side is the opposite:
+//                  one shared 2a05:d014:61b:2708::/62 for every project. Only
+//                  matters for a target with AAAA; hdrzk.org has none.)
+//   Deno Deploy    24 parallel calls -> 1 isolate, 1 address (78.141.210.166,
+//                  region ams). One fixed identity for every viewer we have.
 //
 //   node scripts/measure-egress.mjs [--rounds=8] [--deno]
 //
@@ -80,7 +88,8 @@ for (const [ref, entry] of seen) {
   }
 }
 
-console.log(`\ndistinct addresses across all ${PROJECTS.length} projects: ${everything.size}`);
+const reporting = [...seen.values()].filter((entry) => entry.ips.size);
+console.log(`\ndistinct addresses across ${reporting.length} reporting projects: ${everything.size}`);
 console.log([...everything].map((ip) => `  ${ip}`).join("\n"));
 
 // The verdict this run exists to produce.
@@ -94,12 +103,19 @@ if (everything.size === 0) {
 } else if (everything.size === 1) {
   console.log("\n=> One address for the whole cluster. Moving the relay here changes the");
   console.log("   hostname, not the address the source sees. Argue it as redundancy only.");
-} else if (everything.size < PROJECTS.length) {
-  console.log(`\n=> ${everything.size} addresses for ${PROJECTS.length} projects: they share a NAT, probably`);
-  console.log("   per region. Extra projects in an existing region add nothing; a project");
-  console.log("   in a NEW region is what adds an address.");
+} else if (everything.size <= reporting.length) {
+  console.log(`\n=> ${everything.size} addresses across ${reporting.length} reporting projects: a shared NAT,`);
+  console.log("   most likely per region. Another project in an existing region adds nothing;");
+  console.log("   a project in a NEW region is what adds an address.");
 } else {
-  console.log("\n=> One address per project. Spreading the relay genuinely spreads the load.");
+  // The measured case. Counting addresses per project misreads it: the address
+  // turns over per cold isolate, so what matters is calls-to-addresses, and
+  // whether the projects draw from one pool or several.
+  const perCall = (everything.size / (ROUNDS * reporting.length)).toFixed(2);
+  console.log(`\n=> ${everything.size} addresses from ${ROUNDS * reporting.length} calls (${perCall} per call).`);
+  console.log("   The address rotates per invocation, not per project. Check the /16 overlap");
+  console.log("   above: if the projects share ranges it is one pool, and ONE project already");
+  console.log("   gives the full rotation — more accounts buy nothing here.");
 }
 
 if (args.has("deno")) {
