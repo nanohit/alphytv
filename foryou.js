@@ -31,6 +31,13 @@
   const CLIENT_POOL_TTL = 24 * 3600e3;
   const CLIENT_POOL_RETRY_TTL = 60e3;
   const CLIENT_POOL_STORE_KEY = "alphy.foryou.clientPool.v1";
+  // Shared Kinopoisk cache (supabase/functions/kp): a film is fetched once for
+  // everyone and read from the CDN after that, instead of every browser spending
+  // its own quota on it. The ring and the placement hash must match the
+  // function's, or a browser would look for a film where it was never written.
+  const KP_BROKER_URL = "https://xoathqkggcuyoyutxwri.supabase.co/functions/v1/kp";
+  const KP_OBJECT_HOSTS = ["xoathqkggcuyoyutxwri", "hcuhanruaclhiltpdegc", "matozzgmaranfemgxpzy"];
+  const KP_GROUP_HOSTS = Array.from({ length: 256 }, (_, group) => group % KP_OBJECT_HOSTS.length);
 
   const SIM_TTL = 30 * 24 * 3600e3;
   const META_TTL = 30 * 24 * 3600e3;
@@ -289,6 +296,77 @@
     return clientPoolInflight;
   }
 
+  function kpPlacementGroup(id) {
+    let hash = 0;
+    for (const char of String(id)) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0;
+    return hash % 256;
+  }
+
+  function kpObjectUrl(kind, id) {
+    const host = KP_OBJECT_HOSTS[KP_GROUP_HOSTS[kpPlacementGroup(id)]];
+    return `https://${host}.supabase.co/storage/v1/object/public/kp/v1/${kind}/${id}.json`;
+  }
+
+  function sharedTarget(path) {
+    const url = new URL(path, UNOFFICIAL_BASE_URL);
+    let match = url.pathname.match(/^\/api\/v2\.2\/films\/(\d+)$/);
+    if (match) return { kind: "film", id: match[1] };
+    match = url.pathname.match(/^\/api\/v2\.2\/films\/(\d+)\/similars$/);
+    if (match) return { kind: "similars", id: match[1] };
+    const filmId = url.searchParams.get("filmId") || "";
+    if (url.pathname === "/api/v1/staff" && /^\d+$/.test(filmId)) return { kind: "staff", id: filmId };
+    return null;
+  }
+
+  // A film the provider does not know is reported exactly as the provider
+  // would have reported it, so every caller's existing 404 handling applies.
+  function unwrapShared(object) {
+    if (object?.status === "missing") {
+      const error = new Error("Unofficial 404");
+      error.status = 404;
+      throw error;
+    }
+    return object.data;
+  }
+
+  async function sharedJson(url, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
+        signal: controller.signal,
+      });
+      if (!response.ok) return null;
+      const object = await response.json();
+      return object?.v === 1 ? object : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Resolves to the provider's payload, or undefined when the shared cache
+  // could not answer — then the caller carries on exactly as before.
+  async function sharedUnofficialGet(path) {
+    const target = sharedTarget(path);
+    if (!target) return undefined;
+    const stored = await sharedJson(kpObjectUrl(target.kind, target.id), 5000);
+    const matches = stored && stored.kind === target.kind && String(stored.id) === target.id;
+    if (matches && Date.parse(stored.freshUntil) > Date.now()) return unwrapShared(stored);
+    // Missing or stale: one fill for everyone. It still spends quota, so it is
+    // counted against this browser's daily allowance like any other request.
+    if (budgetLeft() > 0) {
+      countFetch();
+      const filled = await sharedJson(`${KP_BROKER_URL}?kind=${target.kind}&id=${target.id}`, 15000);
+      if (filled && filled.kind === target.kind && String(filled.id) === target.id) return unwrapShared(filled);
+    }
+    // A stale answer beats spending this browser's keys on the same film.
+    return matches ? unwrapShared(stored) : undefined;
+  }
+
   function directUnofficialUrl(path) {
     const url = new URL(path, UNOFFICIAL_BASE_URL);
     if (url.origin !== UNOFFICIAL_BASE_URL) return "";
@@ -307,9 +385,13 @@
     return error;
   }
 
-  async function directUnofficialGet(path, { retried = false } = {}) {
+  async function directUnofficialGet(path, { retried = false, skipShared = false } = {}) {
     const url = directUnofficialUrl(path);
     if (!url) throw new Error("unsupported direct unofficial path");
+    if (!retried && !skipShared) {
+      const shared = await sharedUnofficialGet(path);
+      if (shared !== undefined) return shared;
+    }
     const keys = await browserUnofficialKeys();
     const fromStorage = clientPoolCache.stored === true;
     if (!keys.length) {
@@ -359,7 +441,7 @@
     if (fromStorage && !retried && refused === keys.length) {
       forgetStoredPool();
       const fresh = await browserUnofficialKeys({ fresh: true });
-      if (fresh.length) return directUnofficialGet(path, { retried: true });
+      if (fresh.length) return directUnofficialGet(path, { retried: true, skipShared: true });
     }
     throw lastError || new Error("all browser unofficial keys exhausted");
   }
@@ -381,10 +463,14 @@
   }
 
   async function apiGet(path) {
+    // Reading what the shared cache already holds costs no quota at all, so it
+    // comes before this browser's daily allowance is even consulted.
+    const shared = await sharedUnofficialGet(path);
+    if (shared !== undefined) return shared;
     if (budgetLeft() <= 0) throw budgetError();
     if (directUnofficialUrl(path)) {
       try {
-        return await directUnofficialGet(path);
+        return await directUnofficialGet(path, { skipShared: true });
       } catch (error) {
         if (error.code === "budget") throw error;
         log("direct unofficial failed; using Deno fallback", error.message);
@@ -1093,6 +1179,7 @@
       buildSeeds, scoreCandidates, normTitle, recencyWeight, engagementWeight,
       toCuratedItem, hiddenIds, rankSimilars, affinityIndex, personNames, personRefs,
       browserUnofficialKeys, directUnofficialUrl, directUnofficialGet,
+      sharedTarget, sharedUnofficialGet, kpObjectUrl, kpPlacementGroup, apiGet,
     },
   };
 })();

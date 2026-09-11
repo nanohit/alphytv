@@ -59,6 +59,8 @@ test("browser Unofficial pool rotates quota keys and bypasses Deno", async () =>
         },
       }), { status: 200, headers: { "content-type": "application/json" } });
     }
+    // The shared cache is empty in this test: every film falls through to the keys.
+    if (String(url).includes(".supabase.co/")) return new Response("{}", { status: 404 });
     providerCalls.push({ url: String(url), key: options.headers?.["X-API-KEY"], referrerPolicy: options.referrerPolicy });
     if (options.headers?.["X-API-KEY"] === "spent-key") {
       return new Response(JSON.stringify({ message: "quota" }), {
@@ -469,6 +471,7 @@ function poolServer({ poolKeys, answer }) {
       calls.push("pool");
       return jsonResponse({ ok: true, pool: { keys: poolKeys.map((value) => ({ id: value, value })) } });
     }
+    if (String(url).includes(".supabase.co/")) return new Response("{}", { status: 404 });
     const key = options.headers?.["X-API-KEY"];
     calls.push(key);
     return answer(key);
