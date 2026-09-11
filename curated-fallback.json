@@ -2497,8 +2497,8 @@
             "imdb": "tt14230458"
           },
           "letterboxd": {
-            "r": 3.92,
-            "n": 2625463,
+            "r": 3.91,
+            "n": 2656058,
             "slug": "poor-things-2023"
           }
         },
@@ -6063,6 +6063,11 @@
           "cachedAt": "2026-06-29T06:50:28.413Z",
           "externalId": {
             "imdb": "tt4729430"
+          },
+          "letterboxd": {
+            "r": 4.19,
+            "n": 701175,
+            "slug": "klaus"
           }
         },
         {
@@ -6085,6 +6090,11 @@
           "cachedAt": "2026-06-29T06:55:45.956Z",
           "externalId": {
             "imdb": "tt7979580"
+          },
+          "letterboxd": {
+            "r": 3.82,
+            "n": 678499,
+            "slug": "the-mitchells-vs-the-machines"
           }
         },
         {
@@ -6107,6 +6117,11 @@
           "cachedAt": "2026-06-29T06:59:52.691Z",
           "externalId": {
             "imdb": "tt4116284"
+          },
+          "letterboxd": {
+            "r": 4,
+            "n": 1208472,
+            "slug": "the-lego-batman-movie"
           }
         },
         {
@@ -6129,6 +6144,11 @@
           "cachedAt": "2026-06-29T07:52:48.541Z",
           "externalId": {
             "imdb": "tt0844471"
+          },
+          "letterboxd": {
+            "r": 3.42,
+            "n": 876445,
+            "slug": "cloudy-with-a-chance-of-meatballs"
           }
         },
         {
@@ -6170,6 +6190,11 @@
           "cachedAt": "2026-06-29T07:55:34.138Z",
           "externalId": {
             "imdb": "tt1192628"
+          },
+          "letterboxd": {
+            "r": 3.76,
+            "n": 963410,
+            "slug": "rango"
           }
         },
         {
