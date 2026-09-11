@@ -3445,6 +3445,11 @@
           "cachedAt": "2026-06-29T07:07:26.515Z",
           "externalId": {
             "imdb": "tt35672862"
+          },
+          "letterboxd": {
+            "r": 3.28,
+            "n": 533610,
+            "slug": "hokum"
           }
         },
         {
@@ -3467,6 +3472,11 @@
           "cachedAt": "2026-06-29T07:09:34.372Z",
           "externalId": {
             "imdb": "tt0470752"
+          },
+          "letterboxd": {
+            "r": 3.96,
+            "n": 1367662,
+            "slug": "ex-machina-2015"
           }
         },
         {
@@ -3489,6 +3499,11 @@
           "cachedAt": "2026-06-29T07:13:53.748Z",
           "externalId": {
             "imdb": "tt0074486"
+          },
+          "letterboxd": {
+            "r": 3.81,
+            "n": 584309,
+            "slug": "eraserhead"
           }
         },
         {
@@ -3511,6 +3526,11 @@
           "cachedAt": "2026-06-29T07:19:56.518Z",
           "externalId": {
             "imdb": "tt0947798"
+          },
+          "letterboxd": {
+            "r": 4.17,
+            "n": 3362520,
+            "slug": "black-swan"
           }
         },
         {
@@ -3533,6 +3553,11 @@
           "cachedAt": "2026-06-29T07:21:19.046Z",
           "externalId": {
             "imdb": "tt0120663"
+          },
+          "letterboxd": {
+            "r": 3.98,
+            "n": 1531808,
+            "slug": "eyes-wide-shut"
           }
         },
         {
@@ -3555,6 +3580,11 @@
           "cachedAt": "2026-06-29T07:32:44.368Z",
           "externalId": {
             "imdb": "tt1226837"
+          },
+          "letterboxd": {
+            "r": 4.09,
+            "n": 1815137,
+            "slug": "beautiful-boy-2018"
           }
         },
         {
@@ -3577,6 +3607,11 @@
           "cachedAt": "2026-06-29T07:36:30.930Z",
           "externalId": {
             "imdb": "tt0117381"
+          },
+          "letterboxd": {
+            "r": 4.02,
+            "n": 617941,
+            "slug": "primal-fear"
           }
         }
       ]
@@ -3605,6 +3640,11 @@
           "cachedAt": "2026-06-25T17:14:25.018Z",
           "externalId": {
             "imdb": "tt1219289"
+          },
+          "letterboxd": {
+            "r": 3.38,
+            "n": 551331,
+            "slug": "limitless"
           }
         },
         {
@@ -3627,6 +3667,11 @@
           "cachedAt": "2026-06-25T17:15:36.747Z",
           "externalId": {
             "imdb": "tt9484998"
+          },
+          "letterboxd": {
+            "r": 3.77,
+            "n": 911264,
+            "slug": "palm-springs-2020"
           }
         },
         {
@@ -3695,6 +3740,11 @@
           "cachedAt": "2026-06-25T17:18:52.387Z",
           "externalId": {
             "imdb": "tt8980602"
+          },
+          "letterboxd": {
+            "r": 3.69,
+            "n": 72006,
+            "slug": "the-kid-detective"
           }
         },
         {
@@ -3717,6 +3767,11 @@
           "cachedAt": "2026-06-25T17:19:19.201Z",
           "externalId": {
             "imdb": "tt1119646"
+          },
+          "letterboxd": {
+            "r": 3.76,
+            "n": 2170115,
+            "slug": "the-hangover"
           }
         },
         {
@@ -3739,6 +3794,11 @@
           "cachedAt": "2026-06-25T17:20:12.291Z",
           "externalId": {
             "imdb": "tt0208092"
+          },
+          "letterboxd": {
+            "r": 4.05,
+            "n": 867830,
+            "slug": "snatch"
           }
         },
         {
@@ -3761,6 +3821,11 @@
           "cachedAt": "2026-06-25T17:20:32.698Z",
           "externalId": {
             "imdb": "tt1022603"
+          },
+          "letterboxd": {
+            "r": 3.65,
+            "n": 3379730,
+            "slug": "500-days-of-summer"
           }
         }
       ]
@@ -3833,7 +3898,12 @@
             "liftId": "91261",
             "kpId": "5580707"
           },
-          "cachedAt": "2026-08-20T10:06:49.286Z"
+          "cachedAt": "2026-08-20T10:06:49.286Z",
+          "letterboxd": {
+            "r": 3.04,
+            "n": 62557,
+            "slug": "the-death-of-robin-hood"
+          }
         },
         {
           "id": "3b9c8227-50d6-46cf-a210-3aa47b4f757b",
@@ -3900,7 +3970,12 @@
             "kind": "ort",
             "embedUrl": "https://api.ortified.ws/embed/movie/85184"
           },
-          "cachedAt": "2026-08-20T10:08:07.661Z"
+          "cachedAt": "2026-08-20T10:08:07.661Z",
+          "letterboxd": {
+            "r": 3.66,
+            "n": 402110,
+            "slug": "if-i-had-legs-id-kick-you"
+          }
         },
         {
           "id": "ea42799a-c831-4818-9bbf-be867475bd6b",
@@ -3922,6 +3997,11 @@
           "cachedAt": "2026-06-25T17:21:04.929Z",
           "externalId": {
             "imdb": "tt32916440"
+          },
+          "letterboxd": {
+            "r": 4.02,
+            "n": 3089055,
+            "slug": "marty-supreme"
           }
         },
         {
@@ -3944,6 +4024,11 @@
           "cachedAt": "2026-06-25T17:22:07.032Z",
           "externalId": {
             "imdb": "tt15791034"
+          },
+          "letterboxd": {
+            "r": 3.43,
+            "n": 1635187,
+            "slug": "barbarian-2022"
           }
         },
         {
@@ -3966,6 +4051,11 @@
           "cachedAt": "2026-06-25T17:22:55.940Z",
           "externalId": {
             "imdb": "tt4925292"
+          },
+          "letterboxd": {
+            "r": 3.81,
+            "n": 3248910,
+            "slug": "lady-bird"
           }
         },
         {
@@ -4015,6 +4105,11 @@
           "cachedAt": "2026-06-25T17:25:51.030Z",
           "externalId": {
             "imdb": "tt33071426"
+          },
+          "letterboxd": {
+            "r": 3.64,
+            "n": 2781394,
+            "slug": "the-drama"
           }
         },
         {
@@ -4037,6 +4132,11 @@
           "cachedAt": "2026-06-25T17:26:25.706Z",
           "externalId": {
             "imdb": "tt13238346"
+          },
+          "letterboxd": {
+            "r": 4.16,
+            "n": 1862816,
+            "slug": "past-lives"
           }
         },
         {
@@ -4059,6 +4159,11 @@
           "cachedAt": "2026-06-25T17:26:54.127Z",
           "externalId": {
             "imdb": "tt7984734"
+          },
+          "letterboxd": {
+            "r": 4,
+            "n": 1602549,
+            "slug": "the-lighthouse-2019"
           }
         },
         {
@@ -4081,6 +4186,11 @@
           "cachedAt": "2026-06-25T17:27:33.542Z",
           "externalId": {
             "imdb": "tt32246771"
+          },
+          "letterboxd": {
+            "r": 3.68,
+            "n": 1098056,
+            "slug": "bring-her-back"
           }
         },
         {
@@ -4103,6 +4213,11 @@
           "cachedAt": "2026-06-25T17:28:08.362Z",
           "externalId": {
             "imdb": "tt30057084"
+          },
+          "letterboxd": {
+            "r": 2.66,
+            "n": 929032,
+            "slug": "babygirl-2024"
           }
         },
         {
@@ -4124,6 +4239,11 @@
           "cachedAt": "2026-06-29T07:26:31.920Z",
           "externalId": {
             "imdb": "tt13833688"
+          },
+          "letterboxd": {
+            "r": 3.67,
+            "n": 1222511,
+            "slug": "the-whale-2022"
           }
         },
         {
@@ -4146,6 +4266,11 @@
           "cachedAt": "2026-06-29T07:28:23.122Z",
           "externalId": {
             "imdb": "tt3170832"
+          },
+          "letterboxd": {
+            "r": 3.97,
+            "n": 825236,
+            "slug": "room-2015"
           }
         },
         {
@@ -4168,6 +4293,11 @@
           "cachedAt": "2026-06-29T07:30:05.013Z",
           "externalId": {
             "imdb": "tt17279496"
+          },
+          "letterboxd": {
+            "r": 3.56,
+            "n": 1200456,
+            "slug": "civil-war-2024"
           }
         },
         {
@@ -4190,6 +4320,11 @@
           "cachedAt": "2026-06-25T18:10:26.901Z",
           "externalId": {
             "imdb": "tt0371257"
+          },
+          "letterboxd": {
+            "r": 3.6,
+            "n": 171425,
+            "slug": "stay"
           }
         },
         {
@@ -4212,6 +4347,11 @@
           "cachedAt": "2026-07-08T10:35:35.462Z",
           "externalId": {
             "imdb": "tt7784604"
+          },
+          "letterboxd": {
+            "r": 3.92,
+            "n": 2858475,
+            "slug": "hereditary"
           }
         }
       ]
@@ -4240,6 +4380,11 @@
           "cachedAt": "2026-06-25T18:05:10.775Z",
           "externalId": {
             "imdb": "tt0780504"
+          },
+          "letterboxd": {
+            "r": 3.91,
+            "n": 2088335,
+            "slug": "drive-2011"
           }
         },
         {
@@ -4262,6 +4407,11 @@
           "cachedAt": "2026-06-25T18:05:35.194Z",
           "externalId": {
             "imdb": "tt2872718"
+          },
+          "letterboxd": {
+            "r": 4.04,
+            "n": 1925357,
+            "slug": "nightcrawler"
           }
         },
         {
@@ -4338,6 +4488,11 @@
           "cachedAt": "2026-06-25T18:07:08.273Z",
           "externalId": {
             "imdb": "tt0075314"
+          },
+          "letterboxd": {
+            "r": 4.1,
+            "n": 2542149,
+            "slug": "taxi-driver"
           }
         },
         {
@@ -4360,6 +4515,11 @@
           "cachedAt": "2026-06-25T18:07:55.597Z",
           "externalId": {
             "imdb": "tt0106856"
+          },
+          "letterboxd": {
+            "r": 3.7,
+            "n": 226277,
+            "slug": "falling-down"
           }
         },
         {
@@ -4382,6 +4542,11 @@
           "cachedAt": "2026-06-25T18:09:49.956Z",
           "externalId": {
             "imdb": "tt0477348"
+          },
+          "letterboxd": {
+            "r": 4.3,
+            "n": 2390382,
+            "slug": "no-country-for-old-men"
           }
         },
         {
@@ -4404,6 +4569,11 @@
           "cachedAt": "2026-06-25T18:12:21.703Z",
           "externalId": {
             "imdb": "tt0364569"
+          },
+          "letterboxd": {
+            "r": 4.36,
+            "n": 1703174,
+            "slug": "oldboy"
           }
         }
       ]
@@ -4565,6 +4735,11 @@
           "cachedAt": "2026-06-29T08:05:26.161Z",
           "externalId": {
             "imdb": "tt31711040"
+          },
+          "letterboxd": {
+            "r": 4.28,
+            "n": 516011,
+            "slug": "look-back-2024"
           }
         },
         {
@@ -4671,7 +4846,10 @@
             "episode": 1,
             "kpId": "4870795"
           },
-          "cachedAt": "2026-08-20T09:57:09.200Z"
+          "cachedAt": "2026-08-20T09:57:09.200Z",
+          "letterboxd": {
+            "r": 0
+          }
         },
         {
           "id": "3680301e-2ce1-43a6-ac6f-d6b3b384c514",
@@ -4747,7 +4925,12 @@
             "episode": 1,
             "kpId": "8624606"
           },
-          "cachedAt": "2026-08-20T10:01:13.220Z"
+          "cachedAt": "2026-08-20T10:01:13.220Z",
+          "letterboxd": {
+            "r": 4.35,
+            "n": 42038,
+            "slug": "takopis-original-sin"
+          }
         },
         {
           "id": "68f4dac5-23e8-425d-bbfc-69d41db60ad9",
@@ -4814,7 +4997,10 @@
             "season": 1,
             "episode": 1
           },
-          "cachedAt": "2026-08-20T10:03:01.152Z"
+          "cachedAt": "2026-08-20T10:03:01.152Z",
+          "letterboxd": {
+            "r": 0
+          }
         },
         {
           "id": "f85805d3-a798-45a5-8f70-1d93cba06a2b",
@@ -4890,7 +5076,10 @@
             "episode": 1,
             "kpId": "5462015"
           },
-          "cachedAt": "2026-08-20T10:03:22.265Z"
+          "cachedAt": "2026-08-20T10:03:22.265Z",
+          "letterboxd": {
+            "r": 0
+          }
         },
         {
           "id": "6a6ca6ed-c6d6-4cf1-8d4d-6c82c5bc4845",
@@ -4958,7 +5147,10 @@
             "episode": 1,
             "kpId": "6802576"
           },
-          "cachedAt": "2026-08-20T10:04:11.719Z"
+          "cachedAt": "2026-08-20T10:04:11.719Z",
+          "letterboxd": {
+            "r": 0
+          }
         },
         {
           "id": "9eece48c-0703-4b6d-8a12-f189726cfc71",
@@ -5140,6 +5332,11 @@
           "cachedAt": "2026-06-25T18:21:34.378Z",
           "externalId": {
             "imdb": "tt1408101"
+          },
+          "letterboxd": {
+            "r": 3.4,
+            "n": 306352,
+            "slug": "star-trek-into-darkness"
           }
         },
         {
@@ -5278,7 +5475,12 @@
             "kind": "ort",
             "embedUrl": "https://api.ortified.ws/embed/movie/65462"
           },
-          "cachedAt": "2026-08-20T10:11:39.922Z"
+          "cachedAt": "2026-08-20T10:11:39.922Z",
+          "letterboxd": {
+            "r": 3.3,
+            "n": 496790,
+            "slug": "the-creator-2023"
+          }
         },
         {
           "id": "631951d8-b40a-4388-b0f0-bebbc2ff9042",
@@ -5346,7 +5548,12 @@
             "liftId": "3006",
             "kpId": "467099"
           },
-          "cachedAt": "2026-08-20T10:13:55.217Z"
+          "cachedAt": "2026-08-20T10:13:55.217Z",
+          "letterboxd": {
+            "r": 3.31,
+            "n": 766353,
+            "slug": "prometheus"
+          }
         },
         {
           "id": "cf0eb52b-e2b6-4999-9abd-12644172c862",
@@ -5413,7 +5620,12 @@
             "liftId": "4169",
             "kpId": "422882"
           },
-          "cachedAt": "2026-08-20T10:16:14.867Z"
+          "cachedAt": "2026-08-20T10:16:14.867Z",
+          "letterboxd": {
+            "r": 3.05,
+            "n": 63414,
+            "slug": "pandorum"
+          }
         }
       ]
     },
@@ -5600,6 +5812,11 @@
           "cachedAt": "2026-06-25T17:40:56.943Z",
           "externalId": {
             "imdb": "tt8864596"
+          },
+          "letterboxd": {
+            "r": 3.86,
+            "n": 369031,
+            "slug": "transformers-one"
           }
         },
         {
@@ -5755,6 +5972,11 @@
           "cachedAt": "2026-06-29T06:52:21.481Z",
           "externalId": {
             "imdb": "tt19500164"
+          },
+          "letterboxd": {
+            "r": 3.96,
+            "n": 444377,
+            "slug": "nimona-2023"
           }
         },
         {
@@ -5795,6 +6017,11 @@
           "cachedAt": "2026-07-08T10:58:26.571Z",
           "externalId": {
             "imdb": "tt14205554"
+          },
+          "letterboxd": {
+            "r": 3.53,
+            "n": 1933779,
+            "slug": "kpop-demon-hunters"
           }
         },
         {
