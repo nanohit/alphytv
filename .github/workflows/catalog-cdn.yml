@@ -15,12 +15,28 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-slim
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v7
         with:
           ref: catalog-cdn
           fetch-depth: 1
+
+      # The bake script and the identity map live on main. Only those two files
+      # are needed, so only those two are checked out, beside the snapshot.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          path: app
+          fetch-depth: 1
+          sparse-checkout: |
+            scripts/bake-curated-letterboxd.mjs
+            imdb-map.json
+          sparse-checkout-cone-mode: false
+
+      - name: Keep the published snapshot for comparison
+        shell: bash
+        run: cp curated-fallback.json "$RUNNER_TEMP/previous.json" || echo '{}' > "$RUNNER_TEMP/previous.json"
 
       - name: Fetch authoritative catalog snapshot
         shell: bash
@@ -37,6 +53,19 @@ jobs:
           await writeFile("curated-fallback.json", `${JSON.stringify(catalog, null, 2)}\n`);
           console.log(`catalog revision ${catalog.revision}`);
           NODE
+
+      # Every visitor sees the same home rows, so their Letterboxd scores ride in
+      # the snapshot instead of costing each visit a function call per shard.
+      # A failed bake must not hold back a catalogue edit, so it cannot fail
+      # the job; a shard it cannot reach keeps the previously published score.
+      - name: Bake Letterboxd scores into the snapshot
+        continue-on-error: true
+        shell: bash
+        run: |
+          node app/scripts/bake-curated-letterboxd.mjs \
+            --catalog curated-fallback.json \
+            --map app/imdb-map.json \
+            --previous "$RUNNER_TEMP/previous.json"
 
       - name: Publish changed snapshot
         id: publish

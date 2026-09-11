@@ -218,6 +218,19 @@
       cast: personRefArray(value?.people?.cast, 8),
     };
     if (people.directors.length || people.cast.length) item.people = people;
+    // Baked into the published snapshot by the catalogue CDN job so the home
+    // rows need no Letterboxd call. Derived, never edited: the admin store's own
+    // normaliser drops it, and the next bake recomputes it.
+    const lb = value?.letterboxd;
+    const lbScore = Number(lb?.r);
+    if (lb && typeof lb === "object" && (lbScore === 0 || (lbScore > 0 && lbScore <= 5))) {
+      const count = Number(lb.n);
+      item.letterboxd = lbScore === 0 ? { r: 0 } : {
+        r: lbScore,
+        n: Number.isInteger(count) && count > 0 ? count : null,
+        slug: String(lb.slug || "").slice(0, 120),
+      };
+    }
     return item;
   }
 
@@ -569,6 +582,12 @@
     if (item.isSeries) card.dataset.series = "1";
     const carried = String(item.externalId?.imdb || item.imdb || item.imdbId || "");
     if (/^tt\d{6,10}$/.test(carried)) card.dataset.imdb = carried;
+    // The published snapshot carries the Letterboxd score it was baked with, so
+    // a home row paints it without a request. Only the fields a card shows.
+    const baked = item.letterboxd;
+    if (baked && typeof baked === "object" && Number.isFinite(Number(baked.r))) {
+      card.dataset.lb = JSON.stringify({ r: Number(baked.r), n: baked.n ?? null, slug: baked.slug ?? "" });
+    }
 
     const media = document.createElement("div");
     media.className = "card-media";

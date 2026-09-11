@@ -52,6 +52,15 @@
   ];
   const LETTERBOXD_CACHE_NS = "letterboxd.v1";
   const LETTERBOXD_REVIEWS_NS = "letterboxd.reviews.v1";
+  // "Our table has never looked this film up" — a fact about our cache, not about
+  // Letterboxd, so it lives apart from the verdicts above and is never read by
+  // the watch page, which is what fills it in.
+  const LETTERBOXD_UNKNOWN_NS = "letterboxd.unknown.v1";
+  // The function reads at most this many ids per call and ignores the rest.
+  const LETTERBOXD_BATCH_MAX = 60;
+  // Every grid on a page shares one queue. The home page renders a dozen rows in
+  // the same moment, and asking per row sent one request per row per shard.
+  const LETTERBOXD_BATCH_WINDOW_MS = 40;
   // Letterboxd scores out of 5. It is stored and linked out at its true scale,
   // and only ever doubled for display, so it reads on the same 0-10 footing as
   // the Кинопоиск and IMDb figures it sits beside. Doubling is exact, so this
@@ -131,6 +140,9 @@
     // will never carry — so it is worth remembering too, just not as long.
     letterboxd: 30 * 24 * 3600e3,
     letterboxdmiss: 7 * 24 * 3600e3,
+    // A grid does not re-ask about a film our table had never seen for a day.
+    // Opening the film ignores this and fills the table on the spot.
+    letterboxdunknown: 24 * 3600e3,
     ndrecommend: 24 * 3600e3,
     ndrecommendMiss: 60 * 60e3,
     ndpage: 24 * 3600e3,
@@ -2277,114 +2289,171 @@ parent.postMessage({
     if (!/^tt\d{6,10}$/.test(id)) return null;
     const cached = cacheGet(LETTERBOXD_CACHE_NS, id);
     if (cached) return cached.r > 0 ? cached : null;
+    return (await letterboxdFilm(id)).rating;
+  }
+
+  // The watch page wants the score and the reviews, and one film page carries
+  // both — so it asks once, with reviews, and both caches fill from that single
+  // answer. Asking for each separately cost a second call on every film opened.
+  function letterboxdFilm(id) {
     const inflight = letterboxdInflight.get(id);
     if (inflight) return inflight;
-    const pending = fetchLetterboxdRating(id).finally(() => letterboxdInflight.delete(id));
+    const pending = fetchLetterboxdFilm(id).finally(() => letterboxdInflight.delete(id));
     letterboxdInflight.set(id, pending);
     return pending;
   }
 
-  async function fetchLetterboxdRating(id) {
+  // Resolves to { rating, reviews, answeredBy }. `reviews` stays undefined when
+  // the shard that answered is a build that does not know about them.
+  async function fetchLetterboxdFilm(id) {
     const now = Date.now();
     for (const endpoint of letterboxdEndpointOrder(id)) {
       if ((letterboxdCooldown.get(endpoint) || 0) > now) continue;
+      let payload = null;
       try {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 6000);
-        const response = await fetch(`${endpoint}?imdb=${encodeURIComponent(id)}`, {
+        // Long enough for a film nobody has opened yet: it is scraped during
+        // this call, and the scrape alone is about two seconds.
+        const timer = setTimeout(() => controller.abort(), 12000);
+        const response = await fetch(`${endpoint}?imdb=${encodeURIComponent(id)}&reviews=1`, {
           signal: controller.signal,
           referrerPolicy: "no-referrer",
         });
         clearTimeout(timer);
         if (!response.ok) throw new Error(`http ${response.status}`);
-        const payload = await response.json();
-        // The function could reach neither its table nor Letterboxd. That is an
-        // operational miss, not a verdict about the film: another shard may
-        // already have the row, and this result must never enter the 7-day cache.
-        if (payload?.unreachable === true) continue;
-        const rating = Number(payload?.r);
-        const found = payload?.found && Number.isFinite(rating) && rating > 0 && rating <= 5;
-        const value = found
-          ? { r: rating, n: positiveInt(payload.n), slug: compact(payload.slug).slice(0, 120) }
-          : null;
-        cacheSet(LETTERBOXD_CACHE_NS, id, value || { r: 0 }, found ? TTL.letterboxd : TTL.letterboxdmiss);
-        return value;
+        payload = await response.json();
       } catch (error) {
         // One project being paused or over quota must not make every later
         // caller wait out the same timeout, so it sits out and the ring moves on.
         letterboxdCooldown.set(endpoint, now + LETTERBOXD_COOLDOWN_MS);
         log("letterboxd-warn", { endpoint, message: error.message });
+        continue;
       }
+      // The function could reach neither its table nor Letterboxd. That is an
+      // operational miss, not a verdict about the film: another shard may
+      // already have the row, and this result must never enter the 7-day cache.
+      if (payload?.unreachable === true) continue;
+      const score = Number(payload?.r);
+      const found = payload?.found && Number.isFinite(score) && score > 0 && score <= 5;
+      const rating = found
+        ? { r: score, n: positiveInt(payload.n), slug: compact(payload.slug).slice(0, 120) }
+        : null;
+      cacheSet(LETTERBOXD_CACHE_NS, id, rating || { r: 0 }, found ? TTL.letterboxd : TTL.letterboxdmiss);
+      const reviews = Array.isArray(payload?.reviews) ? storeLetterboxdReviews(id, payload.reviews) : undefined;
+      return { rating, reviews, answeredBy: endpoint };
     }
-    return null;
+    return { rating: null, reviews: undefined, answeredBy: "" };
   }
 
   // A grid asks once per shard rather than once per card. The server answers
   // these from its table only and never reaches out to Letterboxd, so a page of
   // covers can never turn into a burst of scraping — unknown films simply stay
   // blank until someone opens one.
+  //
+  // Every grid on the page feeds one queue that is flushed a beat after the first
+  // ask. Asking per grid sent a request per row per shard: 32 calls to paint one
+  // home page, every visit.
+  const letterboxdQueue = new Map();
+  let letterboxdFlushTimer = null;
+
   async function letterboxdBatch(imdbIds) {
     const ids = [...new Set(imdbIds)].filter((id) => /^tt\d{6,10}$/.test(id));
     // A search grid renders twice — once for the race winner, once for the merged
     // result — and the second pass builds fresh card elements. It must therefore
     // wait on the first pass's request rather than skip it, or it would paint
     // from a cache that has not been filled yet.
-    const waiting = ids.map((id) => letterboxdAsked.get(id)).filter(Boolean);
-    const wanted = ids.filter((id) => !cacheGet(LETTERBOXD_CACHE_NS, id) && !letterboxdAsked.has(id));
-    if (!wanted.length) {
-      await Promise.all(waiting);
-      return;
-    }
-    const byEndpoint = new Map();
-    for (const id of wanted) {
-      const endpoint = letterboxdEndpointOrder(id)[0];
-      if (!byEndpoint.has(endpoint)) byEndpoint.set(endpoint, []);
-      byEndpoint.get(endpoint).push(id);
-    }
-    const runs = [...byEndpoint].map(async ([endpoint, ids]) => {
-      if ((letterboxdCooldown.get(endpoint) || 0) > Date.now()) return;
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 7000);
-        // mode=batch is explicit: a shard can legitimately receive a single id,
-        // and the shape of the reply must not depend on how many that happened
-        // to be. Inferring it from a comma is what silently broke narrow grids.
-        const response = await fetch(`${endpoint}?mode=batch&imdb=${ids.slice(0, 60).join(",")}`, {
-          signal: controller.signal,
-          referrerPolicy: "no-referrer",
-        });
-        clearTimeout(timer);
-        if (!response.ok) throw new Error(`http ${response.status}`);
-        const payload = await response.json();
-        // Shards are deployed independently, so one can be a version behind and
-        // still answer in the older single-film shape. Reading both means a
-        // stale shard costs its own films, not the whole grid.
-        const items = payload?.items || (/^tt\d{6,10}$/.test(String(payload?.imdb || ""))
-          ? { [payload.imdb]: payload.found ? { r: payload.r, n: payload.n, slug: payload.slug } : null }
-          : {});
-        for (const id of ids) {
-          const hit = items[id];
-          const rating = Number(hit?.r);
-          // Absent means "not looked up yet", not "no rating" — only a row the
-          // table actually holds is worth remembering on the client.
-          if (!(id in items)) continue;
-          const value = hit && Number.isFinite(rating) && rating > 0 && rating <= 5
-            ? { r: rating, n: positiveInt(hit.n), slug: compact(hit.slug).slice(0, 120) }
-            : null;
-          cacheSet(LETTERBOXD_CACHE_NS, id, value || { r: 0 }, value ? TTL.letterboxd : TTL.letterboxdmiss);
-        }
-      } catch (error) {
-        log("letterboxd-batch-warn", { endpoint, message: error.message });
-        // A shard that failed is worth asking again later, unlike one that
-        // answered "I do not know that film".
-        for (const id of ids) letterboxdAsked.delete(id);
+    const waiting = [];
+    for (const id of ids) {
+      if (cacheGet(LETTERBOXD_CACHE_NS, id)) continue;
+      const asked = letterboxdAsked.get(id);
+      if (asked) {
+        waiting.push(asked);
+        continue;
       }
-    });
-    for (const [endpoint, ids] of byEndpoint) {
-      const run = runs[[...byEndpoint.keys()].indexOf(endpoint)];
-      for (const id of ids) letterboxdAsked.set(id, run);
+      // Our table had never looked this film up when we last asked. Asking
+      // again on every visit is what kept a home page at thirty-odd calls; the
+      // watch page does not read this, so opening the film still fills it in.
+      if (cacheGet(LETTERBOXD_UNKNOWN_NS, id)) continue;
+      let settle;
+      const promise = new Promise((resolve) => { settle = resolve; });
+      letterboxdAsked.set(id, promise);
+      letterboxdQueue.set(id, settle);
+      waiting.push(promise);
     }
-    await Promise.all([...runs, ...waiting]);
+    if (letterboxdQueue.size && !letterboxdFlushTimer) {
+      letterboxdFlushTimer = setTimeout(flushLetterboxdQueue, LETTERBOXD_BATCH_WINDOW_MS);
+    }
+    await Promise.all(waiting);
+  }
+
+  function flushLetterboxdQueue() {
+    letterboxdFlushTimer = null;
+    const queued = [...letterboxdQueue];
+    letterboxdQueue.clear();
+    const byEndpoint = new Map();
+    for (const entry of queued) {
+      const endpoint = letterboxdEndpointOrder(entry[0])[0];
+      if (!byEndpoint.has(endpoint)) byEndpoint.set(endpoint, []);
+      byEndpoint.get(endpoint).push(entry);
+    }
+    // The function reads only the first sixty ids of a call, so a bigger set is
+    // split rather than silently cut short.
+    for (const [endpoint, entries] of byEndpoint) {
+      for (let at = 0; at < entries.length; at += LETTERBOXD_BATCH_MAX) {
+        askLetterboxdShard(endpoint, entries.slice(at, at + LETTERBOXD_BATCH_MAX));
+      }
+    }
+  }
+
+  async function askLetterboxdShard(endpoint, entries) {
+    const ids = entries.map(([id]) => id);
+    try {
+      // A cooling shard is not asked, and its films stay askable once it is back.
+      if ((letterboxdCooldown.get(endpoint) || 0) > Date.now()) {
+        for (const id of ids) letterboxdAsked.delete(id);
+        return;
+      }
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 7000);
+      // mode=batch is explicit: a shard can legitimately receive a single id,
+      // and the shape of the reply must not depend on how many that happened
+      // to be. Inferring it from a comma is what silently broke narrow grids.
+      const response = await fetch(`${endpoint}?mode=batch&imdb=${ids.join(",")}`, {
+        signal: controller.signal,
+        referrerPolicy: "no-referrer",
+      });
+      clearTimeout(timer);
+      if (!response.ok) throw new Error(`http ${response.status}`);
+      const payload = await response.json();
+      // Shards are deployed independently, so one can be a version behind and
+      // still answer in the older single-film shape. Reading both means a
+      // stale shard costs its own films, not the whole grid.
+      const items = payload?.items || (/^tt\d{6,10}$/.test(String(payload?.imdb || ""))
+        ? { [payload.imdb]: payload.found ? { r: payload.r, n: payload.n, slug: payload.slug } : null }
+        : {});
+      for (const id of ids) {
+        // Absent means "not looked up yet", not "no rating". It is remembered
+        // apart from the verdicts, for a day, and never stands in for one.
+        if (!(id in items)) {
+          cacheSet(LETTERBOXD_UNKNOWN_NS, id, 1, TTL.letterboxdunknown);
+          continue;
+        }
+        const hit = items[id];
+        const rating = Number(hit?.r);
+        const value = hit && Number.isFinite(rating) && rating > 0 && rating <= 5
+          ? { r: rating, n: positiveInt(hit.n), slug: compact(hit.slug).slice(0, 120) }
+          : null;
+        cacheSet(LETTERBOXD_CACHE_NS, id, value || { r: 0 }, value ? TTL.letterboxd : TTL.letterboxdmiss);
+      }
+    } catch (error) {
+      log("letterboxd-batch-warn", { endpoint, message: error.message });
+      // A failed request says nothing about the films. The shard sits out a few
+      // minutes, and its films may be asked again after that — not in a day.
+      letterboxdCooldown.set(endpoint, Date.now() + LETTERBOXD_COOLDOWN_MS);
+      for (const id of ids) letterboxdAsked.delete(id);
+    } finally {
+      for (const [, settle] of entries) settle();
+    }
   }
 
   // =====================================================================
@@ -3615,19 +3684,40 @@ parent.postMessage({
   const stripBidi = (text) =>
     String(text || "").replace(/[\u0000-\u001f\u007f\u00ad\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "");
 
+  function storeLetterboxdReviews(id, reviews) {
+    const list = reviews
+      .filter((item) => item && typeof item.t === "string" && item.t.trim())
+      .slice(0, 6)
+      .map((item) => ({
+        a: stripBidi(compact(item.a)).slice(0, 40),
+        r: Number(item.r) > 0 && Number(item.r) <= 5 ? Number(item.r) : 0,
+        t: stripBidi(compact(item.t)).slice(0, 600),
+        c: !!item.c,
+        s: !!item.s,
+      }));
+    cacheSet(LETTERBOXD_REVIEWS_NS, id, { list }, list.length ? TTL.letterboxd : TTL.letterboxdmiss);
+    return list.length ? list : null;
+  }
+
   async function letterboxdReviews(imdb) {
     const id = String(imdb || "").trim();
     if (!/^tt\d{6,10}$/.test(id)) return null;
     const cached = cacheGet(LETTERBOXD_REVIEWS_NS, id);
     if (cached) return cached.list?.length ? cached.list : null;
+    // The same request the score comes from, shared with it when both are wanted.
+    const first = await letterboxdFilm(id);
+    if (first.reviews !== undefined) return first.reviews;
+    // A shard on an older build answers with the rating and no reviews key at
+    // all. That is not "this film has none" — it never spoke to the question,
+    // so the rest of the ring is asked rather than an absence cached.
+    const order = letterboxdEndpointOrder(id);
+    const rest = first.answeredBy ? order.slice(order.indexOf(first.answeredBy) + 1) : order;
     const now = Date.now();
-    for (const endpoint of letterboxdEndpointOrder(id)) {
+    for (const endpoint of rest) {
       if ((letterboxdCooldown.get(endpoint) || 0) > now) continue;
       let payload = null;
       try {
         const controller = new AbortController();
-        // Longer than the rating's: a film nobody has opened yet is scraped
-        // during this call, and the scrape alone is about two seconds.
         const timer = setTimeout(() => controller.abort(), 12000);
         const response = await fetch(`${endpoint}?imdb=${encodeURIComponent(id)}&reviews=1`, {
           signal: controller.signal,
@@ -3641,25 +3731,29 @@ parent.postMessage({
         log("letterboxd-reviews-warn", { endpoint, message: error.message });
         continue;
       }
-      // A shard on an older build answers with the rating and no reviews key at
-      // all. That is not "this film has none" — it never spoke to the question,
-      // so ask the next shard rather than cache an absence. Deliberately outside
-      // the catch above: only a failed request should cool a project down.
+      // Deliberately outside the catch above: only a failed request should cool
+      // a project down, never one that is merely a version behind.
       if (!Array.isArray(payload?.reviews)) continue;
-      const list = payload.reviews
-        .filter((item) => item && typeof item.t === "string" && item.t.trim())
-        .slice(0, 6)
-        .map((item) => ({
-          a: stripBidi(compact(item.a)).slice(0, 40),
-          r: Number(item.r) > 0 && Number(item.r) <= 5 ? Number(item.r) : 0,
-          t: stripBidi(compact(item.t)).slice(0, 600),
-          c: !!item.c,
-          s: !!item.s,
-        }));
-      cacheSet(LETTERBOXD_REVIEWS_NS, id, { list }, list.length ? TTL.letterboxd : TTL.letterboxdmiss);
-      return list.length ? list : null;
+      return storeLetterboxdReviews(id, payload.reviews);
     }
     return null;
+  }
+
+  // The published curated snapshot carries each film's score as it stood when
+  // the snapshot was baked, so the home rows paint without asking anyone. Only
+  // the fields a card already shows are read; anything malformed is ignored.
+  function bakedLetterboxd(card) {
+    const raw = card?.dataset?.lb;
+    if (!raw) return null;
+    try {
+      const value = JSON.parse(raw);
+      const score = Number(value?.r);
+      if (score === 0) return { r: 0 };
+      if (!(Number.isFinite(score) && score > 0 && score <= 5)) return null;
+      return { r: score, n: positiveInt(value.n), slug: compact(value.slug).slice(0, 120) };
+    } catch {
+      return null;
+    }
   }
 
   // Called once per rendered grid: collect what the cards declared, ask the
@@ -3668,19 +3762,23 @@ parent.postMessage({
     const all = [...(grid?.querySelectorAll?.(".card") || [])];
     if (!all.length) return;
 
+    const known = (card) => (card.dataset.imdb && cacheGet(LETTERBOXD_CACHE_NS, card.dataset.imdb))
+      || bakedLetterboxd(card);
     const paint = () => {
       for (const card of all) {
-        const id = card.dataset.imdb;
-        if (!id) continue;
-        const cached = cacheGet(LETTERBOXD_CACHE_NS, id);
-        if (cached?.r > 0) setCardLetterboxd(card, cached);
+        const value = known(card);
+        if (value?.r > 0) setCardLetterboxd(card, value);
       }
     };
     paint();
 
+    // A card the snapshot already answered for costs nothing further: no
+    // identity lookup, no request.
+    const open = all.filter((card) => !bakedLetterboxd(card));
+
     // Letterboxd has no page for a series, so a series is never worth an
     // identity lookup here — it would spend a request to learn nothing.
-    const nameless = all.filter((card) => (
+    const nameless = open.filter((card) => (
       !card.dataset.imdb && card.dataset.title && card.dataset.year && !card.dataset.series
     ));
     if (nameless.length && window.alphyIdentity) {
@@ -3694,7 +3792,7 @@ parent.postMessage({
       for (const [item, id] of resolved) item.card.dataset.imdb = id;
     }
 
-    const ids = all.map((card) => card.dataset.imdb).filter(Boolean);
+    const ids = open.map((card) => card.dataset.imdb).filter(Boolean);
     if (!ids.length) return;
     try {
       await letterboxdBatch(ids);
@@ -10655,6 +10753,8 @@ addEventListener('message', async (event) => {
       letterboxdRating,
       letterboxdBatch,
       letterboxdReviews,
+      bakedLetterboxd,
+      fillGridLetterboxd,
       LETTERBOXD_ENDPOINTS,
       isPlaceholderTitle,
       mergeMetadata,

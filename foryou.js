@@ -25,8 +25,12 @@
   const HIDDEN_CAP = 400;
   const CLIENT_KEY_POOL_URL = "/api/client-key-pool";
   const UNOFFICIAL_BASE_URL = "https://kinopoiskapiunofficial.tech";
-  const CLIENT_POOL_TTL = 5 * 60e3;
+  // The keys only change when an admin rotates them. Keeping them a day in the
+  // browser takes this request off every page load; a pool that has stopped
+  // authenticating is refreshed early, once, rather than waited out.
+  const CLIENT_POOL_TTL = 24 * 3600e3;
   const CLIENT_POOL_RETRY_TTL = 60e3;
+  const CLIENT_POOL_STORE_KEY = "alphy.foryou.clientPool.v1";
 
   const SIM_TTL = 30 * 24 * 3600e3;
   const META_TTL = 30 * 24 * 3600e3;
@@ -209,8 +213,51 @@
     }
   }
 
-  async function browserUnofficialKeys() {
-    if (Date.now() < clientPoolCache.expiresAt) return clientPoolCache.keys;
+  function cleanPoolKeys(list) {
+    const seen = new Set();
+    const keys = [];
+    for (const entry of Array.isArray(list) ? list : []) {
+      const value = String(entry?.value || "").trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      keys.push({ id: String(entry?.id || ""), value });
+    }
+    return keys;
+  }
+
+  function readStoredPool() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CLIENT_POOL_STORE_KEY) || "null");
+      const age = Date.now() - Number(saved?.savedAt);
+      if (!(age >= 0 && age < CLIENT_POOL_TTL)) return null;
+      const keys = cleanPoolKeys(saved.keys);
+      return keys.length ? { keys, expiresAt: Number(saved.savedAt) + CLIENT_POOL_TTL } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function storePool(keys) {
+    try {
+      localStorage.setItem(CLIENT_POOL_STORE_KEY, JSON.stringify({ savedAt: Date.now(), keys }));
+    } catch { /* storage is only an acceleration layer */ }
+  }
+
+  function forgetStoredPool() {
+    try { localStorage.removeItem(CLIENT_POOL_STORE_KEY); } catch { /* optional */ }
+    clientPoolCache = { keys: [], expiresAt: 0 };
+  }
+
+  async function browserUnofficialKeys({ fresh = false } = {}) {
+    if (!fresh && Date.now() < clientPoolCache.expiresAt) return clientPoolCache.keys;
+    if (!fresh) {
+      const stored = readStoredPool();
+      if (stored) {
+        clientPoolCache = { keys: stored.keys, expiresAt: stored.expiresAt, stored: true };
+        if (clientKeyCursor == null) clientKeyCursor = clientSlot() % stored.keys.length;
+        return stored.keys;
+      }
+    }
     if (clientPoolInflight) return clientPoolInflight;
     clientPoolInflight = (async () => {
       const controller = new AbortController();
@@ -219,20 +266,15 @@
         const response = await fetch(CLIENT_KEY_POOL_URL, {
           headers: { Accept: "application/json" },
           credentials: "omit",
-          cache: "default",
+          // A forced refresh must get past the five minutes the edge keeps it.
+          cache: fresh ? "no-cache" : "default",
           signal: controller.signal,
         });
         const data = await response.json();
         if (!response.ok || data?.ok === false) throw new Error(data?.error || `client pool ${response.status}`);
-        const seen = new Set();
-        const keys = [];
-        for (const entry of Array.isArray(data?.pool?.keys) ? data.pool.keys : []) {
-          const value = String(entry?.value || "").trim();
-          if (!value || seen.has(value)) continue;
-          seen.add(value);
-          keys.push({ id: String(entry?.id || ""), value });
-        }
+        const keys = cleanPoolKeys(data?.pool?.keys);
         clientPoolCache = { keys, expiresAt: Date.now() + CLIENT_POOL_TTL };
+        if (keys.length) storePool(keys);
         if (clientKeyCursor == null && keys.length) clientKeyCursor = clientSlot() % keys.length;
         return keys;
       } catch (error) {
@@ -265,10 +307,11 @@
     return error;
   }
 
-  async function directUnofficialGet(path) {
+  async function directUnofficialGet(path, { retried = false } = {}) {
     const url = directUnofficialUrl(path);
     if (!url) throw new Error("unsupported direct unofficial path");
     const keys = await browserUnofficialKeys();
+    const fromStorage = clientPoolCache.stored === true;
     if (!keys.length) {
       const error = new Error("browser unofficial keys unavailable");
       error.code = "client_keys_unavailable";
@@ -276,6 +319,7 @@
     }
     const start = clientKeyCursor == null ? clientSlot() % keys.length : clientKeyCursor;
     let lastError = null;
+    let refused = 0;
     for (let offset = 0; offset < keys.length; offset += 1) {
       if (budgetLeft() <= 0) throw budgetError();
       const index = (start + offset) % keys.length;
@@ -304,10 +348,18 @@
       } catch (error) {
         lastError = error;
         if (![401, 402, 403, 429].includes(Number(error?.status))) throw error;
+        if ([401, 403].includes(Number(error?.status))) refused += 1;
         clientKeyCursor = (index + 1) % keys.length;
       } finally {
         clearTimeout(timer);
       }
+    }
+    // Every key this browser kept for a day was refused outright — they were
+    // rotated since. Spent quota (402/429) is not that, and is not retried.
+    if (fromStorage && !retried && refused === keys.length) {
+      forgetStoredPool();
+      const fresh = await browserUnofficialKeys({ fresh: true });
+      if (fresh.length) return directUnofficialGet(path, { retried: true });
     }
     throw lastError || new Error("all browser unofficial keys exhausted");
   }

@@ -135,11 +135,16 @@ test("a shard that does not know about reviews is passed over, not believed", as
   assert.equal(list?.length, 1);
   assert.equal(list[0].t, "great");
   assert.equal(calls.length, 2, "it should have moved on to the next shard");
-  // Being a version behind is not a fault: that project must stay in the ring
-  // for ratings. Had it been put on cooldown, this rating would skip it and land
-  // on the second shard instead of the first.
+  // The score it did answer is kept: the watch page asks once for both.
   const before = calls.length;
-  await helpers.letterboxdRating("tt0137523");
+  assert.equal((await helpers.letterboxdRating("tt0137523"))?.r, 4.27);
+  assert.equal(calls.length, before, "the score came with the first answer");
+  // Being a version behind is not a fault: that project must stay in the ring
+  // for ratings. Had it been put on cooldown, a film that starts there would
+  // skip it and land on the next shard instead.
+  const sibling = Array.from({ length: 400 }, (_, i) => `tt${1000000 + i}`)
+    .find((id) => helpers.letterboxdEndpointOrder(id)[0] === lagging);
+  await helpers.letterboxdRating(sibling);
   assert.equal(calls[before].split("?")[0], lagging, "the lagging shard was wrongly cooled off");
 });
 

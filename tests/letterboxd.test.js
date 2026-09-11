@@ -307,3 +307,151 @@ test("the card puts the score on its own line above the runtime, not in the rati
   const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
   assert.doesNotMatch(css, /hover-ratings\.has-three/, "the shrinking rule must be gone");
 });
+
+// --- one queue for the whole page -------------------------------------------
+// A home visit used to cost 32 function calls: every row asked every shard on
+// its own, and a film our table had never seen was asked again on every visit.
+
+const idsOf = (url) => new URL(url).searchParams.get("imdb").split(",");
+
+function fakeCard({ imdb = "", lb = null } = {}) {
+  const painted = [];
+  const hover = {
+    querySelector: (selector) => (selector === ".hover-rating-lb" && painted.length ? {} : null),
+    appendChild: (row) => { painted.push(row.innerHTML); return row; },
+    insertBefore: (row) => { painted.push(row.innerHTML); return row; },
+  };
+  const dataset = {};
+  if (imdb) dataset.imdb = imdb;
+  if (lb) dataset.lb = JSON.stringify(lb);
+  return { dataset, painted, querySelector: (selector) => (selector === ".card-hover-meta" ? hover : null) };
+}
+const fakeGrid = (cards) => ({ querySelectorAll: () => cards });
+
+test("rows rendered together share one request per shard, not one per row", async () => {
+  const asked = [];
+  const { helpers } = await boot({ handler: (url) => { asked.push(url); return ok({ items: {} }); } });
+  const rows = Array.from({ length: 12 }, (_, row) =>
+    Array.from({ length: 10 }, (_, i) => `tt${2000000 + row * 10 + i}`));
+  await Promise.all(rows.map((ids) => helpers.letterboxdBatch(ids)));
+
+  const perShard = new Map();
+  for (const id of rows.flat()) {
+    const shard = helpers.letterboxdEndpointOrder(id)[0];
+    perShard.set(shard, (perShard.get(shard) || 0) + 1);
+  }
+  const expected = [...perShard.values()].reduce((sum, n) => sum + Math.ceil(n / 60), 0);
+  assert.equal(asked.length, expected, `${asked.length} requests for twelve rows`);
+  assert.ok(asked.length <= 4);
+  const sent = asked.flatMap(idsOf);
+  assert.equal(sent.length, 120, "no film may be asked twice");
+  assert.equal(new Set(sent).size, 120, "and none may be left out");
+});
+
+test("more than sixty films for one shard are split, never cut short", async () => {
+  const asked = [];
+  const { helpers } = await boot({ handler: (url) => { asked.push(url); return ok({ items: {} }); } });
+  const shard = helpers.LETTERBOXD_ENDPOINTS[0];
+  const ids = [];
+  for (let n = 3000000; ids.length < 150; n += 1) {
+    if (helpers.letterboxdEndpointOrder(`tt${n}`)[0] === shard) ids.push(`tt${n}`);
+  }
+  await helpers.letterboxdBatch(ids);
+  assert.equal(asked.length, 3);
+  assert.ok(asked.every((url) => url.startsWith(shard) && idsOf(url).length <= 60));
+  assert.deepEqual(asked.flatMap(idsOf).sort(), [...ids].sort(), "the function reads only sixty per call");
+});
+
+test("a film our table has never seen is not re-asked next visit, and opening it still fills it in", async () => {
+  const first = await boot({ handler: () => ok({ items: {} }) });
+  await first.helpers.letterboxdBatch(["tt0111161"]);
+  assert.equal(first.calls.length, 1);
+  // "Unknown" is a fact about our cache, not a verdict: it must not look like one.
+  assert.equal(first.storage.get("alphy.cache.letterboxd.v1:tt0111161"), undefined);
+
+  const second = await boot({
+    storageSeed: first.storage,
+    handler: (url) => (url.includes("mode=batch")
+      ? ok({ items: {} })
+      : ok({ imdb: "tt0111161", found: true, r: 4.6, n: 9, slug: "the-shawshank-redemption", reviews: [] })),
+  });
+  await second.helpers.letterboxdBatch(["tt0111161"]);
+  assert.equal(second.calls.length, 0, "the next visit's grid must not ask again");
+
+  // The watch page does not read that mark: opening the film fills the table.
+  assert.equal((await second.helpers.letterboxdRating("tt0111161"))?.r, 4.6);
+  assert.equal(second.calls.length, 1);
+  assert.doesNotMatch(second.calls[0], /mode=batch/);
+  // From then on every grid paints it.
+  const card = fakeCard({ imdb: "tt0111161" });
+  await second.helpers.fillGridLetterboxd(fakeGrid([card]));
+  assert.match(card.painted[0] || "", /9\.2/);
+  assert.equal(second.calls.length, 1);
+});
+
+test("the unknown mark lasts a day, then the grid asks again", async () => {
+  const stale = new Map([[
+    "alphy.cache.letterboxd.unknown.v1:tt0111161",
+    JSON.stringify({ v: 1, exp: Date.now() - 1 }),
+  ]]);
+  const { helpers, calls } = await boot({ storageSeed: stale, handler: () => ok({ items: {} }) });
+  await helpers.letterboxdBatch(["tt0111161"]);
+  assert.equal(calls.length, 1);
+});
+
+test("a failed request cools the shard for minutes and is never remembered as unknown", async () => {
+  const { helpers, calls, storage } = await boot({ handler: () => { throw new Error("project paused"); } });
+  await helpers.letterboxdBatch(["tt0111161"]);
+  assert.equal(calls.length, 1);
+  assert.ok(![...storage.keys()].some((key) => key.includes("letterboxd.unknown")),
+    "a failure says nothing about the film");
+  await helpers.letterboxdBatch(["tt0111161"]);
+  assert.equal(calls.length, 1, "the cooling shard is not asked again at once");
+});
+
+test("the snapshot's baked scores paint the home row with no request at all", async () => {
+  const asked = [];
+  const { helpers } = await boot({ handler: (url) => { asked.push(url); return ok({ items: {} }); } });
+  const rated = fakeCard({ imdb: "tt0111161", lb: { r: 4.6, n: 3008699, slug: "the-shawshank-redemption" } });
+  const none = fakeCard({ imdb: "tt0903747", lb: { r: 0 } });
+  const broken = fakeCard({ imdb: "tt0137523", lb: { r: 9.1 } });
+  const fresh = fakeCard({ imdb: "tt6751668" });
+  await helpers.fillGridLetterboxd(fakeGrid([rated, none, broken, fresh]));
+
+  assert.match(rated.painted[0] || "", /9\.2/);
+  assert.equal(none.painted.length, 0, "a confirmed absence paints nothing");
+  // Only the films the snapshot could not answer for reach the network — and a
+  // malformed baked value counts as unanswered rather than as a score.
+  assert.deepEqual(asked.flatMap(idsOf).sort(), ["tt0137523", "tt6751668"]);
+});
+
+test("a fully baked home page makes no Letterboxd call", async () => {
+  const { helpers, calls } = await boot({ handler: () => ok({ items: {} }) });
+  const rows = Array.from({ length: 12 }, (_, row) => fakeGrid(Array.from({ length: 8 }, (_, i) =>
+    fakeCard({ imdb: `tt${4000000 + row * 8 + i}`, lb: { r: 3.5, n: 10, slug: "x" } }))));
+  await Promise.all(rows.map((grid) => helpers.fillGridLetterboxd(grid)));
+  await sleep(60);
+  assert.equal(calls.length, 0);
+});
+
+test("the watch page asks once for its score and its reviews", async () => {
+  const { helpers, calls, storage } = await boot({
+    handler: () => ok({
+      imdb: "tt0111161", found: true, r: 4.6, n: 5, slug: "the-shawshank-redemption",
+      reviews: [{ a: "sam", r: 5, t: "great" }],
+    }),
+  });
+  const [rating, reviews] = await Promise.all([
+    helpers.letterboxdRating("tt0111161"),
+    helpers.letterboxdReviews("tt0111161"),
+  ]);
+  assert.equal(rating?.r, 4.6);
+  assert.equal(reviews?.length, 1);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /reviews=1/);
+  assert.ok(storage.has("alphy.cache.letterboxd.reviews.v1:tt0111161"));
+
+  // Asked one after the other, the second is answered from what the first stored.
+  assert.equal((await helpers.letterboxdReviews("tt0111161"))?.[0]?.t, "great");
+  assert.equal(calls.length, 1);
+});

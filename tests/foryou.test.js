@@ -452,3 +452,78 @@ test("resolver failure fails extras softly without breaking the watch page", asy
   assert.equal(extras, null);
   assert.equal(calls, 2, "film and staff fail independently but softly");
 });
+
+// --- the browser key pool is kept for a day ----------------------------------
+// It was fetched from Vercel on every page load; the keys only change when an
+// admin rotates them.
+
+const jsonResponse = (body, status = 200) => new Response(JSON.stringify(body), {
+  status,
+  headers: { "content-type": "application/json" },
+});
+
+function poolServer({ poolKeys, answer }) {
+  const calls = [];
+  const fetchImpl = async (url, options = {}) => {
+    if (String(url) === "/api/client-key-pool") {
+      calls.push("pool");
+      return jsonResponse({ ok: true, pool: { keys: poolKeys.map((value) => ({ id: value, value })) } });
+    }
+    const key = options.headers?.["X-API-KEY"];
+    calls.push(key);
+    return answer(key);
+  };
+  return { calls, fetchImpl };
+}
+
+test("the key pool survives a page load, so the next visit does not ask Vercel for it", async () => {
+  const storage = new Map([["alphy.foryou.clientSlot.v1", "0"]]);
+  const film = () => jsonResponse({ kinopoiskId: 301 });
+  const first = poolServer({ poolKeys: ["k1"], answer: film });
+  const { api } = await loadForYou(storage, first.fetchImpl);
+  await api._test.directUnofficialGet("/api/v2.2/films/301");
+  assert.deepEqual(first.calls, ["pool", "k1"]);
+
+  const second = poolServer({ poolKeys: ["k1"], answer: film });
+  const next = await loadForYou(storage, second.fetchImpl);
+  await next.api._test.directUnofficialGet("/api/v2.2/films/301");
+  assert.deepEqual(second.calls, ["k1"], "a stored pool is used without a request");
+});
+
+test("a pool older than a day is fetched again", async () => {
+  const storage = new Map([
+    ["alphy.foryou.clientSlot.v1", "0"],
+    ["alphy.foryou.clientPool.v1", JSON.stringify({ savedAt: Date.now() - 25 * 3600e3, keys: [{ id: "old", value: "old" }] })],
+  ]);
+  const server = poolServer({ poolKeys: ["k1"], answer: () => jsonResponse({ kinopoiskId: 301 }) });
+  const { api } = await loadForYou(storage, server.fetchImpl);
+  await api._test.directUnofficialGet("/api/v2.2/films/301");
+  assert.deepEqual(server.calls, ["pool", "k1"]);
+});
+
+test("keys refused outright make the browser fetch a fresh pool once", async () => {
+  const storage = new Map([
+    ["alphy.foryou.clientSlot.v1", "0"],
+    ["alphy.foryou.clientPool.v1", JSON.stringify({ savedAt: Date.now(), keys: [{ id: "old", value: "old" }] })],
+  ]);
+  const server = poolServer({
+    poolKeys: ["new"],
+    answer: (key) => (key === "old" ? jsonResponse({ message: "invalid key" }, 401) : jsonResponse({ kinopoiskId: 301 })),
+  });
+  const { api } = await loadForYou(storage, server.fetchImpl);
+  const result = await api._test.directUnofficialGet("/api/v2.2/films/301");
+  assert.equal(result.kinopoiskId, 301);
+  assert.deepEqual(server.calls, ["old", "pool", "new"]);
+  assert.match(storage.get("alphy.foryou.clientPool.v1"), /"new"/);
+});
+
+test("spent quota is not a reason to fetch the pool again", async () => {
+  const storage = new Map([
+    ["alphy.foryou.clientSlot.v1", "0"],
+    ["alphy.foryou.clientPool.v1", JSON.stringify({ savedAt: Date.now(), keys: [{ id: "k1", value: "k1" }] })],
+  ]);
+  const server = poolServer({ poolKeys: ["k2"], answer: () => jsonResponse({ message: "quota" }, 402) });
+  const { api } = await loadForYou(storage, server.fetchImpl);
+  await assert.rejects(api._test.directUnofficialGet("/api/v2.2/films/301"));
+  assert.deepEqual(server.calls, ["k1"]);
+});
