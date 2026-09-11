@@ -183,8 +183,15 @@ Deno.serve(async (req) => {
     // delete afterwards is conditional on them — see below.
     // First come, first built. Ordering by the latest mark let letters the
     // crawler touches every tick — the biggest ones — starve behind the rest.
+    //
+    // And not before a letter has waited an hour. These shards are the fallback
+    // now — browsers read jsDelivr, whose bases come from the live table — so a
+    // letter the crawler touches every minute need not be rebuilt every twenty:
+    // shard п alone is twenty pages of reads each time.
+    const settled = new Date(Date.now() - 60 * 60e3).toISOString();
     const queued: { letter: string; marked_at: string }[] = await (await fetch(
-      `${DIRTY}?select=letter,marked_at&order=first_marked_at.asc.nullsfirst,letter.asc`, { headers: HEADERS },
+      `${DIRTY}?select=letter,marked_at&first_marked_at=lt.${encodeURIComponent(settled)}` +
+      `&order=first_marked_at.asc.nullsfirst,letter.asc`, { headers: HEADERS },
     )).json();
     const marks = new Map(queued.map((r) => [r.letter, r.marked_at]));
     // An explicit list is for a full rebuild after a shape change; normally the
