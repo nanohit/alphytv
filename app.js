@@ -3266,7 +3266,6 @@ parent.postMessage({
       frag.appendChild(p);
     }
     el.resultsGrid.replaceChildren(frag);
-    layoutMobileGrid(el.resultsGrid);
     fillGridLetterboxd(el.resultsGrid);
     enrichSearchCardMetadata(pkResults);
   }

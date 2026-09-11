@@ -31,3 +31,12 @@ test("the first frame has a font to draw in", async () => {
   assert.ok(stack[1].split(",").length >= 4, "needs real fallbacks, not one word");
   assert.match(stack[1], /sans-serif\s*$/);
 });
+
+test("mobile search is a vertical three-column grid, not a two-row carousel", async () => {
+  const sheet = await css();
+  const mobile = sheet.slice(sheet.indexOf("@media (max-width: 560px)"));
+  assert.match(mobile, /#resultsGrid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(mobile, /#resultsGrid\s*\{[\s\S]*?grid-auto-flow:\s*row/);
+  assert.match(mobile, /#resultsGrid\s*\{[\s\S]*?overflow:\s*visible/);
+  assert.match(mobile, /#resultsGrid\s*>\s*\.muted\s*\{[\s\S]*?grid-column:\s*1\s*\/\s*-1/);
+});

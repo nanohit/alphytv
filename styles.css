@@ -1089,6 +1089,22 @@ body.admin-mode .meta-info { display: flex; }
     grid-row: var(--mobile-row);
     grid-column: var(--mobile-column);
   }
+  #resultsGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-rows: none;
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+    overflow: visible;
+    padding: 7px 0 10px;
+  }
+  #resultsGrid > .card {
+    width: 100%;
+    grid-row: auto;
+    grid-column: auto;
+  }
+  #resultsGrid > .muted {
+    grid-column: 1 / -1;
+  }
   .curated-row > .card {
     grid-row: var(--curated-r);
     grid-column: var(--curated-c);
