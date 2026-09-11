@@ -48,11 +48,14 @@ async function shardRows(folded: string) {
   // been able to match it.
   const filter = `shard_keys=cs.${encodeURIComponent(`{"${folded}"}`)}`;
   const rows: unknown[] = [];
-  // PostgREST caps a page; the busiest letter runs to nine thousand titles.
-  for (let from = 0; from < 20000; from += 1000) {
+  // PostgREST caps a page. There is no row cap: shard п is past 19,000 rows and
+  // a cap of 20,000 would have started dropping titles without a sound. The id
+  // makes the order total, so rows sharing a year and a name cannot swap pages
+  // between two requests and be served twice or not at all.
+  for (let from = 0; from < 500000; from += 1000) {
     const response = await fetch(
       `${REST}?select=name,origin_name,year,slug,is_series,embed_id,kp&${filter}` +
-      `&order=year.desc.nullslast,name.asc`,
+      `&order=year.desc.nullslast,name.asc,id.asc`,
       { headers: { ...HEADERS, Range: `${from}-${from + 999}` } },
     );
     if (!response.ok) throw new Error(`upstream ${response.status}`);
@@ -63,6 +66,71 @@ async function shardRows(folded: string) {
     if (page.length < 1000) break;
   }
   return rows;
+}
+
+const PUBLISH_TOKEN = Deno.env.get("PUBLISH_TOKEN") ?? "";
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+const quote = (value: string) => `"${value}"`;
+
+async function publish(route: string, url: URL, req: Request) {
+  if (route === "/letters") {
+    const response = await fetch(`${Deno.env.get("SUPABASE_URL")}/rest/v1/shard_letters?select=letter`, { headers: HEADERS });
+    if (!response.ok) return json({ error: "upstream" }, 502);
+    return json({ letters: (await response.json()).map((row: { letter: string }) => row.letter).filter(Boolean) });
+  }
+  if (route === "/changes") {
+    // Keyset pages over (changed_at, id), so rows sharing a timestamp — the
+    // crawler writes whole batches in one statement — are neither skipped nor
+    // repeated at a page boundary.
+    const afterAt = url.searchParams.get("after_at") ?? "";
+    const afterId = Number(url.searchParams.get("after_id") ?? "0");
+    if (!ISO_RE.test(afterAt) || !Number.isInteger(afterId) || afterId < 0) return json({ error: "bad cursor" }, 400);
+    const filter = `or=(changed_at.gt.${quote(afterAt)},and(changed_at.eq.${quote(afterAt)},id.gt.${afterId}))`;
+    const response = await fetch(
+      `${REST}?select=id,name,origin_name,year,slug,is_series,embed_id,kp,shard_keys,changed_at` +
+      `&${filter}&changed_at=not.is.null&order=changed_at.asc,id.asc&limit=2000`,
+      { headers: HEADERS },
+    );
+    if (!response.ok) return json({ error: await response.text() }, 502);
+    const page: Record<string, any>[] = await response.json();
+    const last = page[page.length - 1];
+    return json({
+      // The shard row, then what the publisher needs to place and order it.
+      rows: page.map((r) => [
+        r.name, r.year, r.slug, r.is_series ? 1 : 0, r.embed_id, r.kp ?? "", r.origin_name ?? "",
+        r.shard_keys ?? [], new Date(r.changed_at).toISOString(), r.id,
+      ]),
+      next: page.length === 2000 && last
+        ? { after_at: new Date(last.changed_at).toISOString(), after_id: last.id }
+        : null,
+    });
+  }
+  if (route === "/removed") {
+    const since = url.searchParams.get("since") ?? "";
+    if (!ISO_RE.test(since)) return json({ error: "bad since" }, 400);
+    const response = await fetch(
+      `${Deno.env.get("SUPABASE_URL")}/rest/v1/shard_removed?select=letter,slug,removed_at` +
+      `&removed_at=gt.${encodeURIComponent(since)}&order=removed_at.asc&limit=10000`,
+      { headers: HEADERS },
+    );
+    if (!response.ok) return json({ error: "upstream" }, 502);
+    return json({ removed: await response.json() });
+  }
+  // /pointer: which commit and which index file the browser should read. A few
+  // hundred bytes; Storage serves it no-cache, so a move is visible at once.
+  if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+  const body = await req.json().catch(() => null);
+  if (!/^[0-9a-f]{40}$/.test(String(body?.c || "")) || !/^i\/[0-9a-f]{16}\.json$/.test(String(body?.f || ""))) {
+    return json({ error: "bad pointer" }, 400);
+  }
+  const pointer = JSON.stringify({ v: 1, c: body.c, f: body.f, at: new Date().toISOString() });
+  const upload = await fetch(`${STORAGE}/${BUCKET}/pointer.json`, {
+    method: "POST",
+    headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, "Content-Type": "application/json", "x-upsert": "true" },
+    body: pointer,
+  });
+  if (!upload.ok) return json({ error: `storage ${upload.status}` }, 502);
+  return json({ ok: true, pointer: JSON.parse(pointer) });
 }
 
 const json = (body: unknown, status = 200, cache = "no-store") =>
@@ -87,8 +155,10 @@ Deno.serve(async (req) => {
     // The whole queue, which cannot exceed the number of distinct initials. The
     // timestamps are read BEFORE anything is built and remembered, because the
     // delete afterwards is conditional on them — see below.
+    // First come, first built. Ordering by the latest mark let letters the
+    // crawler touches every tick — the biggest ones — starve behind the rest.
     const queued: { letter: string; marked_at: string }[] = await (await fetch(
-      `${DIRTY}?select=letter,marked_at&order=marked_at.asc`, { headers: HEADERS },
+      `${DIRTY}?select=letter,marked_at&order=first_marked_at.asc.nullsfirst,letter.asc`, { headers: HEADERS },
     )).json();
     const marks = new Map(queued.map((r) => [r.letter, r.marked_at]));
     // An explicit list is for a full rebuild after a shape change; normally the
@@ -127,10 +197,20 @@ Deno.serve(async (req) => {
         // would notice until something else happened to touch that letter.
         const mark = marks.get(letter);
         if (mark) {
-          await fetch(
+          const removed = await fetch(
             `${DIRTY}?letter=eq.${encodeURIComponent(letter)}&marked_at=eq.${encodeURIComponent(mark)}`,
-            { method: "DELETE", headers: { ...HEADERS, Prefer: "return=minimal" } },
+            { method: "DELETE", headers: { ...HEADERS, Prefer: "return=representation" } },
           );
+          // Re-marked while it was being built: it stays queued, but at the back,
+          // so a letter that changes constantly cannot hold the builder forever.
+          const gone = removed.ok ? await removed.json() : [];
+          if (!Array.isArray(gone) || !gone.length) {
+            await fetch(`${DIRTY}?letter=eq.${encodeURIComponent(letter)}`, {
+              method: "PATCH",
+              headers: { ...HEADERS, Prefer: "return=minimal" },
+              body: JSON.stringify({ first_marked_at: new Date().toISOString() }),
+            });
+          }
         }
       } catch (error) {
         failed.push(`${letter}: ${String(error).slice(0, 80)}`);
@@ -143,6 +223,16 @@ Deno.serve(async (req) => {
       built, failed,
       remaining: Number(left.headers.get("content-range")?.split("/")[1] ?? 0),
     });
+  }
+
+  // The CDN publisher (a scheduled GitHub job) reads what changed and moves the
+  // pointer. Its own token, separate from the crawler's; nothing here is public.
+  const publishRoute = ["/letters", "/changes", "/removed", "/pointer"].find((route) => url.pathname.endsWith(route));
+  if (publishRoute) {
+    if (!PUBLISH_TOKEN || req.headers.get("x-publish-token") !== PUBLISH_TOKEN) {
+      return json({ error: "forbidden" }, 403);
+    }
+    return publish(publishRoute, url, req);
   }
 
   // Ingest, from the Cloudflare crawler only.

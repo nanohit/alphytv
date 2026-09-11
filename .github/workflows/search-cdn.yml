@@ -1,0 +1,84 @@
+name: Publish search index to jsDelivr
+
+# The browser reads the search index from jsDelivr: a base file per letter and
+# a small delta on top, content-addressed and pinned to a commit on the
+# `search-cdn` branch. Supabase keeps a pointer of a few hundred bytes naming
+# the current index, plus its own shards as the fallback. See
+# scripts/publish-search-cdn.mjs.
+#
+# Hourly: a new title reaches search within the hour after the crawler has
+# written it. History on the branch is only ever appended, so every commit a
+# browser might still be reading stays fetchable.
+
+on:
+  schedule:
+    - cron: "41 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: search-cdn
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          path: app
+          fetch-depth: 1
+          sparse-checkout: |
+            scripts/publish-search-cdn.mjs
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Check out the data branch, or start it
+        shell: bash
+        env:
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+        run: |
+          remote="https://x-access-token:${TOKEN}@github.com/${REPO}.git"
+          if git ls-remote --exit-code --heads "$remote" search-cdn >/dev/null; then
+            git clone -q --depth 1 --branch search-cdn "$remote" data
+          else
+            git init -q -b search-cdn data
+            git -C data remote add origin "$remote"
+          fi
+          git -C data config user.name "github-actions[bot]"
+          git -C data config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Write the changed data files
+        env:
+          PUBLISH_TOKEN: ${{ secrets.SEARCH_PUBLISH_TOKEN }}
+        run: node app/scripts/publish-search-cdn.mjs data --dir data
+
+      # Data first, then the index that names the data commit, then the pointer
+      # that names the index commit — each only once the thing it names exists.
+      - name: Commit, index, warm and point
+        shell: bash
+        env:
+          PUBLISH_TOKEN: ${{ secrets.SEARCH_PUBLISH_TOKEN }}
+        run: |
+          cd data
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing changed since the last publish"
+            exit 0
+          fi
+          git commit -q -m "Search data $(date -u +%Y-%m-%dT%H:%MZ)"
+          data_commit=$(git rev-parse HEAD)
+          node ../app/scripts/publish-search-cdn.mjs index --dir . --commit "$data_commit"
+          git add -A
+          git commit -q -m "Search index $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q origin HEAD:search-cdn
+          node ../app/scripts/publish-search-cdn.mjs pointer --dir . \
+            --commit "$(git rev-parse HEAD)" --data-commit "$data_commit"

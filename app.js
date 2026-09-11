@@ -9861,6 +9861,16 @@ addEventListener('message', async (event) => {
   // Russian-only shard would keep answering English queries with nothing until
   // that week ran out.
   const TITLES_SHARD_VERSION = 3;
+  // The index as published to jsDelivr (scripts/publish-search-cdn.mjs): a
+  // pointer of a few hundred bytes on Supabase names a commit and an index
+  // file; the index names each letter's base and delta. Every file but the
+  // pointer is immutable, so a letter already in this browser is never
+  // downloaded again until it is actually rebuilt. The Supabase shards above
+  // remain the fallback whenever this path cannot answer.
+  const SEARCH_POINTER_URL = "https://xoathqkggcuyoyutxwri.supabase.co/storage/v1/object/public/index/pointer.json";
+  const SEARCH_CDN_BASE = "https://cdn.jsdelivr.net/gh/nanohit/alphytv@";
+  // A long-open tab asks for a newer index at least this often while it is used.
+  const SEARCH_POINTER_REFRESH_MS = 30 * 60e3;
   const SUGGEST_DEBOUNCE_MS = 260;
   const SUGGEST_MIN_REMOTE = 3;
   const SUGGEST_LOCAL_LIMIT = 6;
@@ -10058,12 +10068,165 @@ addEventListener('message', async (event) => {
     shardInFlight.set(`~${letter}`, done);
   }
 
+  let searchPointer = null;
+  let searchPointerLoad = null;
+  let searchPointerFailedAt = 0;
+  let searchIndex = null;
+  const cdnFileMemory = new Map();
+  // Which index file each letter in memory was built from, so a letter is swapped
+  // for its newer version once the pointer moves.
+  const shardMemoryKey = new Map();
+
+  async function cdnJson(url, timeoutMs) {
+    const response = await fetchWithTimeout(url, { credentials: "omit", referrerPolicy: "no-referrer" }, timeoutMs);
+    if (!response.ok) throw new Error(`${response.status}`);
+    return response.json();
+  }
+
+  function currentSearchPointer({ force = false } = {}) {
+    if (!force && searchPointer && Date.now() - searchPointer.checkedAt < SEARCH_POINTER_REFRESH_MS) {
+      return Promise.resolve(searchPointer);
+    }
+    // Never reached it yet and it just failed: the fallback serves meanwhile.
+    if (!force && !searchPointer && Date.now() - searchPointerFailedAt < 60e3) return Promise.resolve(null);
+    if (searchPointerLoad) return searchPointerLoad;
+    searchPointerLoad = (async () => {
+      try {
+        const value = await cdnJson(SEARCH_POINTER_URL, 6000);
+        if (/^[0-9a-f]{40}$/.test(String(value?.c)) && /^i\/[0-9a-f]{16}\.json$/.test(String(value?.f))) {
+          searchPointer = { c: value.c, f: value.f, checkedAt: Date.now() };
+        } else if (searchPointer) {
+          searchPointer.checkedAt = Date.now();
+        }
+      } catch {
+        // Unreachable: keep what we have and try again in a minute, not in half an hour.
+        searchPointerFailedAt = Date.now();
+        if (searchPointer) searchPointer.checkedAt = Date.now() - SEARCH_POINTER_REFRESH_MS + 60e3;
+      }
+      return searchPointer;
+    })().finally(() => { searchPointerLoad = null; });
+    return searchPointerLoad;
+  }
+
+  // Content-addressed, so the name alone identifies the bytes: whatever this
+  // browser already holds under a name is current by definition.
+  async function immutableCdnFile(commit, file, timeoutMs) {
+    const key = `cdn:${file}`;
+    if (cdnFileMemory.has(key)) return cdnFileMemory.get(key);
+    const stored = await readShard(key);
+    if (stored && stored.value !== undefined) {
+      cdnFileMemory.set(key, stored.value);
+      return stored.value;
+    }
+    const value = await cdnJson(`${SEARCH_CDN_BASE}${commit}/${file}`, timeoutMs);
+    cdnFileMemory.set(key, value);
+    writeShard(key, { at: Date.now(), value });
+    return value;
+  }
+
+  async function currentSearchIndex() {
+    const pointer = await currentSearchPointer();
+    if (!pointer) return null;
+    if (searchIndex?.file === pointer.f) return searchIndex;
+    const value = await immutableCdnFile(pointer.c, pointer.f, 8000);
+    if (value?.v !== 1 || !value.l || typeof value.l !== "object") throw new Error("bad search index");
+    searchIndex = { file: pointer.f, l: value.l };
+    pruneCdnFiles(searchIndex);
+    return searchIndex;
+  }
+
+  // A delta lists the rows to put in place — one per title, found by slug — and
+  // the titles that left the letter. Every other row of the base stands.
+  function applySearchDelta(base, delta) {
+    const upserts = Array.isArray(delta?.u) ? delta.u : [];
+    const removes = Array.isArray(delta?.r) ? delta.r : [];
+    if (!upserts.length && !removes.length) return base;
+    const replaced = new Set([...removes, ...upserts.map((row) => row[2])]);
+    return base.filter((row) => !replaced.has(row[2])).concat(upserts);
+  }
+
+  const cdnEntryKey = (entry) => (Array.isArray(entry) ? `${entry[0]}|${entry[3] || ""}` : "");
+
+  async function loadCdnLetter(rawLetter) {
+    const index = await currentSearchIndex();
+    const entry = index?.l?.[rawLetter.codePointAt(0).toString(16)];
+    if (!Array.isArray(entry)) return null;
+    const [baseFile, baseCommit, , deltaFile, deltaCommit] = entry;
+    const [base, delta] = await Promise.all([
+      immutableCdnFile(baseCommit, baseFile, 12000),
+      deltaFile ? immutableCdnFile(deltaCommit, deltaFile, 8000) : null,
+    ]);
+    if (!Array.isArray(base)) throw new Error("bad search base");
+    return { key: cdnEntryKey(entry), rows: applySearchDelta(base, delta) };
+  }
+
+  // Files the current index no longer names are dropped from IndexedDB, or a
+  // year of hourly deltas would pile up in it.
+  function pruneCdnFiles(index) {
+    const keep = new Set([`cdn:${index.file}`]);
+    for (const entry of Object.values(index.l)) {
+      if (!Array.isArray(entry)) continue;
+      keep.add(`cdn:${entry[0]}`);
+      if (entry[3]) keep.add(`cdn:${entry[3]}`);
+    }
+    for (const key of cdnFileMemory.keys()) if (!keep.has(key)) cdnFileMemory.delete(key);
+    shardStore().then((db) => {
+      if (!db) return;
+      try {
+        const store = db.transaction("shards", "readwrite").objectStore("shards");
+        const request = store.getAllKeys();
+        request.onsuccess = () => {
+          for (const key of request.result || []) {
+            if (String(key).startsWith("cdn:") && !keep.has(key)) store.delete(key);
+          }
+        };
+      } catch { /* housekeeping only */ }
+    });
+  }
+
+  // A letter held in memory is served at once; if the index has moved since it
+  // was built, the newer version replaces it for the next keystroke.
+  function refreshCdnLetter(rawLetter, letter) {
+    if (!shardMemoryKey.has(letter) || shardInFlight.has(`^${letter}`)) return;
+    const refresh = (async () => {
+      const index = await currentSearchIndex();
+      const entry = index?.l?.[rawLetter.codePointAt(0).toString(16)];
+      if (!entry || cdnEntryKey(entry) === shardMemoryKey.get(letter)) return;
+      const cdn = await loadCdnLetter(rawLetter);
+      if (!cdn) return;
+      shardMemory.set(letter, cdn.rows);
+      shardMemoryKey.set(letter, cdn.key);
+    })().catch(() => { /* the rows in memory stand */ })
+      .finally(() => shardInFlight.delete(`^${letter}`));
+    shardInFlight.set(`^${letter}`, refresh);
+  }
+
+  if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible" || !searchPointer) return;
+      if (Date.now() - searchPointer.checkedAt >= SEARCH_POINTER_REFRESH_MS) currentSearchPointer({ force: true });
+    });
+  }
+
   function loadShard(rawLetter) {
     const letter = `${rawLetter}:${TITLES_SHARD_VERSION}`;
-    if (shardMemory.has(letter)) return Promise.resolve(shardMemory.get(letter));
+    if (shardMemory.has(letter)) {
+      refreshCdnLetter(rawLetter, letter);
+      return Promise.resolve(shardMemory.get(letter));
+    }
     const pending = shardInFlight.get(letter);
     if (pending) return pending;
     const load = (async () => {
+      try {
+        const cdn = await loadCdnLetter(rawLetter);
+        if (cdn) {
+          shardMemory.set(letter, cdn.rows);
+          shardMemoryKey.set(letter, cdn.key);
+          return cdn.rows;
+        }
+      } catch (error) {
+        log("search-cdn-warn", { letter: rawLetter, message: error.message });
+      }
       const cached = await readShard(letter);
       if (cached && Date.now() - cached.at < TITLES_SHARD_TTL_MS) {
         shardMemory.set(letter, cached.rows);
@@ -10138,7 +10301,11 @@ addEventListener('message', async (event) => {
     // `a || b ? 1 : -1` parses as `(a || b) ? 1 : -1`, so the score was collapsed
     // to a bare truthiness test and the year never compared at all — the list
     // came out in near-random order. Comparator arms must return numbers.
-    out.sort((a, b) => (a.score - b.score) || ((Number(b.entry.year) || 0) - (Number(a.entry.year) || 0)));
+    // The title last: a letter built from a base plus a delta holds its rows in a
+    // different order than a freshly rebuilt one, and equal score and year must
+    // not let that order decide which six are shown.
+    out.sort((a, b) => (a.score - b.score) || ((Number(b.entry.year) || 0) - (Number(a.entry.year) || 0))
+      || a.entry.title.localeCompare(b.entry.title, "ru"));
     return out.slice(0, SUGGEST_REMOTE_LIMIT).map((item) => item.entry);
   }
 
@@ -10754,6 +10921,11 @@ addEventListener('message', async (event) => {
       letterboxdBatch,
       letterboxdReviews,
       bakedLetterboxd,
+      applySearchDelta,
+      loadShard,
+      loadCdnLetter,
+      currentSearchPointer,
+      matchShard,
       fillGridLetterboxd,
       LETTERBOXD_ENDPOINTS,
       isPlaceholderTitle,

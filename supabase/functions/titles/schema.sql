@@ -58,6 +58,12 @@ $fn$;
 
 alter table titles add column if not exists shard_keys text[];
 
+-- When anything a shard carries last changed. The CDN publisher ships only rows
+-- newer than the base it already published, so a republish of identical values
+-- (the crawler re-sends whole rows) must leave it alone.
+alter table titles add column if not exists changed_at timestamptz;
+create index if not exists titles_changed_at on titles (changed_at, id) where changed_at is not null;
+
 -- One BEFORE trigger owns everything derived, and everything that must not be
 -- lost. Two of them would have needed an ordering, and Postgres orders
 -- same-kind triggers alphabetically by name — a footgun to leave lying around.
@@ -92,6 +98,17 @@ begin
   first_alnum := lower(substring(regexp_replace(coalesce(new.origin_name, ''), '[^[:alnum:]]+', '', 'g') from 1 for 1));
   new.origin_initial := nullif(replace(first_alnum, 'ё', 'е'), '');
   new.shard_keys := shard_keys_of(new.name, new.origin_name);
+  if tg_op = 'INSERT' then
+    new.changed_at := now();
+  elsif (old.name, old.year, old.slug, old.is_series, old.embed_id, old.kp,
+         old.origin_name, old.shard_keys)
+        is distinct from
+        (new.name, new.year, new.slug, new.is_series, new.embed_id, new.kp,
+         new.origin_name, new.shard_keys) then
+    new.changed_at := now();
+  else
+    new.changed_at := old.changed_at;
+  end if;
   return new;
 end
 $fn$;
@@ -109,6 +126,27 @@ create table if not exists shard_dirty (
   letter    text primary key,
   marked_at timestamptz not null default now()
 );
+
+-- The order letters are rebuilt in. `marked_at` moves on every change, and the
+-- crawler marks forty-odd letters in one statement, so ordering by it left the
+-- builder taking the same six letters in physical order every tick while the
+-- busiest ones starved — shard п went two days without a rebuild while its rows
+-- changed every minute. This one is set when a letter joins the queue and is
+-- pushed to the back only after the letter is built.
+alter table shard_dirty add column if not exists first_marked_at timestamptz;
+update shard_dirty set first_marked_at = marked_at where first_marked_at is null;
+alter table shard_dirty alter column first_marked_at set default now();
+
+-- A row that left a shard — renamed, or its slug changed — so a delta built on
+-- an older base knows to drop it there, not only to add it elsewhere.
+create table if not exists shard_removed (
+  letter     text not null,
+  slug       text not null,
+  removed_at timestamptz not null default now(),
+  primary key (letter, slug)
+);
+create index if not exists shard_removed_at on shard_removed (removed_at);
+alter table shard_removed enable row level security;
 
 -- Invalidation belongs here and not in whoever writes the row.
 --
@@ -140,6 +178,15 @@ begin
   -- delete then threw it away — the change sat in Postgres, in no shard, and
   -- nothing noticed until something else happened to touch that letter.
   on conflict (letter) do update set marked_at = excluded.marked_at;
+  if tg_op = 'UPDATE' and old.slug is not null then
+    insert into shard_removed (letter, slug, removed_at)
+    select distinct letter, old.slug, now()
+    from unnest(coalesce(old.shard_keys, '{}'::text[])) as letter
+    where letter <> ''
+      and (old.slug is distinct from new.slug
+           or not (letter = any (coalesce(new.shard_keys, '{}'::text[]))))
+    on conflict (letter, slug) do update set removed_at = excluded.removed_at;
+  end if;
   return null;
 end
 $fn$;
