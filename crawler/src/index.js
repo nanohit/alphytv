@@ -364,10 +364,15 @@ async function runOnce(env) {
       }
       return { pages };
     }
-    const filled = await fillKpIds(env, db, deadline);
+    // Publish what earlier ticks filled before filling more. The free plan
+    // kills an invocation the moment it has used 10 ms of CPU, wherever it
+    // stands, and publishing last meant a killed tick stranded its fills in D1:
+    // from 16:17 on 11 September every scheduled tick was killed mid-fill
+    // (`exceededCpu` at ~7 s) and nothing reached Supabase at all.
     const published = await publish(env, db, Date.now() + 20_000);
     const shards = await rebuildShards(env, db);
-    return { filled, published, shards };
+    const filled = await fillKpIds(env, db, deadline);
+    return { published, shards, filled };
   } finally {
     await setMeta(db, "running_until", "0");
   }

@@ -72,7 +72,33 @@ const PUBLISH_TOKEN = Deno.env.get("PUBLISH_TOKEN") ?? "";
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 const quote = (value: string) => `"${value}"`;
 
+const RPC = `${Deno.env.get("SUPABASE_URL")}/rest/v1/rpc`;
+
 async function publish(route: string, url: URL, req: Request) {
+  // The catalogue sync job (scripts/sync-titles.mjs): a page of the source's
+  // listing in, only new or changed titles written.
+  if (route === "/catalog" || route === "/fill") {
+    if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+    const rows = await req.json().catch(() => null);
+    if (!Array.isArray(rows) || rows.length > 1000) return json({ error: "bad batch" }, 400);
+    const response = await fetch(`${RPC}/${route === "/catalog" ? "titles_upsert_catalog" : "titles_fill"}`, {
+      method: "POST", headers: HEADERS, body: JSON.stringify({ p_rows: rows }),
+    });
+    if (!response.ok) return json({ error: (await response.text()).slice(0, 300) }, 502);
+    const result = await response.json();
+    return json(route === "/catalog" ? (Array.isArray(result) ? result[0] : result) : { written: result });
+  }
+  // Titles still missing their player or Kinopoisk id, newest first: a title the
+  // sync has just discovered is resolved within the hour, the old backlog after.
+  if (route === "/pending") {
+    const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 100, 1), 1000);
+    const response = await fetch(
+      `${REST}?select=id,slug&or=(kp.is.null,origin_name.is.null)&fill_tries=lt.3&slug=neq.&order=id.desc&limit=${limit}`,
+      { headers: HEADERS },
+    );
+    if (!response.ok) return json({ error: "upstream" }, 502);
+    return json({ rows: await response.json() });
+  }
   if (route === "/letters") {
     const response = await fetch(`${Deno.env.get("SUPABASE_URL")}/rest/v1/shard_letters?select=letter`, { headers: HEADERS });
     if (!response.ok) return json({ error: "upstream" }, 502);
@@ -227,7 +253,8 @@ Deno.serve(async (req) => {
 
   // The CDN publisher (a scheduled GitHub job) reads what changed and moves the
   // pointer. Its own token, separate from the crawler's; nothing here is public.
-  const publishRoute = ["/letters", "/changes", "/removed", "/pointer"].find((route) => url.pathname.endsWith(route));
+  const publishRoute = ["/letters", "/changes", "/removed", "/pointer", "/catalog", "/pending", "/fill"]
+    .find((route) => url.pathname.endsWith(route));
   if (publishRoute) {
     if (!PUBLISH_TOKEN || req.headers.get("x-publish-token") !== PUBLISH_TOKEN) {
       return json({ error: "forbidden" }, 403);

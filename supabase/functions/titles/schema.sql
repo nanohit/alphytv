@@ -234,3 +234,81 @@ create or replace view shard_letters as
 
 -- Re-derive every row after changing the trigger:
 --   update titles set name = name;
+
+-- ---------------------------------------------------------------- catalogue sync
+-- The hourly sync job (scripts/sync-titles.mjs, GitHub Actions) keeps this table
+-- in step with the source: newly listed titles, changed names and years, and the
+-- player/Kinopoisk ids of titles not yet resolved. It writes through these two
+-- functions so an unchanged row costs no write at all — a daily re-read of the
+-- whole catalogue must not become 82,000 updates, dirty shards and a huge delta.
+
+alter table titles add column if not exists fill_tries smallint not null default 0;
+create index if not exists titles_pending_fill on titles (id desc)
+  where (kp is null or origin_name is null) and fill_tries < 3;
+
+create or replace function titles_upsert_catalog(p_rows jsonb)
+returns table (inserted integer, updated integer)
+language plpgsql security definer set search_path = public as $fn$
+#variable_conflict use_column
+declare
+  n_inserted integer := 0;
+  n_updated integer := 0;
+begin
+  create temporary table incoming on commit drop as
+    select distinct on ((r->>'id')::integer)
+           (r->>'id')::integer as id,
+           btrim(r->>'name') as name,
+           nullif(r->>'year', '')::integer as year,
+           nullif(r->>'type', '')::integer as type,
+           nullif(btrim(r->>'slug'), '') as slug,
+           nullif(r->>'rate_kp', '')::real as rate_kp
+      from jsonb_array_elements(p_rows) as r
+     where (r->>'id') ~ '^[0-9]{1,9}$' and coalesce(btrim(r->>'name'), '') <> '';
+
+  -- New titles. Any conflict — the id, or a slug another title already holds —
+  -- leaves the table as it is rather than failing the whole page.
+  insert into titles (id, name, year, type, slug, rate_kp)
+  select id, name, year, type, slug, rate_kp from incoming
+  on conflict do nothing;
+  get diagnostics n_inserted = row_count;
+
+  -- Known titles, only where something actually differs.
+  update titles t
+     set name = i.name, year = i.year, type = i.type, slug = i.slug, rate_kp = i.rate_kp
+    from incoming i
+   where t.id = i.id
+     and (t.name, t.year, t.type, t.slug, t.rate_kp) is distinct from (i.name, i.year, i.type, i.slug, i.rate_kp)
+     and not exists (select 1 from titles x where x.slug = i.slug and x.id <> i.id);
+  get diagnostics n_updated = row_count;
+  return query select n_inserted, n_updated;
+end
+$fn$;
+
+-- What a title's own page said: its player and Kinopoisk ids and original name.
+-- "" for kp and origin_name means "asked, and there is none"; a failure only
+-- counts a try, so a broken row stops being asked after three.
+create or replace function titles_fill(p_rows jsonb)
+returns integer
+language plpgsql security definer set search_path = public as $fn$
+declare
+  n integer := 0;
+  m integer := 0;
+begin
+  update titles t
+     set kp = r.kp, embed_id = r.embed_id, origin_name = r.origin_name,
+         is_series = coalesce(r.is_series, t.is_series)
+    from jsonb_to_recordset(p_rows) as r(id integer, kp text, embed_id integer, origin_name text, is_series boolean, failed boolean)
+   where t.id = r.id and not coalesce(r.failed, false);
+  get diagnostics n = row_count;
+  update titles t set fill_tries = t.fill_tries + 1
+    from jsonb_to_recordset(p_rows) as r(id integer, failed boolean)
+   where t.id = r.id and coalesce(r.failed, false);
+  get diagnostics m = row_count;
+  return n + m;
+end
+$fn$;
+
+revoke all on function titles_upsert_catalog(jsonb) from public, anon, authenticated;
+revoke all on function titles_fill(jsonb) from public, anon, authenticated;
+grant execute on function titles_upsert_catalog(jsonb) to service_role;
+grant execute on function titles_fill(jsonb) to service_role;

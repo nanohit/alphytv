@@ -1,0 +1,51 @@
+name: Sync the title index with the source
+
+# Hourly: the newest pages of the source's listing, then the titles still
+# missing their player or Kinopoisk id, newest first. Once a day, at 03:05 UTC,
+# the whole listing, for older titles added further down. The search publisher
+# (search-cdn.yml, at :41) ships whatever this wrote within the same hour.
+# See scripts/sync-titles.mjs; it paces itself at one request every two seconds.
+
+on:
+  schedule:
+    - cron: "5 * * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Read the whole listing, not just the newest pages"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: titles-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          sparse-checkout: |
+            scripts/sync-titles.mjs
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Sync
+        env:
+          PUBLISH_TOKEN: ${{ secrets.SEARCH_PUBLISH_TOKEN }}
+          FULL_INPUT: ${{ inputs.full }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          full=""
+          if [ "$FULL_INPUT" = "true" ]; then full="--full"; fi
+          if [ "$EVENT" = "schedule" ] && [ "$(date -u +%H)" = "03" ]; then full="--full"; fi
+          node scripts/sync-titles.mjs $full --fill 300 --budget-min 45
