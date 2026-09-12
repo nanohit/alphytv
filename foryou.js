@@ -227,6 +227,14 @@
       error.status = 404;
       throw error;
     }
+    // Keep the shared expiry through the browser API without changing the
+    // provider's serialised fields. A near-expired search must not gain six
+    // more hours when the page puts it into localStorage.
+    if (object.data && typeof object.data === "object") {
+      Object.defineProperty(object.data, "__alphyFreshUntil", {
+        value: Date.parse(object.freshUntil), enumerable: false, configurable: true,
+      });
+    }
     return object.data;
   }
 

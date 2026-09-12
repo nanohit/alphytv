@@ -2,6 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { makeSandbox, sleep } from "./helpers/app-sandbox.js";
 
+test("a nearly expired shared search does not get another six hours in localStorage", async () => {
+  const ctx = makeSandbox(); ctx.run(); await sleep(80);
+  const expires = Date.now() + 60000;
+  ctx.sandbox.window.alphyForYou = { unofficialGet: async () => ({ films: [], __alphyFreshUntil: expires }) };
+  await ctx.sandbox.window.alphyBridge._test.searchPoiskkino("near-end");
+  const cached = JSON.parse(ctx.storage.get("alphy.cache.search:near-end|"));
+  assert.ok(cached.exp <= expires + 10);
+  assert.ok(cached.exp > Date.now());
+});
+
 test("Enter can discover an external title absent from Lift without blocking on film metadata", async () => {
   const ctx = makeSandbox();
   ctx.run();

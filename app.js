@@ -1180,7 +1180,11 @@
       if (near.length) results = near;
     }
     results = results.map((movie) => ({ ...movie, metaLevel: "summary" }));
-    cacheSet("search", ckey, results, degraded ? 60e3 : TTL.search);
+    const sharedExpiry = Number(data?.__alphyFreshUntil);
+    const searchTtl = Number.isFinite(sharedExpiry)
+      ? (sharedExpiry > Date.now() ? Math.min(TTL.search, sharedExpiry - Date.now()) : 60e3)
+      : TTL.search;
+    cacheSet("search", ckey, results, degraded ? 60e3 : searchTtl);
     results.forEach((m) => m.kpId != null && cacheSet("metasummary", m.kpId, m, TTL.meta));
     return results;
   }

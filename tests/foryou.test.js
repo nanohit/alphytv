@@ -70,6 +70,8 @@ test("keyword results share the broker hash and bypass Deno on a Storage hit", a
   sandbox.window.alphyBridge.resolverJson = async () => { assert.fail("a query cache hit must not invoke Deno"); };
   const data = await api._test.directUnofficialGet(`/api/v2.1/films/search-by-keyword?keyword=${encodeURIComponent("  МАТРИЦА   фильм  ")}&page=1`);
   assert.equal(data.films[0].filmId, 301);
+  assert.ok(data.__alphyFreshUntil > Date.now());
+  assert.equal(Object.keys(data).includes("__alphyFreshUntil"), false);
   assert.equal(calls.length, 1);
 });
 
