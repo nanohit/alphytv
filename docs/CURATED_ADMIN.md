@@ -2,17 +2,17 @@
 
 ## Runtime shape
 
-- Public data: `catalog/curated.json` in the public `alphy-curated` Vercel Blob
-  store, exposed to the browser through the same-origin
-  `/curated-live.json` edge rewrite.
+- Source of truth: private Supabase `alphy_documents`, updated with an atomic
+  revision check. Visitors read the published `catalog-cdn` snapshot on jsDelivr.
+- `/api/catalog-snapshot` supplies the publisher; `/curated-live.json` is a
+  compatibility route to that endpoint, not the normal homepage path.
 - Public pointer: `/curated-config.json`.
 - Deployment fallback: `/curated-fallback.json`.
 - Admin authentication and writes: Vercel Functions under `/api/admin/*`.
 - Playback and metadata resolver: unchanged Deno deployment.
 
 Normal homepage traffic does not execute a Function and does not touch Deno.
-The browser downloads one small CDN-cached JSON document through the alphy.tv
-origin, which also works in privacy browsers that block cross-site fetches.
+The browser reads the CDN snapshot, with a bundled deployment fallback.
 `npm run sync:catalog` snapshots the live catalog into the deployment fallback
 and a revisioned file under `docs/catalog-backups/`.
 
@@ -29,7 +29,9 @@ Set these variables in Production and Preview:
 ```text
 ALPHY_ADMIN_USER
 ALPHY_ADMIN_PASSWORD
-BLOB_READ_WRITE_TOKEN
+ALPHY_STATE_URL
+ALPHY_STATE_SERVICE_KEY
+ALPHY_KEY_POOL_MASTER_KEY
 ```
 
 The footer's `admin` link opens the browser's native HTTP Basic prompt against
@@ -49,9 +51,10 @@ Conflicts return HTTP 409 with the current snapshot. The client retries once
 against that revision, keeps an unsaved local draft, and shows explicit
 dirty/saving/saved/error state.
 
-The Function reads the known public Blob URL directly. Writes use the Blob REST
-endpoint only on authenticated PUT requests, keeping the public path and admin
-GET cold start free of the Blob SDK module graph.
+The Function reads and writes private Supabase RPCs using its service key.
+Catalog updates and the encrypted key pool do not use Vercel Blob. Migrate both
+documents and verify their revisions before deploying these endpoints; see
+`SCALING_IMPLEMENTATION_2026-09-12.md` for the rollout sequence.
 
 The server validates and caps the payload:
 

@@ -1,0 +1,14 @@
+{
+  "checkedAt": "2026-09-12T17:33:18.009Z",
+  "testProject": "matozzgmaranfemgxpzy",
+  "isolatedSchemaRemoved": true,
+  "checks": [
+    "all SQL definitions compile",
+    "20 concurrent reservations respect the exact shared quota: 3 + 3",
+    "legacy cache state requires v2 fill; completion marks v2; maintenance keeps today's quota",
+    "two concurrent catalog writes: one wins, one revision conflict",
+    "an empty later response preserves known KP, original name and player",
+    "a changed source revision requeues a previously complete title",
+    "retry backlog, fresh titles and source changes all receive slots without duplicates"
+  ]
+}

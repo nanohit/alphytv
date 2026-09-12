@@ -23,7 +23,9 @@ const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const TIMEOUT_MS = 9000;
 // A title's metadata barely moves; a search result set moves a little more.
-const CACHE_INFO = "public, max-age=21600";
+// Leave headroom for the browser's five-hour parsed-playlist cache, otherwise
+// HTTP cache age plus that local TTL can hide new episodes for twelve hours.
+const CACHE_INFO = "public, max-age=300";
 const CACHE_SEARCH = "public, max-age=3600";
 
 const json = (body: unknown, status = 200, cache = "no-store") =>

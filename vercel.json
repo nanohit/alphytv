@@ -4,13 +4,14 @@
   "cleanUrls": true,
   "git": {
     "deploymentEnabled": {
-      "catalog-cdn": false
+      "catalog-cdn": false,
+      "search-cdn": false
     }
   },
   "rewrites": [
     {
       "source": "/curated-live.json",
-      "destination": "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/curated.json"
+      "destination": "/api/catalog-snapshot"
     },
     {
       "source": "/:id(\\d+)",

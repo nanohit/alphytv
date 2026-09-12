@@ -43,7 +43,7 @@ jobs:
         run: |
           node --input-type=module <<'NODE'
           import { writeFile } from "node:fs/promises";
-          const url = "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/curated.json";
+          const url = "https://alphy.tv/api/catalog-snapshot";
           const response = await fetch(`${url}?cdn-sync=${Date.now()}`, { cache: "no-store" });
           if (!response.ok) throw new Error(`catalog download failed: ${response.status}`);
           const catalog = await response.json();

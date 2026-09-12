@@ -226,6 +226,9 @@ async function main() {
     maxLookups: Number(argument("max-lookups", "40")) || 0,
     log: (line) => console.log(line),
   });
+  const scores = (value) => JSON.stringify((value?.lists || []).flatMap((list) => (list.items || []).map((item) => [item.key, item.letterboxd || null])));
+  catalog.enrichmentVersion = scores(catalog) === scores(previous)
+    ? previous?.enrichmentVersion || new Date().toISOString() : new Date().toISOString();
   await writeFile(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
   console.log(`letterboxd: ${stats.rated} rated, ${stats.none} none, ${stats.unknown} unknown ` +
     `of ${stats.withImdb} films with an IMDb id (${stats.items} cards); ${stats.lookups} lookups`);

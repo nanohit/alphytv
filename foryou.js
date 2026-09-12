@@ -4,10 +4,9 @@
   // =====================================================================
   // «Для вас» — personalized ranking and storage stay client-side.
   //
-  // Engine: free Kinopoisk Unofficial calls run directly from the viewer's
-  // browser, preserving their real egress IP. Keys are intentionally public and
-  // selected from the admin-managed pool; private PoiskKino metadata stays on
-  // Deno. Seeds, blending, scoring and filtering remain fully client-side.
+  // Candidate lists come from Kinopoisk Unofficial through shared objects.
+  // Only cache misses reach the server. Seeds, blending, scoring and filtering
+  // keep the existing client-side behavior; API keys remain server-side.
   //
   // Modes (admin-controlled via the curated catalog envelope, see catalog.js):
   //   on     — full pipeline, budgeted network fetches allowed
@@ -21,23 +20,12 @@
   const QUOTA_PREFIX = "alphy.foryou.quota.";
   const LAST_KEY = "alphy.foryou.last.v1";
   const HIDDEN_KEY = "alphy.foryou.hidden.v1";
-  const CLIENT_SLOT_KEY = "alphy.foryou.clientSlot.v1";
   const HIDDEN_CAP = 400;
-  const CLIENT_KEY_POOL_URL = "/api/client-key-pool";
-  const UNOFFICIAL_BASE_URL = "https://kinopoiskapiunofficial.tech";
-  // The keys only change when an admin rotates them. Keeping them a day in the
-  // browser takes this request off every page load; a pool that has stopped
-  // authenticating is refreshed early, once, rather than waited out.
-  const CLIENT_POOL_TTL = 24 * 3600e3;
-  const CLIENT_POOL_RETRY_TTL = 60e3;
-  const CLIENT_POOL_STORE_KEY = "alphy.foryou.clientPool.v1";
-  // Shared Kinopoisk cache (supabase/functions/kp): a film is fetched once for
-  // everyone and read from the CDN after that, instead of every browser spending
-  // its own quota on it. The ring and the placement hash must match the
-  // function's, or a browser would look for a film where it was never written.
-  const KP_BROKER_URL = "https://xoathqkggcuyoyutxwri.supabase.co/functions/v1/kp";
+  // Public immutable objects are the hot path. The private broker is reached
+  // only through the resolver, which coalesces simultaneous misses.
   const KP_OBJECT_HOSTS = ["xoathqkggcuyoyutxwri", "hcuhanruaclhiltpdegc", "matozzgmaranfemgxpzy"];
-  const KP_GROUP_HOSTS = Array.from({ length: 256 }, (_, group) => group % KP_OBJECT_HOSTS.length);
+  const KP_GROUP_HOSTS = Array.from({ length: 256 }, (_, group) => group % 3);
+  const UNOFFICIAL_BASE_URL = "https://kinopoiskapiunofficial.tech";
 
   const SIM_TTL = 30 * 24 * 3600e3;
   const META_TTL = 30 * 24 * 3600e3;
@@ -47,7 +35,6 @@
   const MAX_SEEDS = 8;
   const MAX_SIM_FETCH_PER_RUN = 6;
   const MAX_META_BATCH_SIZE = 18;
-  const MAX_DIRECT_META_FALLBACK = 6;
   const MAX_LOOKUP_PER_RUN = 3;
   // The pool is ~500 calls/day per key of real capacity. The cap is the safety
   // rail, not the target: the pipeline is cache-first, so a normal day spends a
@@ -77,9 +64,6 @@
     lastFingerprint: "",
     lastComputeAt: 0,
   };
-  let clientPoolCache = { keys: [], expiresAt: 0 };
-  let clientPoolInflight = null;
-  let clientKeyCursor = null;
 
   function log(...args) {
     try {
@@ -206,95 +190,8 @@
     return DAILY_FETCH_CAP - fetchesToday();
   }
 
-  // --- API access: browser-first Unofficial, private PoiskKino on Deno -----
-
-  function clientSlot() {
-    try {
-      const stored = Number(localStorage.getItem(CLIENT_SLOT_KEY));
-      if (Number.isInteger(stored) && stored >= 0) return stored;
-      const value = Math.floor(Math.random() * 0x7fffffff);
-      localStorage.setItem(CLIENT_SLOT_KEY, String(value));
-      return value;
-    } catch {
-      return Math.floor(Math.random() * 0x7fffffff);
-    }
-  }
-
-  function cleanPoolKeys(list) {
-    const seen = new Set();
-    const keys = [];
-    for (const entry of Array.isArray(list) ? list : []) {
-      const value = String(entry?.value || "").trim();
-      if (!value || seen.has(value)) continue;
-      seen.add(value);
-      keys.push({ id: String(entry?.id || ""), value });
-    }
-    return keys;
-  }
-
-  function readStoredPool() {
-    try {
-      const saved = JSON.parse(localStorage.getItem(CLIENT_POOL_STORE_KEY) || "null");
-      const age = Date.now() - Number(saved?.savedAt);
-      if (!(age >= 0 && age < CLIENT_POOL_TTL)) return null;
-      const keys = cleanPoolKeys(saved.keys);
-      return keys.length ? { keys, expiresAt: Number(saved.savedAt) + CLIENT_POOL_TTL } : null;
-    } catch {
-      return null;
-    }
-  }
-
-  function storePool(keys) {
-    try {
-      localStorage.setItem(CLIENT_POOL_STORE_KEY, JSON.stringify({ savedAt: Date.now(), keys }));
-    } catch { /* storage is only an acceleration layer */ }
-  }
-
-  function forgetStoredPool() {
-    try { localStorage.removeItem(CLIENT_POOL_STORE_KEY); } catch { /* optional */ }
-    clientPoolCache = { keys: [], expiresAt: 0 };
-  }
-
-  async function browserUnofficialKeys({ fresh = false } = {}) {
-    if (!fresh && Date.now() < clientPoolCache.expiresAt) return clientPoolCache.keys;
-    if (!fresh) {
-      const stored = readStoredPool();
-      if (stored) {
-        clientPoolCache = { keys: stored.keys, expiresAt: stored.expiresAt, stored: true };
-        if (clientKeyCursor == null) clientKeyCursor = clientSlot() % stored.keys.length;
-        return stored.keys;
-      }
-    }
-    if (clientPoolInflight) return clientPoolInflight;
-    clientPoolInflight = (async () => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 6000);
-      try {
-        const response = await fetch(CLIENT_KEY_POOL_URL, {
-          headers: { Accept: "application/json" },
-          credentials: "omit",
-          // A forced refresh must get past the five minutes the edge keeps it.
-          cache: fresh ? "no-cache" : "default",
-          signal: controller.signal,
-        });
-        const data = await response.json();
-        if (!response.ok || data?.ok === false) throw new Error(data?.error || `client pool ${response.status}`);
-        const keys = cleanPoolKeys(data?.pool?.keys);
-        clientPoolCache = { keys, expiresAt: Date.now() + CLIENT_POOL_TTL };
-        if (keys.length) storePool(keys);
-        if (clientKeyCursor == null && keys.length) clientKeyCursor = clientSlot() % keys.length;
-        return keys;
-      } catch (error) {
-        log("client key pool failed", error.message);
-        clientPoolCache = { keys: [], expiresAt: Date.now() + CLIENT_POOL_RETRY_TTL };
-        return [];
-      } finally {
-        clearTimeout(timer);
-        clientPoolInflight = null;
-      }
-    })();
-    return clientPoolInflight;
-  }
+  // --- Shared API access -------------------------------------------------
+  try { localStorage.removeItem("alphy.foryou.clientPool.v1"); } catch { /* optional */ }
 
   function kpPlacementGroup(id) {
     let hash = 0;
@@ -302,9 +199,12 @@
     return hash % 256;
   }
 
-  function kpObjectUrl(kind, id) {
-    const host = KP_OBJECT_HOSTS[KP_GROUP_HOSTS[kpPlacementGroup(id)]];
-    return `https://${host}.supabase.co/storage/v1/object/public/kp/v1/${kind}/${id}.json`;
+  const KP_OBJECT_TTLS = { film: 7 * 86400e3, staff: 30 * 86400e3, similars: 30 * 86400e3, search: 6 * 3600e3 };
+  function kpObjectUrl(kind, id, { replica = false, previous = false } = {}) {
+    const group = kpPlacementGroup(id);
+    const host = KP_OBJECT_HOSTS[(KP_GROUP_HOSTS[group] + (replica ? 1 : 0)) % 3];
+    const slot = Math.floor(Date.now() / KP_OBJECT_TTLS[kind] + group / 256) - (previous ? 1 : 0);
+    return `https://${host}.supabase.co/storage/v1/object/public/kp/v2/${kind}/${id}/${slot}.json`;
   }
 
   function sharedTarget(path) {
@@ -313,6 +213,7 @@
     if (match) return { kind: "film", id: match[1] };
     match = url.pathname.match(/^\/api\/v2\.2\/films\/(\d+)\/similars$/);
     if (match) return { kind: "similars", id: match[1] };
+    if (url.pathname === "/api/v2.1/films/search-by-keyword") return { kind: "search", q: url.searchParams.get("keyword") || "" };
     const filmId = url.searchParams.get("filmId") || "";
     if (url.pathname === "/api/v1/staff" && /^\d+$/.test(filmId)) return { kind: "staff", id: filmId };
     return null;
@@ -350,21 +251,53 @@
 
   // Resolves to the provider's payload, or undefined when the shared cache
   // could not answer — then the caller carries on exactly as before.
+  const sharedInflight = new Map();
+  const sharedCooldown = new Map();
   async function sharedUnofficialGet(path) {
     const target = sharedTarget(path);
     if (!target) return undefined;
-    const stored = await sharedJson(kpObjectUrl(target.kind, target.id), 5000);
-    const matches = stored && stored.kind === target.kind && String(stored.id) === target.id;
-    if (matches && Date.parse(stored.freshUntil) > Date.now()) return unwrapShared(stored);
-    // Missing or stale: one fill for everyone. It still spends quota, so it is
-    // counted against this browser's daily allowance like any other request.
-    if (budgetLeft() > 0) {
-      countFetch();
-      const filled = await sharedJson(`${KP_BROKER_URL}?kind=${target.kind}&id=${target.id}`, 15000);
-      if (filled && filled.kind === target.kind && String(filled.id) === target.id) return unwrapShared(filled);
-    }
-    // A stale answer beats spending this browser's keys on the same film.
-    return matches ? unwrapShared(stored) : undefined;
+    const key = JSON.stringify(target);
+    if (sharedInflight.has(key)) return sharedInflight.get(key);
+    const pending = (async () => {
+      if (target.kind === "search" && globalThis.crypto?.subtle && typeof TextEncoder !== "undefined") {
+        const q = target.q.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(q));
+        target.id = String(parseInt([...new Uint8Array(digest)].slice(0, 6).map((b) => b.toString(16).padStart(2, "0")).join(""), 16) + 1);
+      }
+      const matches = (v) => v?.v === 1 && v.kind === target.kind && (target.kind === "search"
+        ? v.query === target.q.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim()
+        : String(v.id) === target.id);
+      let stored = null;
+      if (target.id) {
+        for (const replica of [false, true]) {
+          const value = await sharedJson(kpObjectUrl(target.kind, target.id, { replica }), 2500);
+          if (matches(value)) stored = value;
+          if (matches(value) && Date.parse(value.freshUntil) > Date.now()) return unwrapShared(value);
+        }
+      }
+      if (budgetLeft() > 0 && (sharedCooldown.get(key) || 0) <= Date.now()) {
+        const request = window.alphyBridge?.resolverJson;
+        try {
+          if (typeof request !== "function") throw new Error("resolver unavailable");
+          countFetch();
+          const value = await request(`/kp?${new URLSearchParams(target)}`, { retries: 0, timeoutMs: 15000 });
+          if (matches(value)) return unwrapShared(value);
+        } catch (error) {
+          if (error.status === 404) throw error;
+        }
+        sharedCooldown.set(key, Date.now() + 60000);
+        if (sharedCooldown.size > 256) sharedCooldown.delete(sharedCooldown.keys().next().value);
+      }
+      if (!stored && target.id) {
+        for (const replica of [false, true]) {
+          const value = await sharedJson(kpObjectUrl(target.kind, target.id, { replica, previous: true }), 2000);
+          if (matches(value)) { stored = value; break; }
+        }
+      }
+      return stored ? unwrapShared(stored) : undefined;
+    })().finally(() => sharedInflight.delete(key));
+    sharedInflight.set(key, pending);
+    return pending;
   }
 
   function directUnofficialUrl(path) {
@@ -385,112 +318,19 @@
     return error;
   }
 
-  async function directUnofficialGet(path, { retried = false, skipShared = false } = {}) {
-    const url = directUnofficialUrl(path);
-    if (!url) throw new Error("unsupported direct unofficial path");
-    if (!retried && !skipShared) {
-      const shared = await sharedUnofficialGet(path);
-      if (shared !== undefined) return shared;
-    }
-    const keys = await browserUnofficialKeys();
-    const fromStorage = clientPoolCache.stored === true;
-    if (!keys.length) {
-      const error = new Error("browser unofficial keys unavailable");
-      error.code = "client_keys_unavailable";
-      throw error;
-    }
-    const start = clientKeyCursor == null ? clientSlot() % keys.length : clientKeyCursor;
-    let lastError = null;
-    let refused = 0;
-    for (let offset = 0; offset < keys.length; offset += 1) {
-      if (budgetLeft() <= 0) throw budgetError();
-      const index = (start + offset) % keys.length;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 12_000);
-      countFetch();
-      try {
-        const response = await fetch(url, {
-          headers: { Accept: "application/json", "X-API-KEY": keys[index].value },
-          credentials: "omit",
-          mode: "cors",
-          cache: "no-store",
-          referrerPolicy: "no-referrer",
-          signal: controller.signal,
-        });
-        const text = await response.text();
-        let data = null;
-        try { data = JSON.parse(text); } catch { /* surface status below */ }
-        if (!response.ok) {
-          const error = new Error(data?.message || data?.error || `Unofficial ${response.status}`);
-          error.status = response.status;
-          throw error;
-        }
-        clientKeyCursor = (index + 1) % keys.length;
-        return data;
-      } catch (error) {
-        lastError = error;
-        if (![401, 402, 403, 429].includes(Number(error?.status))) throw error;
-        if ([401, 403].includes(Number(error?.status))) refused += 1;
-        clientKeyCursor = (index + 1) % keys.length;
-      } finally {
-        clearTimeout(timer);
-      }
-    }
-    // Every key this browser kept for a day was refused outright — they were
-    // rotated since. Spent quota (402/429) is not that, and is not retried.
-    if (fromStorage && !retried && refused === keys.length) {
-      forgetStoredPool();
-      const fresh = await browserUnofficialKeys({ fresh: true });
-      if (fresh.length) return directUnofficialGet(path, { retried: true, skipShared: true });
-    }
-    throw lastError || new Error("all browser unofficial keys exhausted");
-  }
-
-  function recommendationPath(path) {
-    const url = new URL(path, "https://kinopoiskapiunofficial.invalid");
-    if (url.pathname.startsWith("/recommendations/")) return `${url.pathname}${url.search}`;
-    if (url.pathname === "/api/v2.1/films/search-by-keyword") {
-      return `/recommendations/search?q=${encodeURIComponent(url.searchParams.get("keyword") || "")}`;
-    }
-    const film = url.pathname.match(/^\/api\/v2\.2\/films\/(\d+)$/)?.[1];
-    if (film) return `/recommendations/film?id=${encodeURIComponent(film)}`;
-    const similars = url.pathname.match(/^\/api\/v2\.2\/films\/(\d+)\/similars$/)?.[1];
-    if (similars) return `/recommendations/similars?id=${encodeURIComponent(similars)}`;
-    if (url.pathname === "/api/v1/staff") {
-      return `/recommendations/staff?id=${encodeURIComponent(url.searchParams.get("filmId") || "")}`;
-    }
-    throw new Error("unsupported recommendation API path");
-  }
-
-  async function apiGet(path) {
-    // Reading what the shared cache already holds costs no quota at all, so it
-    // comes before this browser's daily allowance is even consulted.
+  // Kept under its exported name for callers; keys never leave the server.
+  async function directUnofficialGet(path) {
+    if (!directUnofficialUrl(path)) throw new Error("unsupported unofficial path");
     const shared = await sharedUnofficialGet(path);
     if (shared !== undefined) return shared;
     if (budgetLeft() <= 0) throw budgetError();
-    if (directUnofficialUrl(path)) {
-      try {
-        return await directUnofficialGet(path, { skipShared: true });
-      } catch (error) {
-        if (error.code === "budget") throw error;
-        log("direct unofficial failed; using Deno fallback", error.message);
-      }
-    }
-    const request = window.alphyBridge?.resolverJson;
-    if (typeof request !== "function") throw new Error("resolver bridge unavailable");
-    if (budgetLeft() <= 0) throw budgetError();
-    try {
-      const data = await request(recommendationPath(path), {
-        retries: 1,
-        timeoutMs: 12_000,
-        fetchCache: "no-store",
-      });
-      countFetch();
-      return data;
-    } catch (error) {
-      countFetch();
-      throw error;
-    }
+    const error = new Error("shared metadata temporarily unavailable");
+    error.code = "shared_unavailable";
+    throw error;
+  }
+
+  async function apiGet(path) {
+    return directUnofficialGet(path);
   }
 
   // --- seeds ---------------------------------------------------------------
@@ -726,36 +566,16 @@
       if (!cardMetaComplete(cached)) missing.push(id);
     }
     if (!missing.length) return result;
-    try {
-      const data = await apiGet(`/recommendations/meta?ids=${encodeURIComponent(missing.join(","))}`);
-      for (const film of Array.isArray(data?.movies) ? data.movies : []) {
-        const id = String(film?.kpId || film?.id || "");
-        if (!/^\d+$/.test(id)) continue;
+    // The same film objects supply watch pages and recommendation cards. Every
+    // distinct title is fetched once for all visitors, preserving the full row.
+    await promisePool(missing.map((id) => async () => {
+      try {
+        const film = await directUnofficialGet(`/api/v2.2/films/${encodeURIComponent(id)}`);
         const meta = normalizeFilmMeta(film);
         lsSet(`${META_PREFIX}${id}`, meta, META_TTL);
         result.set(id, meta);
-      }
-    } catch (error) {
-      if (error.code === "budget") throw error;
-      log("meta batch failed", error.message);
-    }
-    // One shared PoiskKino batch is still the cheapest path. When it is exhausted,
-    // recover only the first visible cards through the viewer-side Unofficial pool
-    // instead of leaving every rating blank or fanning out across the whole row.
-    const unresolved = missing.filter((id) => !cardMetaComplete(result.get(id))).slice(0, MAX_DIRECT_META_FALLBACK);
-    if (unresolved.length) {
-      await promisePool(unresolved.map((id) => async () => {
-        try {
-          const film = await directUnofficialGet(`/api/v2.2/films/${encodeURIComponent(id)}`);
-          const meta = normalizeFilmMeta(film);
-          lsSet(`${META_PREFIX}${id}`, meta, META_TTL);
-          result.set(id, meta);
-        } catch (error) {
-          if (error.code === "budget") throw error;
-          log("direct meta fallback failed", id, error.message);
-        }
-      }), 2);
-    }
+      } catch (error) { log("shared meta unavailable", id, error.message); }
+    }), 4);
     return result;
   }
 
@@ -917,9 +737,7 @@
       }
       publish(picked.map((candidate) => toCuratedItem(candidate, metaFor.get(candidate.id))));
 
-      // Then enrich gaps in one PoiskKino batch. If that shared path is exhausted,
-      // fetchMetaBatch repairs only the first visible cards via the viewer-side
-      // Unofficial pool instead of an N-card fanout.
+      // Enrich gaps through the shared film objects used by watch pages too.
       if (network) {
         const gaps = picked.filter((candidate) => !cardMetaComplete(metaFor.get(candidate.id))).slice(0, MAX_META_BATCH_SIZE);
         if (gaps.length) {
@@ -1040,8 +858,8 @@
   //   • the affinity signal reads only ALREADY-CACHED seed similars, never
   //     fetches;
   //   • posters/titles come from the similars payload itself; year/rating paint
-  //     from caches first, then one optional PoiskKino id-array request fills the
-  //     entire row. A cold title costs at most two requests, never N cards.
+  //     from caches first, then shared film objects fill missing card metadata
+  //     with bounded concurrency. External candidate lists remain unchanged.
 
   // Affinity = "how connected is this candidate to what the viewer already
   // likes", computed purely from cached seed→similars edges. Zero network.
@@ -1178,7 +996,7 @@
     _test: {
       buildSeeds, scoreCandidates, normTitle, recencyWeight, engagementWeight,
       toCuratedItem, hiddenIds, rankSimilars, affinityIndex, personNames, personRefs,
-      browserUnofficialKeys, directUnofficialUrl, directUnofficialGet,
+      directUnofficialUrl, directUnofficialGet,
       sharedTarget, sharedUnofficialGet, kpObjectUrl, kpPlacementGroup, apiGet,
     },
   };

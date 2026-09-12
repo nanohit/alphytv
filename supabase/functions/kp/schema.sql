@@ -7,7 +7,7 @@
 -- Idempotent; run it as often as you like.
 
 create table if not exists public.kp_cache (
-  kind text not null check (kind in ('film', 'staff', 'similars')),
+  kind text not null check (kind in ('film', 'staff', 'similars', 'search')),
   kp_id bigint not null check (kp_id > 0),
   status text not null default 'pending' check (status in ('pending', 'ok', 'missing')),
   host text,
@@ -24,6 +24,9 @@ create table if not exists public.kp_cache (
   primary key (kind, kp_id)
 );
 alter table public.kp_cache enable row level security;
+alter table public.kp_cache drop constraint if exists kp_cache_kind_check;
+alter table public.kp_cache add constraint kp_cache_kind_check check (kind in ('film', 'staff', 'similars', 'search'));
+alter table public.kp_cache add column if not exists format_version integer not null default 1;
 
 create table if not exists public.kp_key_day (
   key_id text not null,
@@ -61,7 +64,7 @@ begin
          updated_at = now()
    where c.kind = p_kind and c.kp_id = p_id
      and (c.lease_until is null or c.lease_until < now())
-     and (c.status = 'pending' or c.fresh_until is null or c.fresh_until < now())
+     and (c.format_version <> 2 or c.status = 'pending' or c.fresh_until is null or c.fresh_until < now())
      and (c.retry_at is null or c.retry_at < now())
   returning * into rec;
   if found then
@@ -74,7 +77,9 @@ end $$;
 
 -- Finish a fill. A null status records a failure: the object keeps whatever it
 -- had, and only the back-off moves.
-create or replace function public.kp_complete(
+-- Separate name preserves rollout compatibility: an old in-flight worker must
+-- never mark its v1 Storage object as a v2 publication.
+create or replace function public.kp_complete_v2(
   p_kind text, p_id bigint, p_owner text, p_version integer,
   p_status text, p_host text, p_fresh_until timestamptz, p_retry_at timestamptz, p_bytes integer
 ) returns boolean
@@ -83,6 +88,7 @@ language plpgsql security definer set search_path = public as $$
 begin
   update public.kp_cache c
      set status = coalesce(p_status, c.status),
+         format_version = case when p_status is null then c.format_version else 2 end,
          host = coalesce(p_host, c.host),
          fresh_until = coalesce(p_fresh_until, c.fresh_until),
          retry_at = p_retry_at,
@@ -103,15 +109,14 @@ language sql security definer set search_path = public as $$
     from public.kp_cache c where c.kind = p_kind and c.kp_id = p_id
 $$;
 
--- Spend one unit of the least-used key that still has quota today. The limit
--- passed in is below the provider's own, so two racing callers cannot push a
--- key over it by more than a request or two.
+-- Serialize only the tiny quota reservation, never the upstream request.
 create or replace function public.kp_reserve_key(p_keys text[], p_day date, p_limit integer)
 returns text
 language plpgsql security definer set search_path = public as $$
 declare
   chosen text;
 begin
+  perform pg_advisory_xact_lock(hashtextextended('kp-quota:' || p_day::text, 0));
   select k.key_id into chosen
     from unnest(p_keys) with ordinality as k(key_id, ord)
     left join public.kp_key_day d on d.key_id = k.key_id and d.day = p_day
@@ -160,12 +165,31 @@ end $$;
 
 -- Only the broker (service role) may call these.
 revoke all on function public.kp_acquire(text, bigint, text, integer) from public, anon, authenticated;
-revoke all on function public.kp_complete(text, bigint, text, integer, text, text, timestamptz, timestamptz, integer) from public, anon, authenticated;
+revoke all on function public.kp_complete_v2(text, bigint, text, integer, text, text, timestamptz, timestamptz, integer) from public, anon, authenticated;
 revoke all on function public.kp_read(text, bigint) from public, anon, authenticated;
 revoke all on function public.kp_reserve_key(text[], date, integer) from public, anon, authenticated;
 revoke all on function public.kp_key_report(text, date, integer) from public, anon, authenticated;
 grant execute on function public.kp_acquire(text, bigint, text, integer) to service_role;
-grant execute on function public.kp_complete(text, bigint, text, integer, text, text, timestamptz, timestamptz, integer) to service_role;
+grant execute on function public.kp_complete_v2(text, bigint, text, integer, text, text, timestamptz, timestamptz, integer) to service_role;
 grant execute on function public.kp_read(text, bigint) to service_role;
 grant execute on function public.kp_reserve_key(text[], date, integer) to service_role;
 grant execute on function public.kp_key_report(text, date, integer) to service_role;
+
+-- Bound state growth as well as Storage versions. This removes only cache
+-- bookkeeping; quota history for the current month and disabled keys remain.
+create index if not exists kp_cache_updated_at on public.kp_cache(updated_at);
+create or replace function public.kp_prune_state()
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare cache_rows integer; quota_rows integer;
+begin
+  delete from public.kp_cache where (lease_until is null or lease_until < now()) and (
+    updated_at < now() - interval '90 days'
+    or ((kind = 'search' or status = 'pending') and updated_at < now() - interval '2 days')
+  );
+  get diagnostics cache_rows = row_count;
+  delete from public.kp_key_day where day < current_date - 30;
+  get diagnostics quota_rows = row_count;
+  return jsonb_build_object('cacheRows', cache_rows, 'quotaRows', quota_rows);
+end $$;
+revoke all on function public.kp_prune_state() from public, anon, authenticated;
+grant execute on function public.kp_prune_state() to service_role;

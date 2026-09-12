@@ -1,9 +1,5 @@
-export const CATALOG_PATH = "catalog/curated.json";
-export const CATALOG_BLOB_URL =
-  process.env.ALPHY_CATALOG_BLOB_URL ||
-  "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/curated.json";
-const BLOB_API_URL = "https://vercel.com/api/blob/";
-const BLOB_API_VERSION = "12";
+import { readDocument, writeDocument } from "./_document-store.js";
+
 const MAX_LISTS = 24;
 const MAX_ITEMS_PER_LIST = 60;
 const MAX_BODY_BYTES = 512 * 1024;
@@ -213,73 +209,26 @@ export function normalizeCatalog(value, { nextRevision = null } = {}) {
 }
 
 export async function readCatalog() {
-  const uncachedUrl = new URL(CATALOG_BLOB_URL);
-  uncachedUrl.searchParams.set("admin_read", Date.now().toString(36));
-  const response = await fetch(uncachedUrl, { cache: "no-store" });
-  if (!response.ok) throw new Error(`Blob catalog read failed: ${response.status}`);
-  const catalog = normalizeCatalog(await response.json());
-  return { catalog, blobUrl: CATALOG_BLOB_URL };
-}
-
-async function putCatalogBlob(body) {
-  const token = String(process.env.BLOB_READ_WRITE_TOKEN || "").trim();
-  if (!token) throw new Error("BLOB_READ_WRITE_TOKEN is not configured");
-  const storeId = new URL(CATALOG_BLOB_URL).hostname.split(".")[0];
-  if (!storeId) throw new Error("Could not determine Blob store id");
-
-  const requestUrl = new URL(BLOB_API_URL);
-  requestUrl.searchParams.set("pathname", CATALOG_PATH);
-  let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await fetch(requestUrl, {
-      method: "PUT",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "x-api-version": BLOB_API_VERSION,
-        "x-api-blob-request-id": `${storeId}:${Date.now()}:${crypto.randomUUID()}`,
-        "x-api-blob-request-attempt": String(attempt),
-        "x-vercel-blob-store-id": storeId,
-        "x-vercel-blob-access": "public",
-        "x-add-random-suffix": "0",
-        "x-allow-overwrite": "1",
-        "x-cache-control-max-age": "60",
-        "x-content-type": "application/json; charset=utf-8",
-      },
-      body,
-    });
-    const text = await response.text();
-    if (response.ok) {
-      const result = JSON.parse(text);
-      if (!result?.url) throw new Error("Blob write returned no URL");
-      return result;
-    }
-    lastError = new Error(`Blob write failed: ${response.status} ${text.slice(0, 180)}`);
-    if (response.status !== 429 && response.status < 500) break;
-    await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
-  }
-  throw lastError || new Error("Blob write failed");
+  const document = await readDocument("catalog");
+  if (!document?.payload) throw new Error("catalog_not_migrated");
+  return { catalog: normalizeCatalog(document.payload) };
 }
 
 export async function writeCatalog(rawCatalog, expectedRevision) {
   const current = await readCatalog();
   if (Number.isInteger(expectedRevision) && expectedRevision !== current.catalog.revision) {
     const error = new Error("catalog_revision_conflict");
-    error.code = "catalog_revision_conflict";
-    error.current = current;
-    throw error;
+    error.code = error.message; error.current = current; throw error;
   }
-  const catalog = normalizeCatalog(rawCatalog, {
-    nextRevision: current.catalog.revision + 1,
-  });
+  const catalog = normalizeCatalog(rawCatalog, { nextRevision: current.catalog.revision + 1 });
   catalog.updatedAt = new Date().toISOString();
-  const body = JSON.stringify(catalog);
-  if (Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) {
-    const error = new Error("catalog_too_large");
-    error.code = "catalog_too_large";
+  if (Buffer.byteLength(JSON.stringify(catalog), "utf8") > MAX_BODY_BYTES) {
+    const error = new Error("catalog_too_large"); error.code = error.message; throw error;
+  }
+  try { await writeDocument("catalog", catalog, current.catalog.revision, catalog.revision); }
+  catch (error) {
+    if (error.code === "catalog_revision_conflict") error.current = { catalog: error.document };
     throw error;
   }
-  // A direct Blob API request keeps the Function bundle tiny and avoids the
-  // SDK's cold-start module crash observed in Vercel's Node runtime.
-  const blob = await putCatalogBlob(body);
-  return { catalog, blobUrl: blob.url };
+  return { catalog };
 }

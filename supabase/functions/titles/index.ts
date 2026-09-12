@@ -75,6 +75,19 @@ const quote = (value: string) => `"${value}"`;
 const RPC = `${Deno.env.get("SUPABASE_URL")}/rest/v1/rpc`;
 
 async function publish(route: string, url: URL, req: Request) {
+  if (route === "/sync-state") {
+    const endpoint = `${Deno.env.get("SUPABASE_URL")}/rest/v1/titles_sync_state`;
+    if (req.method === "GET") {
+      const r = await fetch(`${endpoint}?id=eq.lift&select=last_full_at`, { headers: HEADERS });
+      if (!r.ok) return json({ error: "state unavailable" }, 502);
+      return json((await r.json())[0] || { last_full_at: null });
+    }
+    if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+    const r = await fetch(`${endpoint}?on_conflict=id`, { method: "POST",
+      headers: { ...HEADERS, Prefer: "resolution=merge-duplicates" },
+      body: JSON.stringify({ id: "lift", last_full_at: new Date().toISOString() }) });
+    return r.ok ? json({ ok: true }) : json({ error: "state unavailable" }, 502);
+  }
   // The catalogue sync job (scripts/sync-titles.mjs): a page of the source's
   // listing in, only new or changed titles written.
   if (route === "/catalog" || route === "/fill") {
@@ -93,8 +106,8 @@ async function publish(route: string, url: URL, req: Request) {
   if (route === "/pending") {
     const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 100, 1), 1000);
     const response = await fetch(
-      `${REST}?select=id,slug&or=(kp.is.null,origin_name.is.null)&fill_tries=lt.3&slug=neq.&order=id.desc&limit=${limit}`,
-      { headers: HEADERS },
+      `${RPC}/titles_pending`,
+      { method: "POST", headers: HEADERS, body: JSON.stringify({ p_limit: limit }) },
     );
     if (!response.ok) return json({ error: "upstream" }, 502);
     return json({ rows: await response.json() });
@@ -173,7 +186,9 @@ Deno.serve(async (req) => {
   // budget and the busiest letter is ten PostgREST pages — so the crawler simply
   // calls it again on its next tick until `remaining` reaches zero.
   if (url.pathname.endsWith("/build")) {
-    if (!PUSH_TOKEN || req.headers.get("x-push-token") !== PUSH_TOKEN) {
+    const pushAllowed = PUSH_TOKEN && req.headers.get("x-push-token") === PUSH_TOKEN;
+    const publishAllowed = PUBLISH_TOKEN && req.headers.get("x-publish-token") === PUBLISH_TOKEN;
+    if (!pushAllowed && !publishAllowed) {
       return json({ error: "forbidden" }, 403);
     }
     const max = Math.min(Number(url.searchParams.get("max")) || 6, 20);
@@ -260,7 +275,7 @@ Deno.serve(async (req) => {
 
   // The CDN publisher (a scheduled GitHub job) reads what changed and moves the
   // pointer. Its own token, separate from the crawler's; nothing here is public.
-  const publishRoute = ["/letters", "/changes", "/removed", "/pointer", "/catalog", "/pending", "/fill"]
+  const publishRoute = ["/letters", "/changes", "/removed", "/pointer", "/catalog", "/pending", "/fill", "/sync-state"]
     .find((route) => url.pathname.endsWith(route));
   if (publishRoute) {
     if (!PUBLISH_TOKEN || req.headers.get("x-publish-token") !== PUBLISH_TOKEN) {

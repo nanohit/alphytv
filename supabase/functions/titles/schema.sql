@@ -58,6 +58,18 @@ $fn$;
 
 alter table titles add column if not exists shard_keys text[];
 
+-- Ingestion state is not part of the public seven-field search row.
+alter table titles add column if not exists source_revision text;
+alter table titles add column if not exists last_checked_at timestamptz;
+alter table titles add column if not exists next_check_at timestamptz;
+alter table titles add column if not exists source_changed boolean not null default false;
+create index if not exists titles_next_check on titles (next_check_at, id) where next_check_at is not null;
+create table if not exists public.titles_sync_state (
+  id text primary key check (id = 'lift'), last_full_at timestamptz
+);
+alter table public.titles_sync_state enable row level security;
+revoke all on public.titles_sync_state from anon, authenticated;
+
 -- When anything a shard carries last changed. The CDN publisher ships only rows
 -- newer than the base it already published, so a republish of identical values
 -- (the crawler re-sends whole rows) must leave it alone.
@@ -83,8 +95,8 @@ begin
   -- overwrite one that knows something.
   if tg_op = 'UPDATE' then
     new.embed_id    := coalesce(new.embed_id, old.embed_id);
-    new.kp          := coalesce(new.kp, old.kp);
-    new.origin_name := coalesce(new.origin_name, old.origin_name);
+    new.kp          := coalesce(nullif(new.kp, ''), old.kp, new.kp);
+    new.origin_name := coalesce(nullif(new.origin_name, ''), old.origin_name, new.origin_name);
     new.is_series   := coalesce(new.is_series, old.is_series);
   end if;
 
@@ -261,23 +273,29 @@ begin
            nullif(r->>'year', '')::integer as year,
            nullif(r->>'type', '')::integer as type,
            nullif(btrim(r->>'slug'), '') as slug,
-           nullif(r->>'rate_kp', '')::real as rate_kp
+           nullif(r->>'rate_kp', '')::real as rate_kp,
+           r->>'source_revision' as source_revision
       from jsonb_array_elements(p_rows) as r
      where (r->>'id') ~ '^[0-9]{1,9}$' and coalesce(btrim(r->>'name'), '') <> '';
 
   -- New titles. Any conflict — the id, or a slug another title already holds —
   -- leaves the table as it is rather than failing the whole page.
-  insert into titles (id, name, year, type, slug, rate_kp)
-  select id, name, year, type, slug, rate_kp from incoming
+  insert into titles (id, name, year, type, slug, rate_kp, source_revision)
+  select id, name, year, type, slug, rate_kp, source_revision from incoming
   on conflict do nothing;
   get diagnostics n_inserted = row_count;
 
   -- Known titles, only where something actually differs.
   update titles t
-     set name = i.name, year = i.year, type = i.type, slug = i.slug, rate_kp = i.rate_kp
+     set name = i.name, year = i.year, type = i.type, slug = i.slug, rate_kp = i.rate_kp,
+         source_revision = coalesce(i.source_revision, t.source_revision),
+         source_changed = t.source_changed or (t.source_revision is not null and i.source_revision is not null
+           and t.source_revision is distinct from i.source_revision),
+         next_check_at = case when t.source_revision is not null and i.source_revision is not null
+           and t.source_revision is distinct from i.source_revision then now() else t.next_check_at end
     from incoming i
    where t.id = i.id
-     and (t.name, t.year, t.type, t.slug, t.rate_kp) is distinct from (i.name, i.year, i.type, i.slug, i.rate_kp)
+     and (t.name, t.year, t.type, t.slug, t.rate_kp, t.source_revision) is distinct from (i.name, i.year, i.type, i.slug, i.rate_kp, coalesce(i.source_revision, t.source_revision))
      and not exists (select 1 from titles x where x.slug = i.slug and x.id <> i.id);
   get diagnostics n_updated = row_count;
   return query select n_inserted, n_updated;
@@ -286,7 +304,7 @@ $fn$;
 
 -- What a title's own page said: its player and Kinopoisk ids and original name.
 -- "" for kp and origin_name means "asked, and there is none"; a failure only
--- counts a try, so a broken row stops being asked after three.
+-- counts a try and schedules a slower retry after repeated failures.
 create or replace function titles_fill(p_rows jsonb)
 returns integer
 language plpgsql security definer set search_path = public as $fn$
@@ -296,11 +314,16 @@ declare
 begin
   update titles t
      set kp = r.kp, embed_id = r.embed_id, origin_name = r.origin_name,
-         is_series = coalesce(r.is_series, t.is_series)
+         is_series = coalesce(r.is_series, t.is_series),
+         last_checked_at = now(), fill_tries = 0, source_changed = false,
+         next_check_at = case when coalesce(r.embed_id, t.embed_id) is null
+           or coalesce(nullif(r.kp, ''), nullif(t.kp, '')) is null
+           then now() + interval '24 hours' else null end
     from jsonb_to_recordset(p_rows) as r(id integer, kp text, embed_id integer, origin_name text, is_series boolean, failed boolean)
    where t.id = r.id and not coalesce(r.failed, false);
   get diagnostics n = row_count;
-  update titles t set fill_tries = t.fill_tries + 1
+  update titles t set fill_tries = least(t.fill_tries::integer + 1, 32767), last_checked_at = now(),
+    next_check_at = now() + case when t.fill_tries < 3 then interval '1 hour' else interval '24 hours' end
     from jsonb_to_recordset(p_rows) as r(id integer, failed boolean)
    where t.id = r.id and coalesce(r.failed, false);
   get diagnostics m = row_count;
@@ -312,3 +335,34 @@ revoke all on function titles_upsert_catalog(jsonb) from public, anon, authentic
 revoke all on function titles_fill(jsonb) from public, anon, authenticated;
 grant execute on function titles_upsert_catalog(jsonb) to service_role;
 grant execute on function titles_fill(jsonb) to service_role;
+
+-- Reserve a portion of every batch for both new discoveries and due rechecks.
+-- A missing identity is not a permanent verdict; failures cannot disappear.
+create or replace function titles_pending(p_limit integer default 300)
+returns table(id integer, slug text)
+language sql security definer set search_path = public as $fn$
+  with urgent as (
+    select t.id, t.slug from titles t where t.next_check_at <= now() and t.source_changed and coalesce(t.slug, '') <> ''
+    order by t.next_check_at, t.id desc limit greatest(1, least(p_limit, 1000) / 3)
+  ), first_read as (
+    select t.id, t.slug from titles t
+    where t.last_checked_at is null and t.next_check_at is null
+      and (t.kp is null or t.origin_name is null or t.embed_id is null)
+      and coalesce(t.slug, '') <> ''
+    order by t.id desc limit greatest(1, least(p_limit, 1000) / 3)
+  ), due as (
+    select t.id, t.slug from titles t where t.next_check_at <= now() and coalesce(t.slug, '') <> ''
+      and t.id not in (select id from urgent)
+    order by t.source_changed desc, t.next_check_at, t.id desc
+    limit greatest(0, least(p_limit, 1000) - (select count(*) from urgent) - (select count(*) from first_read))
+  ), extra_new as (
+    select t.id, t.slug from titles t where t.last_checked_at is null and t.next_check_at is null
+      and (t.kp is null or t.origin_name is null or t.embed_id is null) and coalesce(t.slug, '') <> ''
+      and t.id not in (select id from first_read)
+    order by t.id desc limit greatest(0, least(p_limit, 1000) - (select count(*) from urgent)
+      - (select count(*) from first_read) - (select count(*) from due))
+  ) select * from urgent union all select * from first_read union all select * from due union all select * from extra_new
+    limit greatest(1, least(p_limit, 1000))
+$fn$;
+revoke all on function titles_pending(integer) from public, anon, authenticated;
+grant execute on function titles_pending(integer) to service_role;

@@ -130,7 +130,7 @@
     // so a six-hour parse cache never outlives the stream it points at — and a
     // reopened title costs zero network before Shaka. A load failure still
     // re-resolves with { force: true }.
-    liftwtitle: 6 * 3600e3,
+    liftwtitle: 5 * 3600e3,
     // A LiftW id <-> Kinopoisk id pairing is an identity, not content: it cannot
     // go stale. A miss can (the catalogue grows), so it expires much sooner.
     liftwkp: 30 * 24 * 3600e3,
@@ -1151,7 +1151,7 @@
 
   async function directUnofficialJson(path) {
     const request = window.alphyForYou?.unofficialGet;
-    if (typeof request !== "function") throw new Error("Browser Unofficial pool unavailable");
+    if (typeof request !== "function") throw new Error("Shared metadata service unavailable");
     return request(path);
   }
 
@@ -1159,32 +1159,28 @@
     const ckey = `${query}|${year || ""}`;
     const cached = cacheGet("search", ckey);
     if (cached) return cached;
-    const path = `/search?q=${encodeURIComponent(query)}&limit=12${year ? `&year=${encodeURIComponent(year)}` : ""}&primaryOnly=1`;
-    let results = [];
-    try {
-      const data = await resolverJson(path, { retries: 1 });
-      results = data.results || [];
-    } catch (primaryError) {
-      try {
-        const data = await directUnofficialJson(
-          `/api/v2.1/films/search-by-keyword?keyword=${encodeURIComponent(query)}&page=1`,
-        );
-        results = (Array.isArray(data?.films) ? data.films : [])
-          .slice(0, 12)
-          .map((item) => normalizeUnofficialClientMovie(item, { search: true }));
-        const wantedYear = Number.parseInt(year, 10);
-        if (Number.isFinite(wantedYear)) {
-          const near = results.filter((item) => (
-            Number.isFinite(Number(item.year)) && Math.abs(Number(item.year) - wantedYear) <= 1
-          ));
-          if (near.length) results = near;
-        }
-      } catch {
-        throw primaryError;
-      }
+    // Enter needs the external catalogue, including titles absent from Lift.
+    // One shared query object replaces per-viewer PoiskKino calls. Card details
+    // fill after first paint through enrichSearchCardMetadata, not 12 blocking
+    // film requests. Preview remains entirely on the static index.
+    let data, degraded = false;
+    try { data = await directUnofficialJson(`/api/v2.1/films/search-by-keyword?keyword=${encodeURIComponent(query)}&page=1`); }
+    catch {
+      degraded = true;
+      const indexed = matchShard(await loadSearchRows(query), query, 12).filter((entry) => /^\d+$/.test(entry.kpId));
+      data = { films: indexed.map((entry) => ({ filmId: Number(entry.kpId), nameRu: entry.title,
+        nameEn: entry.originName, year: entry.year, type: entry.isSeries ? "TV_SERIES" : "FILM",
+        posterUrl: `https://st.kp.yandex.net/images/film_iphone/iphone360/${entry.kpId}.jpg` })) };
+    }
+    let results = (Array.isArray(data?.films) ? data.films : []).slice(0, 12)
+      .map((item) => normalizeUnofficialClientMovie(item, { search: true }));
+    const wantedYear = Number.parseInt(year, 10);
+    if (Number.isFinite(wantedYear)) {
+      const near = results.filter((item) => Number.isFinite(Number(item.year)) && Math.abs(Number(item.year) - wantedYear) <= 1);
+      if (near.length) results = near;
     }
     results = results.map((movie) => ({ ...movie, metaLevel: "summary" }));
-    cacheSet("search", ckey, results, TTL.search);
+    cacheSet("search", ckey, results, degraded ? 60e3 : TTL.search);
     results.forEach((m) => m.kpId != null && cacheSet("metasummary", m.kpId, m, TTL.meta));
     return results;
   }
@@ -1215,26 +1211,18 @@
     if (inflight) return inflight;
     const summary = cached || cacheGet("metasummary", kpId) || {};
     const pending = (async () => { try {
-      // Permanent film identity belongs on the viewer side: Unofficial exposes
-      // IMDb id, both ratings and synopsis in one free call from the viewer's IP.
+      // One shared Unofficial film object supplies IMDb identity, both ratings
+      // and synopsis without spending provider quota again for each viewer.
       const raw = await directUnofficialJson(`/api/v2.2/films/${encodeURIComponent(kpId)}`);
       const movie = mergeMetadata(normalizeUnofficialClientMovie(raw), summary);
       movie.metaLevel = "full";
       cacheMovieMetadata(kpId, movie);
       return movie;
-    } catch (clientError) {
-      try {
-        // Deno keeps PoiskKino plus its own Unofficial pool as a fallback only;
-        // metadata no longer burns shared egress/quota while browser keys work.
-        const data = await resolverJson(`/movie?id=${encodeURIComponent(kpId)}`, { retries: 1 });
-        if (data.movie) {
-          const movie = mergeMetadata({ ...data.movie, metaLevel: "full" }, summary);
-          cacheMovieMetadata(kpId, movie);
-          return movie;
-        }
-      } catch (serverError) {
-        log("meta-warn", { client: clientError.message, server: serverError.message });
-      }
+    } catch (error) {
+      log("meta-warn", error.message);
+      // Returning the existing summary keeps playback available while the
+      // shared service recovers; no per-visitor PoiskKino fallback storm.
+      if (Object.keys(summary).length) return summary;
     }
     return null;
     })().finally(() => movieMetaInflight.delete(inflightKey));
@@ -5444,10 +5432,21 @@ parent.postMessage({
     recordOpen(target);
     cacheSet("curatedmeta", `lift:${safeId}`, meta, TTL.enriched);
 
-    if (target.kpId && !metadataIsFull(meta)) {
-      fetchMovieMeta(target.kpId).then((fresh) => {
+    if (!metadataIsFull(meta)) {
+      const enrich = async () => {
+        if (!target.kpId && meta.year && !isPlaceholderTitle(movieTitle(meta))) {
+          const rows = await searchPoiskkino(movieTitle(meta), meta.year);
+          const names = new Set([movieTitle(meta), meta.originalTitle].filter(Boolean).map(suggestFold));
+          const matches = rows.filter((row) => Number(row.year) === Number(meta.year) && !!row.isSeries === !!meta.isSeries
+            && [row.name, row.title, row.alternativeName, row.originalTitle].some((name) => name && names.has(suggestFold(name))));
+          if (matches.length === 1 && !isStale(token) && state.currentTarget === target) target.kpId = validHistoryKpId(matches[0].kpId);
+        }
+        return target.kpId ? fetchMovieMeta(target.kpId) : null;
+      };
+      enrich().then((fresh) => {
         if (!fresh || isStale(token) || state.currentTarget !== target) return;
         meta = mergeMetadata(meta, fresh);
+        meta.kpId = target.kpId;
         target.title = movieTitle(meta) || target.title;
         target.poster = meta.poster || target.poster;
         target.year = meta.year || target.year;
@@ -10069,6 +10068,11 @@ addEventListener('message', async (event) => {
   }
 
   let searchPointer = null;
+  try {
+    const saved = JSON.parse(localStorage.getItem("alphy.search.pointer.v1") || "null");
+    if (/^[0-9a-f]{40}$/.test(saved?.c || "") && /^i\/[0-9a-f]{16}\.json$/.test(saved?.f || "")
+        && Date.now() - saved.checkedAt < 7 * 86400e3) searchPointer = saved;
+  } catch { /* private storage */ }
   let searchPointerLoad = null;
   let searchPointerFailedAt = 0;
   let searchIndex = null;
@@ -10084,7 +10088,8 @@ addEventListener('message', async (event) => {
   }
 
   function currentSearchPointer({ force = false } = {}) {
-    if (!force && searchPointer && Date.now() - searchPointer.checkedAt < SEARCH_POINTER_REFRESH_MS) {
+    if (!force && searchPointer) {
+      if (Date.now() - searchPointer.checkedAt >= SEARCH_POINTER_REFRESH_MS) currentSearchPointer({ force: true });
       return Promise.resolve(searchPointer);
     }
     // Never reached it yet and it just failed: the fallback serves meanwhile.
@@ -10095,6 +10100,7 @@ addEventListener('message', async (event) => {
         const value = await cdnJson(SEARCH_POINTER_URL, 6000);
         if (/^[0-9a-f]{40}$/.test(String(value?.c)) && /^i\/[0-9a-f]{16}\.json$/.test(String(value?.f))) {
           searchPointer = { c: value.c, f: value.f, checkedAt: Date.now() };
+          try { localStorage.setItem("alphy.search.pointer.v1", JSON.stringify(searchPointer)); } catch { /* optional */ }
         } else if (searchPointer) {
           searchPointer.checkedAt = Date.now();
         }
@@ -10130,7 +10136,7 @@ addEventListener('message', async (event) => {
     if (searchIndex?.file === pointer.f) return searchIndex;
     const value = await immutableCdnFile(pointer.c, pointer.f, 8000);
     if (value?.v !== 1 || !value.l || typeof value.l !== "object") throw new Error("bad search index");
-    searchIndex = { file: pointer.f, l: value.l };
+    searchIndex = { file: pointer.f, commit: pointer.c, l: value.l };
     pruneCdnFiles(searchIndex);
     return searchIndex;
   }
@@ -10160,6 +10166,35 @@ addEventListener('message', async (event) => {
     return { key: cdnEntryKey(entry), rows: applySearchDelta(base, delta) };
   }
 
+  const prefixRows = new Map();
+  const prefixLoads = new Map();
+  async function loadSearchRows(query) {
+    const folded = suggestFold(query);
+    const firstWord = folded.split(" ")[0];
+    const letter = [...folded][0];
+    if (!letter) return [];
+    if ([...firstWord].length < 3) return loadShard(letter);
+    try {
+      const index = await currentSearchIndex();
+      const entry = index?.l?.[letter.codePointAt(0).toString(16)];
+      if (!entry?.[5]) return loadShard(letter);
+      const prefix = [...firstWord].slice(0, 3).join("");
+      const key = `${index.file}:${prefix}`;
+      if (prefixLoads.has(key)) return prefixLoads.get(key);
+      const pending = (async () => {
+        const manifest = await immutableCdnFile(index.commit, entry[5], 5000);
+        const part = manifest[prefix];
+        const rows = part ? await immutableCdnFile(part[1], part[0], 8000) : [];
+        if (!Array.isArray(rows)) throw new Error("bad prefix shard");
+        prefixRows.set(prefix, rows);
+        if (prefixRows.size > 32) prefixRows.delete(prefixRows.keys().next().value);
+        return rows;
+      })().finally(() => prefixLoads.delete(key));
+      prefixLoads.set(key, pending);
+      return await pending;
+    } catch { return loadShard(letter); }
+  }
+
   // Files the current index no longer names are dropped from IndexedDB, or a
   // year of hourly deltas would pile up in it.
   function pruneCdnFiles(index) {
@@ -10168,8 +10203,10 @@ addEventListener('message', async (event) => {
       if (!Array.isArray(entry)) continue;
       keep.add(`cdn:${entry[0]}`);
       if (entry[3]) keep.add(`cdn:${entry[3]}`);
+      if (entry[5]) keep.add(`cdn:${entry[5]}`);
     }
-    for (const key of cdnFileMemory.keys()) if (!keep.has(key)) cdnFileMemory.delete(key);
+    for (const key of cdnFileMemory.keys()) if (!keep.has(key) && !key.startsWith("cdn:p/")) cdnFileMemory.delete(key);
+    while (cdnFileMemory.size > 96) cdnFileMemory.delete(cdnFileMemory.keys().next().value);
     shardStore().then((db) => {
       if (!db) return;
       try {
@@ -10177,7 +10214,11 @@ addEventListener('message', async (event) => {
         const request = store.getAllKeys();
         request.onsuccess = () => {
           for (const key of request.result || []) {
-            if (String(key).startsWith("cdn:") && !keep.has(key)) store.delete(key);
+            if (String(key).startsWith("cdn:") && !keep.has(key) && !String(key).startsWith("cdn:p/")) store.delete(key);
+            if (String(key).startsWith("cdn:p/")) {
+              const read = store.get(key);
+              read.onsuccess = () => { if (Date.now() - Number(read.result?.at || 0) > 7 * 86400e3) store.delete(key); };
+            }
           }
         };
       } catch { /* housekeeping only */ }
@@ -10265,7 +10306,7 @@ addEventListener('message', async (event) => {
     return -1;
   };
 
-  function matchShard(rows, query) {
+  function matchShard(rows, query, limit = SUGGEST_REMOTE_LIMIT) {
     const folded = suggestFold(query);
     if (!folded) return [];
     const out = [];
@@ -10306,7 +10347,7 @@ addEventListener('message', async (event) => {
     // not let that order decide which six are shown.
     out.sort((a, b) => (a.score - b.score) || ((Number(b.entry.year) || 0) - (Number(a.entry.year) || 0))
       || a.entry.title.localeCompare(b.entry.title, "ru"));
-    return out.slice(0, SUGGEST_REMOTE_LIMIT).map((item) => item.entry);
+    return out.slice(0, limit).map((item) => item.entry);
   }
 
   function suggestRow(entry) {
@@ -10472,10 +10513,12 @@ addEventListener('message', async (event) => {
     // The shard for this letter is usually already in memory by the second
     // keystroke, and then there is nothing to wait for: matching it here means
     // the list simply changes, with no empty frame in between and no timer.
-    const warm = shardInMemory(suggestFold(query)[0]);
+    const prefix = [...suggestFold(query).split(" ")[0]].slice(0, 3).join("");
+    const warm = prefixRows.get(prefix) || shardInMemory(suggestFold(query)[0]);
     if (warm) {
       suggestRemote = withoutLocal(matchShard(warm, query), local);
       renderSuggest(local, suggestRemote);
+      if (prefixRows.has(prefix)) loadSearchRows(query).catch(() => {});
       return;
     }
     // Cold shard: keep showing what is still right rather than blanking the
@@ -10483,7 +10526,7 @@ addEventListener('message', async (event) => {
     suggestRemote = stillMatching(suggestRemote, query);
     renderSuggest(local, suggestRemote);
     suggestTimer = setTimeout(() => {
-      loadShard(suggestFold(query)[0])
+      loadSearchRows(query)
         .then((rows) => {
           if (token !== suggestToken || el.searchInput.value.trim() !== query) return;
           suggestRemote = withoutLocal(matchShard(rows, query), local);
@@ -10710,6 +10753,7 @@ addEventListener('message', async (event) => {
     });
     el.searchBtn.addEventListener("click", onSearchSubmit);
     el.searchInput.addEventListener("focus", () => {
+      currentSearchIndex().catch(() => {});
       warmNewdeafConnections();
       warmCollapsConnections();
     });
@@ -10923,6 +10967,8 @@ addEventListener('message', async (event) => {
       bakedLetterboxd,
       applySearchDelta,
       loadShard,
+      loadSearchRows,
+      searchPoiskkino,
       loadCdnLetter,
       currentSearchPointer,
       matchShard,

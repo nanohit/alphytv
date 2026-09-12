@@ -36,6 +36,21 @@ const DAY_MS = 24 * 3600e3;
 const BASE_MARGIN_MS = 2 * 60e3;
 export const REBASE_MIN_ROWS = 200;
 export const REBASE_SHARE = 0.1;
+export const PREFIX_THRESHOLD = 2000;
+const foldWords = (value) => String(value || "").toLowerCase().replace(/ё/g, "е").replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(/ +/u);
+export function partitionRows(rows, letter) {
+  const parts = new Map();
+  for (const row of rows) {
+    const prefixes = new Set([...foldWords(row[0]), ...foldWords(row[6])]
+      .filter((word) => word.startsWith(letter) && [...word].length >= 3)
+      .map((word) => [...word].slice(0, 3).join("")));
+    for (const prefix of prefixes) {
+      if (!parts.has(prefix)) parts.set(prefix, []);
+      parts.get(prefix).push(row);
+    }
+  }
+  return parts;
+}
 const REBASE_AGE_MS = 7 * DAY_MS;
 const AGE_REBASES_PER_RUN = 10;
 const KEEP_INDEXES = 4;
@@ -203,15 +218,29 @@ export async function buildData(dir, { log = console.log } = {}) {
       if (await writeFileOnce(dir, d, body)) written += 1;
       dc = plan.entry?.d === d ? plan.entry.dc : "pending";
     }
-    next[plan.cp] = { letter: entry.letter, b: entry.b, bc: entry.bc, n: entry.n, s: entry.s, rebased: entry.rebased, d, dc };
+    let parts = null;
+    if (entry.n >= PREFIX_THRESHOLD) {
+      const base = await readJson(dir, entry.b);
+      const replaced = new Set([...delta.r, ...delta.u.map((row) => row[2])]);
+      const rows = base.filter((row) => !replaced.has(row[2])).concat(delta.u);
+      parts = {};
+      for (const [prefix, values] of partitionRows(rows, plan.letter)) {
+        const body = JSON.stringify(values);
+        const file = `p/${hash16(body)}.json`;
+        if (await writeFileOnce(dir, file, body)) written += 1;
+        const old = plan.entry?.parts?.[prefix];
+        parts[prefix] = [file, old?.[0] === file ? old[1] : "pending", values.length];
+      }
+    }
+    next[plan.cp] = { letter: entry.letter, b: entry.b, bc: entry.bc, n: entry.n, s: entry.s, rebased: entry.rebased, d, dc, parts };
   }
 
   // Only what the new state names stays in the tree. Everything removed is
   // still in the history and in jsDelivr's permanent cache, so a browser that
   // read an older index keeps working.
-  const referenced = new Set(Object.values(next).flatMap((entry) => [entry.b, entry.d]).filter(Boolean));
+  const referenced = new Set(Object.values(next).flatMap((entry) => [entry.b, entry.d, ...Object.values(entry.parts || {}).map((p) => p[0])]).filter(Boolean));
   const keepIndexes = new Set((state.indexes || []).slice(-KEEP_INDEXES));
-  for (const folder of ["b", "d", "i"]) {
+  for (const folder of ["b", "d", "i", "p"]) {
     let names = [];
     try { names = await readdir(path.join(dir, folder)); } catch { names = []; }
     for (const name of names) {
@@ -240,6 +269,14 @@ export async function buildIndex(dir, commit) {
     if (entry.bc === "pending") entry.bc = commit;
     if (entry.dc === "pending") entry.dc = commit;
     l[cp] = [entry.b, entry.bc, entry.n, entry.d, entry.dc];
+    if (entry.parts) {
+      for (const part of Object.values(entry.parts)) if (part[1] === "pending") part[1] = commit;
+      const partBody = JSON.stringify(entry.parts);
+      const partFile = `i/${hash16(partBody)}.json`;
+      await writeFileOnce(dir, partFile, partBody);
+      // Manifest is in the INDEX commit, supplied by the pointer to the client.
+      l[cp].push(partFile);
+    }
   }
   const body = JSON.stringify({ v: 1, at: state.updated, l });
   const file = `i/${hash16(body)}.json`;
@@ -255,9 +292,13 @@ export async function buildIndex(dir, commit) {
 export async function warmAndPoint(dir, commit, dataCommit) {
   const state = await readState(dir);
   const urls = [`${CDN}${commit}/${state.index}`];
+  const index = await readJson(dir, state.index);
   for (const entry of Object.values(state.letters)) {
     if (entry.bc === dataCommit) urls.push(`${CDN}${entry.bc}/${entry.b}`);
     if (entry.d && entry.dc === dataCommit) urls.push(`${CDN}${entry.dc}/${entry.d}`);
+    const manifest = index.l[codepoint(entry.letter)]?.[5];
+    if (manifest) urls.push(`${CDN}${commit}/${manifest}`);
+    for (const part of Object.values(entry.parts || {})) if (part[1] === dataCommit) urls.push(`${CDN}${part[1]}/${part[0]}`);
   }
   let failed = 0;
   for (let at = 0; at < urls.length; at += 8) {

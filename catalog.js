@@ -271,6 +271,7 @@
     return {
       schema: 1,
       revision: Math.max(0, Number(value?.revision) || 0),
+      enrichmentVersion: String(value?.enrichmentVersion || ""),
       updatedAt: value?.updatedAt || null,
       forYou: normalizeForYouMode(value?.forYou),
       bookmarkBanner: value?.bookmarkBanner === true,

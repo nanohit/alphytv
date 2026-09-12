@@ -43,3 +43,7 @@ jobs:
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets[matrix.token_secret] }}
         run: supabase functions deploy letterboxd --project-ref "${{ matrix.project }}" --no-verify-jwt
+      - name: Deploy Lift relay with refreshed playlist caching
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets[matrix.token_secret] }}
+        run: supabase functions deploy liftw --project-ref "${{ matrix.project }}" --no-verify-jwt

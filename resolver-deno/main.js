@@ -18,6 +18,8 @@
 // bootstrap fallback until that link succeeds.
 
 import worker, { pickAllowOrigin } from "../worker/src/index.js";
+import { createKpGateway } from "./kp-gateway.js";
+import { createPersistentCache } from "./persistent-cache.js";
 
 const env = {
   // Primary metadata source (kinopoisk.dev / poiskkino). A POOL of keys may be set
@@ -301,6 +303,11 @@ const zenithInflight = new Map();
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ZENITH_FRESH_MS = 60 * 60 * 1000;
 const ZENITH_STALE_MS = 24 * 60 * 60 * 1000;
+const durableZona = createPersistentCache({ url: Deno.env.get("ALPHY_CACHE_URL"), key: Deno.env.get("ALPHY_CACHE_SERVICE_KEY") });
+function keepBounded(map, key, value) {
+  map.delete(key); map.set(key, value);
+  while (map.size > 512) map.delete(map.keys().next().value);
+}
 
 function corsHeadersFor(request) {
   const requestOrigin = request.headers.get("origin") || "";
@@ -400,13 +407,13 @@ function zonaCacheRequest(kpId) {
 
 async function readZonaCache(kpId) {
   const memoryHit = zonaMemoryCache.get(kpId);
-  if (memoryHit?.embedUrl) return { ...memoryHit, cache: "memory" };
+  if (memoryHit?.embedUrl && memoryHit.storedAt && Date.now() - memoryHit.storedAt < CACHE_TTL_MS) return { ...memoryHit, cache: "memory" };
 
   if (kv) {
     try {
       const hit = await kv.get(["zona", kpId]);
-      if (hit.value?.embedUrl) {
-        zonaMemoryCache.set(kpId, hit.value);
+      if (hit.value?.embedUrl && hit.value.storedAt && Date.now() - hit.value.storedAt < CACHE_TTL_MS) {
+        keepBounded(zonaMemoryCache, kpId, hit.value);
         return { ...hit.value, cache: "kv" };
       }
     } catch {
@@ -419,8 +426,8 @@ async function readZonaCache(kpId) {
       const hit = await edgeCache.match(zonaCacheRequest(kpId));
       if (hit) {
         const value = await hit.json();
-        if (value?.embedUrl) {
-          zonaMemoryCache.set(kpId, value);
+        if (value?.embedUrl && value.storedAt && Date.now() - value.storedAt < CACHE_TTL_MS) {
+          keepBounded(zonaMemoryCache, kpId, value);
           return { ...value, cache: "edge" };
         }
       }
@@ -429,20 +436,26 @@ async function readZonaCache(kpId) {
     }
   }
 
+  const durable = await durableZona.get(kpId);
+  if (durable?.embedUrl) {
+    keepBounded(zonaMemoryCache, kpId, durable);
+    return { ...durable, cache: "storage" };
+  }
   return null;
 }
 
 async function writeZonaCache(value) {
   if (!value?.kpId || !value?.embedUrl || !value?.zenithId) return;
   const stored = {
+    storedAt: Date.now(),
     kpId: String(value.kpId),
     zenithId: String(value.zenithId),
     zenithIds: value.zenithIds || [String(value.zenithId)],
     embedUrl: value.embedUrl,
   };
-  zonaMemoryCache.set(stored.kpId, stored);
+  keepBounded(zonaMemoryCache, stored.kpId, stored);
 
-  const writes = [];
+  const writes = [durableZona.set(stored.kpId, stored)];
   if (kv) {
     writes.push(kv.set(["zona", stored.kpId], stored, { expireIn: CACHE_TTL_MS }));
   }
@@ -510,7 +523,7 @@ async function readZenithCache(id) {
       const response = await edgeCache.match(zenithCacheRequest(id));
       if (response) {
         stored = await response.json();
-        if (stored?.value?.hasSources) zenithMemoryCache.set(id, stored);
+        if (stored?.value?.hasSources) keepBounded(zenithMemoryCache, id, stored);
       }
     } catch {
       // A cache miss must never break the live resolver.
@@ -524,7 +537,7 @@ async function readZenithCache(id) {
 
 async function writeZenithCache(id, value) {
   const stored = { storedAt: Date.now(), value };
-  zenithMemoryCache.set(id, stored);
+  keepBounded(zenithMemoryCache, id, stored);
   if (edgeCache) {
     await edgeCache.put(
       zenithCacheRequest(id),
@@ -577,8 +590,10 @@ async function handleZenithCached(request, url) {
 }
 
 const listenPort = Number(Deno.env.get("ALPHY_LOCAL_PORT") || 8000);
+const kpGateway = createKpGateway({ cache: edgeCache, token: Deno.env.get("KP_BROKER_TOKEN") || "" });
 Deno.serve({ port: listenPort }, async (request, info) => {
   const url = new URL(request.url);
+  if (url.pathname === "/kp") return kpGateway(request);
   if (url.pathname === "/resolve-rezka") {
     const headers = new Headers(request.headers);
     const forwarded = String(headers.get("x-forwarded-for") || "").split(",", 1)[0].trim();

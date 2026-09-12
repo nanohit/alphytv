@@ -158,13 +158,13 @@ test("Vercel static is used only when jsDelivr fails", async () => {
   assert.equal(h.calls.some((url) => url.includes("vercel-storage.com")), false);
 });
 
-test("Blob is tertiary fallback after jsDelivr and Vercel static fail", async () => {
+test("a total CDN failure uses the catalog endpoint without Vercel Blob", async () => {
   const h = harness({ primaryStatus: 503, fallbackStatus: 503, blob: catalog(6) });
   h.mount(catalog(6));
   const result = await (await h.window.fetch("/curated-live.json")).json();
-  assert.equal(result.revision, 6);
-  assert.ok(h.calls.some((url) => url.includes("/catalog/current.json")));
-  assert.ok(h.calls.some((url) => url.endsWith("/catalog/r6.json")));
+  assert.equal(result.revision, 4);
+  assert.ok(h.calls.some((url) => url.endsWith("/curated-live.json")));
+  assert.ok(h.calls.every((url) => !url.includes("vercel-storage.com")));
 });
 
 test("background refresh never overwrites an admin draft", async () => {

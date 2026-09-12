@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { catalogRow, fillPending, fillRow, net, syncCatalog, SoftError, SPACING_MS, UA } from "../scripts/sync-titles.mjs";
+import { catalogRow, fillPending, fillRow, fullScanDue, net, syncCatalog, SoftError, SPACING_MS, UA } from "../scripts/sync-titles.mjs";
 
 // The hourly job that replaces the Cloudflare crawler's frozen catalogue. These
 // pin how it treats the source — one request at a time, paced, stopping at the
@@ -39,7 +39,7 @@ function fake({ pages = [], total = 0, writes = () => ({ inserted: 0, updated: 0
 }
 
 test("a listing row keeps only what the index stores", () => {
-  assert.deepEqual(catalogRow(item(5)), { id: 5, name: "Тайтл 5", year: 2026, type: 1, slug: "t-5", rate_kp: 7.1 });
+  assert.deepEqual(catalogRow(item(5)), { id: 5, name: "Тайтл 5", year: 2026, type: 1, slug: "t-5", rate_kp: 7.1, source_revision: "[null,null,null,null,null]" });
   assert.equal(catalogRow({ id: 1, name: "x" }).rate_kp, null);
 });
 
@@ -106,10 +106,21 @@ test("the resolved row is shaped exactly as the table expects", () => {
   assert.deepEqual(fillRow(9, {}), { id: 9, kp: "", embed_id: null, origin_name: "", is_series: false });
 });
 
-test("the job announces itself and runs the full read once a day", async () => {
+test("the job announces itself and checks the durable full-scan checkpoint", async () => {
   assert.match(UA, /alphy\.tv; contact:/);
   const workflow = await readFile(new URL("../.github/workflows/titles-sync.yml", import.meta.url), "utf8");
   assert.match(workflow, /cron: "5 \* \* \* \*"/);
-  assert.match(workflow, /date -u \+%H\)" = "03"/);
+  assert.match(workflow, /--auto/);
   assert.match(workflow, /SEARCH_PUBLISH_TOKEN/);
+});
+
+test("a delayed scheduled run still detects an overdue full scan", async () => {
+  const now = Date.parse("2026-09-12T08:48:00Z");
+  net.now = () => now;
+  net.titles = async () => ({ last_full_at: new Date(now - 5 * 3600e3).toISOString() });
+  assert.equal(await fullScanDue(), true);
+  net.titles = async () => ({ last_full_at: new Date(now - 3 * 3600e3).toISOString() });
+  assert.equal(await fullScanDue(), false);
+  net.titles = async () => ({ last_full_at: null });
+  assert.equal(await fullScanDue(), true);
 });

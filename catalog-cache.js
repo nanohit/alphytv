@@ -1,5 +1,5 @@
 // Instant curated-catalog bootstrap: the live jsDelivr branch first, then the
-// immutable app snapshot and Blob as fallbacks.
+// immutable app snapshot as fallback.
 (function () {
   "use strict";
 
@@ -10,9 +10,6 @@
     "https://cdn.jsdelivr.net/gh/nanohit/alphytv@catalog-cdn/curated-fallback.json";
   const STATIC_FALLBACK_URL =
     window.__alphyAssetUrl?.("curated-fallback.json") || "/curated-fallback.json";
-  const BLOB_MANIFEST_URL =
-    "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/current.json";
-  const BLOB_HOST_SUFFIX = ".public.blob.vercel-storage.com";
   const CACHE_KEY = "alphy.curated.public.v3";
   const REFRESH_KEY = "alphy.curated.public-refresh.v2";
   const REFRESH_MIN_MS = 5 * 60 * 1000;
@@ -20,7 +17,6 @@
 
   let primaryPromise = null;
   let fallbackPromise = null;
-  let blobPromise = null;
   let refreshPromise = null;
   let refreshScheduled = false;
 
@@ -81,15 +77,6 @@
     try { localStorage.setItem(REFRESH_KEY, String(Date.now())); } catch { /* optional */ }
   }
 
-  function isTrustedSnapshotUrl(value) {
-    try {
-      const url = new URL(String(value || ""));
-      return url.protocol === "https:" && url.hostname.endsWith(BLOB_HOST_SUFFIX);
-    } catch {
-      return false;
-    }
-  }
-
   function activeCatalogState() {
     const api = window.alphyCatalog;
     const state = api?._test?.state;
@@ -107,7 +94,9 @@
       }
       const { api, state } = active;
       if (api.isAdmin?.() || state.dirty) return;
-      if (revisionOf(catalog) <= revisionOf(state.catalog)) return;
+      if (revisionOf(catalog) < revisionOf(state.catalog)) return;
+      if (revisionOf(catalog) === revisionOf(state.catalog) &&
+          String(catalog.enrichmentVersion || "") <= String(state.catalog.enrichmentVersion || "")) return;
       state.catalog = catalog;
       api.render();
       try {
@@ -159,31 +148,6 @@
       fallbackPromise = null;
     });
     return fallbackPromise;
-  }
-
-  function loadBlobFallback() {
-    if (blobPromise) return blobPromise;
-    blobPromise = (async () => {
-      const manifestResponse = await nativeFetch(BLOB_MANIFEST_URL, {
-        cache: "no-cache",
-        credentials: "omit",
-      });
-      if (!manifestResponse.ok) throw new Error(`catalog manifest ${manifestResponse.status}`);
-      const manifest = await manifestResponse.json();
-      if (!isTrustedSnapshotUrl(manifest?.blobUrl)) {
-        throw new Error("catalog manifest has an invalid snapshot URL");
-      }
-      const catalog = await fetchCatalogJson(manifest.blobUrl, {
-        cache: "force-cache",
-        credentials: "omit",
-      });
-      storeIfNewer(catalog);
-      applyFreshWhenReady(catalog);
-      return catalog;
-    })().finally(() => {
-      blobPromise = null;
-    });
-    return blobPromise;
   }
 
   function refreshInBackground() {
@@ -252,14 +216,7 @@
       try {
         return jsonResponse(await loadVercelFallback());
       } catch {
-        try {
-          return jsonResponse(await loadBlobFallback());
-        } catch {
-          return nativeFetch(PUBLIC_CATALOG_PATH, {
-            cache: "force-cache",
-            credentials: "omit",
-          });
-        }
+        return nativeFetch(PUBLIC_CATALOG_PATH, { cache: "force-cache", credentials: "omit" });
       }
     }
   };
@@ -268,6 +225,6 @@
     primaryUrl: PRIMARY_CDN_URL,
     cachedRevision: () => revisionOf(readCachedCatalog()),
     refresh: () => loadPrimary(),
-    fallback: () => loadVercelFallback().catch(() => loadBlobFallback()),
+    fallback: () => loadVercelFallback(),
   };
 })();

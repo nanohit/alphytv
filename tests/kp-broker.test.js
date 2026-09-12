@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import {
   createKpHandler, hostFor, objectPath, compactPayload, moscowDay, placementGroup,
-  OBJECT_HOSTS, FRESH_MS,
+  OBJECT_HOSTS, FRESH_MS, objectSlot, slotEnd,
 } from "../supabase/functions/kp/index.ts";
 
 // The shared Kinopoisk cache: a film is fetched once for everyone. These pin the
@@ -40,7 +40,7 @@ function world({ keys = ["k1", "k2"], upstream, upstreamDelay = 0 } = {}) {
       }
       return [{ acquired: false, ...snapshot() }];
     }
-    if (name === "kp_complete") {
+    if (name === "kp_complete_v2") {
       const row = rows.get(key);
       if (!row || row.owner !== a.p_owner || row.version !== a.p_version) return false;
       if (a.p_status) row.status = a.p_status;
@@ -96,6 +96,14 @@ function world({ keys = ["k1", "k2"], upstream, upstreamDelay = 0 } = {}) {
 
 const film = (id) => ({ kinopoiskId: Number(id), nameRu: "Интерстеллар", year: 2014 });
 
+test("an unauthorised broker request cannot reserve state or spend a key", async () => {
+  let calls = 0;
+  const handler = createKpHandler({ token: "server-only", rpc: async () => { calls += 1; } });
+  const response = await handler(new Request("https://x/kp?kind=film&id=301"));
+  assert.equal(response.status, 403);
+  assert.equal(calls, 0);
+});
+
 test("a missing film is fetched once, published where the browser will look, and returned", async () => {
   const w = world({ upstream: (path) => ({ status: 200, body: film(path.split("/").pop()) }) });
   const { status, body } = await w.ask("film", "258687");
@@ -103,8 +111,9 @@ test("a missing film is fetched once, published where the browser will look, and
   assert.equal(body.v, 1);
   assert.equal(body.status, "ok");
   assert.equal(body.data.nameRu, "Интерстеллар");
-  assert.equal(Date.parse(body.freshUntil) - Date.parse(body.fetchedAt), FRESH_MS.film);
-  assert.deepEqual(w.objects.get(`${hostFor("258687")}/${objectPath("film", "258687")}`), body);
+  assert.ok(Date.parse(body.freshUntil) > Date.parse(body.fetchedAt));
+  assert.ok(Date.parse(body.freshUntil) - Date.parse(body.fetchedAt) <= FRESH_MS.film);
+  assert.deepEqual(w.objects.get(`${hostFor("258687")}/${objectPath("film", "258687", objectSlot("film", "258687", Date.parse("2026-09-11T12:00:00Z")))}`), body);
   assert.equal(w.upstreamCalls.length, 1);
   assert.equal(w.upstreamCalls[0].path, "/api/v2.2/films/258687");
 });
@@ -113,7 +122,7 @@ test("twenty visitors missing the same film at once cost one upstream call", asy
   const w = world({ upstreamDelay: 5, upstream: () => ({ status: 200, body: { total: 1, items: [{ filmId: 1 }] } }) });
   const answers = await Promise.all(Array.from({ length: 20 }, () => w.ask("similars", "301")));
   assert.equal(w.upstreamCalls.length, 1);
-  assert.ok(answers.every((answer) => answer.status === 200 && answer.body.data.items[0].filmId === 1),
+  assert.ok(answers.every((answer) => answer.status === 202 || (answer.status === 200 && answer.body.data.items[0].filmId === 1)),
     JSON.stringify(answers.map((answer) => answer.status)));
 });
 
@@ -155,7 +164,9 @@ test("a film the provider does not know is remembered as missing, not as an erro
   assert.equal(status, 200);
   assert.equal(body.status, "missing");
   assert.equal(body.data, null);
-  assert.equal(w.objects.size, 1);
+  assert.equal(w.objects.size, 0, "a six-hour negative answer must not occupy an immutable month slot");
+  assert.equal((await w.ask("film", "404404")).body.status, "missing");
+  assert.equal(w.upstreamCalls.length, 1);
 });
 
 test("with no keys configured, nothing reaches the provider", async () => {
@@ -216,13 +227,13 @@ async function loadForYou(fetchImpl) {
     get length() { return storage.size; },
   };
   const sandbox = {
-    console, Date, JSON, Math, Promise, URL, setTimeout, clearTimeout, localStorage, AbortController,
+    console, Date, JSON, Math, Promise, URL, URLSearchParams, setTimeout, clearTimeout, localStorage, AbortController,
     fetch: fetchImpl,
     CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options?.detail; } },
     window: {
       addEventListener: () => {},
       dispatchEvent: () => {},
-      alphyBridge: { resolverJson: async () => { throw new Error("deno fallback"); } },
+      alphyBridge: { resolverJson: async (path) => { const response = await fetchImpl(`https://resolver.test${path}`); if (!response.ok) throw new Error("resolver unavailable"); return response.json(); } },
     },
   };
   sandbox.globalThis = sandbox;
@@ -244,17 +255,17 @@ test("the browser looks for a film on the same project the function writes it to
   for (let id = 1; id < 3000; id += 7) {
     assert.equal(api.kpPlacementGroup(String(id)), placementGroup(String(id)));
     assert.equal(api.kpObjectUrl("film", String(id)),
-      `https://${hostFor(String(id))}.supabase.co/storage/v1/object/public/kp/v1/film/${id}.json`);
+      `https://${hostFor(String(id))}.supabase.co/storage/v1/object/public/kp/${objectPath("film", String(id))}`);
   }
   assert.ok(OBJECT_HOSTS.every((host) => api.kpObjectUrl("film", "1").includes(".supabase.co/")));
 });
 
-test("only film, staff and similars go through the shared cache", async () => {
+test("only film, staff, similars and query searches go through the shared cache", async () => {
   const api = await loadForYou(async () => json({}, 404));
   assert.deepEqual({ ...api.sharedTarget("/api/v2.2/films/301") }, { kind: "film", id: "301" });
   assert.deepEqual({ ...api.sharedTarget("/api/v2.2/films/301/similars") }, { kind: "similars", id: "301" });
   assert.deepEqual({ ...api.sharedTarget("/api/v1/staff?filmId=301") }, { kind: "staff", id: "301" });
-  assert.equal(api.sharedTarget("/api/v2.1/films/search-by-keyword?keyword=x"), null);
+  assert.deepEqual({ ...api.sharedTarget("/api/v2.1/films/search-by-keyword?keyword=x") }, { kind: "search", q: "x" });
 });
 
 test("a published film costs no function call and no key", async () => {
@@ -266,7 +277,7 @@ test("a published film costs no function call and no key", async () => {
   const data = await api.apiGet("/api/v2.2/films/301");
   assert.equal(data.kinopoiskId, 301);
   assert.equal(calls.length, 1);
-  assert.match(calls[0], /\/storage\/v1\/object\/public\/kp\/v1\/film\/301\.json$/);
+  assert.match(calls[0], /\/storage\/v1\/object\/public\/kp\/v2\/film\/301\/\d+\.json$/);
 });
 
 test("a missing film is filled by the function, not by this browser's keys", async () => {
@@ -274,26 +285,20 @@ test("a missing film is filled by the function, not by this browser's keys", asy
   const api = await loadForYou(async (url) => {
     calls.push(String(url));
     if (String(url).includes("/storage/")) return json({}, 400);
-    if (String(url).includes("/functions/v1/kp")) return json(wrapped("staff", "301", [{ staffId: 1, professionKey: "ACTOR" }]));
+    if (String(url).includes("resolver.test/kp")) return json(wrapped("staff", "301", [{ staffId: 1, professionKey: "ACTOR" }]));
     throw new Error(`unexpected ${url}`);
   });
   const data = await api.apiGet("/api/v1/staff?filmId=301");
   assert.equal(data[0].staffId, 1);
-  assert.ok(calls.some((url) => url.includes("functions/v1/kp?kind=staff&id=301")));
+  assert.ok(calls.some((url) => url.includes("resolver.test/kp?kind=staff&id=301")));
   assert.ok(!calls.some((url) => url.includes("kinopoiskapiunofficial.tech")));
 });
 
-test("when the shared cache cannot answer, the browser carries on exactly as before", async () => {
+test("a total cache outage never fans out to browser keys", async () => {
   const calls = [];
-  const api = await loadForYou(async (url) => {
-    calls.push(String(url));
-    if (String(url) === "/api/client-key-pool") return json({ ok: true, pool: { keys: [{ id: "k", value: "k" }] } });
-    if (String(url).includes(".supabase.co/")) return json({ error: "busy" }, 503);
-    return json(film(55));
-  });
-  const data = await api.apiGet("/api/v2.2/films/55");
-  assert.equal(data.kinopoiskId, 55);
-  assert.ok(calls.some((url) => url.startsWith("https://kinopoiskapiunofficial.tech/api/v2.2/films/55")));
+  const api = await loadForYou(async (url) => { calls.push(String(url)); return json({}, 503); });
+  await assert.rejects(api.apiGet("/api/v2.2/films/55"), { code: "shared_unavailable" });
+  assert.ok(calls.every((url) => url.includes("supabase.co/") || url.includes("resolver.test/kp")));
 });
 
 test("a stale copy is used rather than spending this browser's keys when the function is down", async () => {

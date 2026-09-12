@@ -8,7 +8,8 @@
 //  - sets the function's secrets on the state project: the other hosts'
 //    service keys (so it can publish there) and, when given, the Unofficial
 //    keys it spends;
-//  - deploys the function without JWT verification (browsers call it bare).
+//  - deploys without platform JWT verification; the function checks its own
+//    private resolver/prewarm token. Browsers cannot spend quota directly.
 //
 // Every token and key comes from the environment and is sent only to Supabase.
 // Nothing is written to disk.
@@ -18,6 +19,7 @@ import { OBJECT_HOSTS, BUCKET } from "../supabase/functions/kp/index.ts";
 
 const tokens = JSON.parse(process.env.KP_TOKENS || "{}");
 const stateRef = OBJECT_HOSTS[0];
+if (!process.env.KP_BROKER_TOKEN || process.env.KP_BROKER_TOKEN.length < 32) throw new Error("KP_BROKER_TOKEN must be configured before deployment");
 for (const ref of OBJECT_HOSTS) {
   if (!/^sbp_[A-Za-z0-9]+$/.test(String(tokens[ref] || ""))) throw new Error(`no management token for ${ref}`);
 }
@@ -45,7 +47,9 @@ await management(stateRef, "/database/query", { method: "POST", body: JSON.strin
 console.log(`schema ready on ${stateRef}`);
 
 const hostKeys = {};
+const maintenance = await readFile(new URL("../supabase/kp-maintenance.sql", import.meta.url), "utf8");
 for (const ref of OBJECT_HOSTS) {
+  await management(ref, "/database/query", { method: "POST", body: JSON.stringify({ query: maintenance }) });
   const key = await serviceKey(ref);
   if (ref !== stateRef) hostKeys[ref] = key;
   const bucket = {
@@ -65,7 +69,9 @@ for (const ref of OBJECT_HOSTS) {
   console.log(`public bucket ${BUCKET} ready on ${ref}`);
 }
 
-const secrets = [{ name: "KP_HOST_KEYS", value: JSON.stringify(hostKeys) }];
+const secrets = [{ name: "KP_HOST_KEYS", value: JSON.stringify(hostKeys) },
+  { name: "KP_BROKER_TOKEN", value: process.env.KP_BROKER_TOKEN }];
+if (process.env.ALPHY_KEY_POOL_TOKEN) secrets.push({ name: "ALPHY_KEY_POOL_TOKEN", value: process.env.ALPHY_KEY_POOL_TOKEN });
 const kuKeys = String(process.env.KU_KEYS || "").split(",").map((value) => value.trim()).filter(Boolean);
 if (kuKeys.length) secrets.push({ name: "KU_KEYS", value: kuKeys.join(",") });
 await management(stateRef, "/secrets", { method: "POST", body: JSON.stringify(secrets) });

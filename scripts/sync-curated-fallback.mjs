@@ -1,8 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 
 const blobUrl =
-  process.env.ALPHY_CATALOG_BLOB_URL ||
-  "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/curated.json";
+  process.env.ALPHY_CATALOG_SNAPSHOT_URL ||
+  "https://alphy.tv/api/catalog-snapshot";
 
 const response = await fetch(`${blobUrl}?snapshot=${Date.now()}`, {
   cache: "no-store",

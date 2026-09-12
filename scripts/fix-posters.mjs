@@ -12,12 +12,12 @@
 //   node scripts/fix-posters.mjs --fix-years [--apply] # correct wrong stored years by exact title
 //   node scripts/fix-posters.mjs --restore <backup>    # roll back to a saved backup
 //
-// Writes use BLOB_READ_WRITE_TOKEN (loaded from .env.local), same as the server.
+// Writes use ALPHY_STATE_SERVICE_KEY (loaded from .env.local), same as the server.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { writeCatalog } from "../api/_catalog-store.js";
 
-// Load .env.local so BLOB_READ_WRITE_TOKEN is available to writeCatalog.
+// Load .env.local so ALPHY_STATE_SERVICE_KEY is available to writeCatalog.
 (function loadEnv() {
   try {
     for (const line of readFileSync(new URL("../.env.local", import.meta.url), "utf8").split("\n")) {
@@ -28,8 +28,8 @@ import { writeCatalog } from "../api/_catalog-store.js";
 })();
 
 const RESOLVER_BASE = process.env.RESOLVER_BASE || "https://alphytv.alphy.deno.net";
-const BLOB_URL = process.env.BLOB_URL ||
-  "https://nvpuetq65dds3gtx.public.blob.vercel-storage.com/catalog/curated.json";
+const CATALOG_SNAPSHOT_URL = process.env.CATALOG_SNAPSHOT_URL ||
+  "https://alphy.tv/api/catalog-snapshot";
 const OUT = new URL("./fixed-catalog.json", import.meta.url);
 const BACKUP_DIR = new URL("../docs/catalog-backups/", import.meta.url);
 
@@ -38,7 +38,7 @@ const host = (u) => { try { return new URL(u).hostname.toLowerCase(); } catch { 
 const isYandex = (u) => /(^|\.)yandex\.net$/.test(host(u));
 const needsFix = (u) => !u || !isYandex(u);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const fetchLive = async () => (await fetch(`${BLOB_URL}?t=${Date.now()}`, { cache: "no-store" })).json();
+const fetchLive = async () => (await fetch(`${CATALOG_SNAPSHOT_URL}?t=${Date.now()}`, { cache: "no-store" })).json();
 
 // Resolve a Kinopoisk id to its final, RU-reachable Yandex poster URL by following
 // st.kp's redirect to avatars.mds.yandex.net (the same host the working posters

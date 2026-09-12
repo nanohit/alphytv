@@ -1,14 +1,7 @@
 import crypto from "node:crypto";
 
-import { CATALOG_BLOB_URL } from "./_catalog-store.js";
+import { readDocument, writeDocument } from "./_document-store.js";
 
-export const KEY_POOL_PATH = "admin/key-pool.enc.json";
-export const KEY_POOL_BLOB_URL =
-  process.env.ALPHY_KEY_POOL_BLOB_URL ||
-  new URL(`/${KEY_POOL_PATH}`, CATALOG_BLOB_URL).href;
-
-const BLOB_API_URL = "https://vercel.com/api/blob/";
-const BLOB_API_VERSION = "12";
 const MAX_KEYS = 80;
 const MAX_BODY_BYTES = 128 * 1024;
 const PROVIDERS = new Set(["poiskkino", "unofficial"]);
@@ -19,10 +12,12 @@ function text(value, max = 500) {
 
 function masterSecret() {
   const secret = text(
-    process.env.ALPHY_KEY_POOL_MASTER_KEY || process.env.BLOB_READ_WRITE_TOKEN,
+    process.env.ALPHY_KEY_POOL_MASTER_KEY,
     20_000,
   );
   if (!secret) throw new Error("key_pool_master_key_not_configured");
+  if (["[sensitive]", "[redacted]", "<sensitive>", "<redacted>"].includes(secret.toLowerCase()))
+    throw new Error("key_pool_master_key_is_masked");
   return secret;
 }
 
@@ -46,9 +41,8 @@ function normalizeScopes(provider, value) {
   return {
     resolver: value?.resolver === true,
     recommendations: provider === "unofficial" && value?.recommendations === true,
-    // Unofficial keys are intentionally distributable: they are free, CORS is
-    // public, and direct requests preserve the viewer's egress IP. Existing
-    // entries default on during this migration; PoiskKino can never opt in.
+    // Compatibility field: the former browser scope now enables the private
+    // shared metadata broker. Existing entries keep their configured scopes.
     browser: provider === "unofficial" && value?.browser !== false,
   };
 }
@@ -126,7 +120,7 @@ function encryptPool(pool) {
   });
 }
 
-function decryptPool(envelope) {
+export function decryptPool(envelope) {
   if (envelope?.schema !== 1 || envelope?.alg !== "A256GCM") {
     throw new Error("key_pool_envelope_invalid");
   }
@@ -145,48 +139,17 @@ function decryptPool(envelope) {
 }
 
 export async function readKeyPool() {
-  const url = new URL(KEY_POOL_BLOB_URL);
-  url.searchParams.set("admin_read", Date.now().toString(36));
-  const response = await fetch(url, { cache: "no-store" });
-  if (response.status === 404) return { pool: emptyKeyPool(), exists: false };
-  if (!response.ok) throw new Error(`key_pool_blob_read_failed:${response.status}`);
-  const pool = normalizeKeyPool(decryptPool(await response.json()));
-  return { pool, exists: true };
+  const document = await readDocument("key_pool");
+  if (!document?.payload) throw new Error("key_pool_not_migrated");
+  return { pool: normalizeKeyPool(decryptPool(document.payload)), exists: true };
 }
 
-async function putEncryptedPool(body) {
-  const token = text(process.env.BLOB_READ_WRITE_TOKEN, 20_000);
-  if (!token) throw new Error("BLOB_READ_WRITE_TOKEN is not configured");
-  const storeId = new URL(KEY_POOL_BLOB_URL).hostname.split(".")[0];
-  if (!storeId) throw new Error("key_pool_store_id_missing");
-
-  const requestUrl = new URL(BLOB_API_URL);
-  requestUrl.searchParams.set("pathname", KEY_POOL_PATH);
-  let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await fetch(requestUrl, {
-      method: "PUT",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "x-api-version": BLOB_API_VERSION,
-        "x-api-blob-request-id": `${storeId}:${Date.now()}:${crypto.randomUUID()}`,
-        "x-api-blob-request-attempt": String(attempt),
-        "x-vercel-blob-store-id": storeId,
-        "x-vercel-blob-access": "public",
-        "x-add-random-suffix": "0",
-        "x-allow-overwrite": "1",
-        "x-cache-control-max-age": "60",
-        "x-content-type": "application/json; charset=utf-8",
-      },
-      body,
-    });
-    const responseText = await response.text();
-    if (response.ok) return JSON.parse(responseText);
-    lastError = new Error(`key_pool_blob_write_failed:${response.status}:${responseText.slice(0, 160)}`);
-    if (response.status !== 429 && response.status < 500) break;
-    await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+async function putEncryptedPool(body, expectedRevision, revision) {
+  try { return await writeDocument("key_pool", JSON.parse(body), expectedRevision, revision); }
+  catch (error) {
+    if (error.code === "key_pool_revision_conflict") error.current = normalizeKeyPool(decryptPool(error.document));
+    throw error;
   }
-  throw lastError || new Error("key_pool_blob_write_failed");
 }
 
 export async function writeKeyPool(rawPool, expectedRevision = null) {
@@ -208,16 +171,16 @@ export async function writeKeyPool(rawPool, expectedRevision = null) {
     error.code = "key_pool_too_large";
     throw error;
   }
-  const blob = await putEncryptedPool(body);
-  return { pool, blobUrl: blob.url || KEY_POOL_BLOB_URL };
+  await putEncryptedPool(body, current.pool.revision, pool.revision);
+  return { pool };
 }
 
 // Operational master-key rotation: caller must already hold a decrypted pool.
 // Rewrites only the ciphertext envelope and deliberately keeps its revision.
 export async function rewriteKeyPoolCiphertext(rawPool) {
   const pool = normalizeKeyPool(rawPool);
-  const blob = await putEncryptedPool(encryptPool(pool));
-  return { pool, blobUrl: blob.url || KEY_POOL_BLOB_URL };
+  await putEncryptedPool(encryptPool(pool), pool.revision, pool.revision);
+  return { pool };
 }
 
 export async function ensureKeyPool() {
@@ -238,7 +201,7 @@ export function runtimePool(pool) {
     revision: pool.revision,
     updatedAt: pool.updatedAt,
     keys: pool.keys
-      .filter((entry) => entry.enabled && (entry.scopes.resolver || entry.scopes.recommendations))
+      .filter((entry) => entry.enabled && (entry.scopes.resolver || entry.scopes.recommendations || entry.scopes.browser))
       .map((entry) => ({
         id: entry.id,
         provider: entry.provider,
@@ -257,14 +220,7 @@ export function clientPool(pool) {
     schema: 1,
     revision: Number(pool?.revision) || 0,
     updatedAt: pool?.updatedAt || null,
-    keys: (Array.isArray(pool?.keys) ? pool.keys : [])
-      .filter((entry) => (
-        entry.enabled && entry.provider === "unofficial" && entry.scopes?.browser === true
-      ))
-      .map((entry) => ({
-        id: entry.id,
-        value: entry.value,
-      })),
+    keys: [],
   };
 }
 

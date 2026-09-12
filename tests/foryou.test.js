@@ -21,6 +21,9 @@ async function loadForYou(storage = new Map(), fetchImpl = null) {
     Math,
     Promise,
     URL,
+    URLSearchParams,
+    crypto: globalThis.crypto,
+    TextEncoder,
     setTimeout,
     clearTimeout,
     localStorage,
@@ -44,45 +47,30 @@ async function loadForYou(storage = new Map(), fetchImpl = null) {
   return { api: sandbox.window.alphyForYou, storage, sandbox };
 }
 
-test("browser Unofficial pool rotates quota keys and bypasses Deno", async () => {
-  const storage = new Map([["alphy.foryou.clientSlot.v1", "0"]]);
-  const providerCalls = [];
-  const fetchImpl = async (url, options = {}) => {
-    if (String(url) === "/api/client-key-pool") {
-      return new Response(JSON.stringify({
-        ok: true,
-        pool: {
-          keys: [
-            { id: "spent", value: "spent-key" },
-            { id: "ready", value: "ready-key" },
-          ],
-        },
-      }), { status: 200, headers: { "content-type": "application/json" } });
-    }
-    // The shared cache is empty in this test: every film falls through to the keys.
-    if (String(url).includes(".supabase.co/")) return new Response("{}", { status: 404 });
-    providerCalls.push({ url: String(url), key: options.headers?.["X-API-KEY"], referrerPolicy: options.referrerPolicy });
-    if (options.headers?.["X-API-KEY"] === "spent-key") {
-      return new Response(JSON.stringify({ message: "quota" }), {
-        status: 429,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    return new Response(JSON.stringify({ total: 1, items: [{ filmId: 309, nameRu: "Эквилибриум" }] }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  };
-  const { api, sandbox } = await loadForYou(storage, fetchImpl);
-  let resolverCalls = 0;
-  sandbox.window.alphyBridge.resolverJson = async () => { resolverCalls += 1; throw new Error("must stay direct"); };
+test("shared failure never downloads or spends browser keys", async () => {
+  const calls = [];
+  const { api } = await loadForYou(new Map(), async (url) => { calls.push(String(url)); return new Response("{}", { status: 503 }); });
+  await assert.rejects(api._test.directUnofficialGet("/api/v2.2/films/301"), { code: "shared_unavailable" });
+  assert.ok(calls.every((url) => url.includes("supabase.co/storage/")));
+});
 
-  const result = await api._test.directUnofficialGet("/api/v2.2/films/301/similars");
-  assert.equal(result.items[0].filmId, 309);
-  assert.deepEqual(providerCalls.map((call) => call.key), ["spent-key", "ready-key"]);
-  assert.ok(providerCalls.every((call) => call.url.startsWith("https://kinopoiskapiunofficial.tech/api/")));
-  assert.ok(providerCalls.every((call) => call.referrerPolicy === "no-referrer"));
-  assert.equal(resolverCalls, 0);
+test("keyword results share the broker hash and bypass Deno on a Storage hit", async () => {
+  const { objectPath, objectSlot, hostFor } = await import("../supabase/functions/kp/index.ts");
+  const query = "матрица фильм";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(query));
+  const id = parseInt(Buffer.from(digest).subarray(0, 6).toString("hex"), 16) + 1;
+  const expected = `https://${hostFor(id)}.supabase.co/storage/v1/object/public/kp/${objectPath("search", id, objectSlot("search", id))}`;
+  const calls = [];
+  const { api, sandbox } = await loadForYou(new Map(), async (url) => {
+    calls.push(String(url));
+    assert.equal(String(url), expected);
+    return new Response(JSON.stringify({ v: 1, kind: "search", id, query, status: "ok",
+      freshUntil: new Date(Date.now() + 60000).toISOString(), data: { films: [{ filmId: 301 }] } }));
+  });
+  sandbox.window.alphyBridge.resolverJson = async () => { assert.fail("a query cache hit must not invoke Deno"); };
+  const data = await api._test.directUnofficialGet(`/api/v2.1/films/search-by-keyword?keyword=${encodeURIComponent("  МАТРИЦА   фильм  ")}&page=1`);
+  assert.equal(data.films[0].filmId, 301);
+  assert.equal(calls.length, 1);
 });
 
 function historyEntry(overrides = {}) {
@@ -346,7 +334,7 @@ test("affinityIndex reads only cached similars and ignores the current title's o
   assert.equal(excluded.affinity.size, 0, "the title being watched does not vote for its own similars");
 });
 
-test("similar metadata enriches the whole row in one request and then stays local", async () => {
+test("similar metadata shares film objects with watch pages and then stays local", async () => {
   const now = Date.now();
   const storage = new Map();
   storage.set("alphy.foryou.sim.900", JSON.stringify({
@@ -357,29 +345,25 @@ test("similar metadata enriches the whole row in one request and then stays loca
   const calls = [];
   sandbox.window.alphyBridge.resolverJson = async (path) => {
     calls.push(path);
-    return {
-      movies: ["10", "20", "30", "40"].map((id, index) => ({
-        kpId: id,
-        year: 2000 + index,
-        isSeries: false,
-        movieLength: 100 + index,
-        rating: { kp: 7 + index / 10, imdb: 6 + index / 10 },
-        poster: `https://resolved/${id}.jpg`,
-      })),
-    };
+    const id = new URL(path, "https://x").searchParams.get("id");
+    const index = ["10", "20", "30", "40"].indexOf(id);
+    return { v: 1, kind: "film", id: Number(id), status: "ok", data: {
+      kinopoiskId: Number(id), year: 2000 + index, isSeries: false, movieLength: 100 + index,
+      rating: { kp: 7 + index / 10, imdb: 6 + index / 10 }, poster: `https://resolved/${id}.jpg`,
+    }};
   };
   api.setMode("on");
 
   const initial = await api.similarRow("900");
   assert.equal(initial[0].year, "", "similars paint before enrichment");
   const enriched = await api.enrichSimilarRow("900");
-  assert.equal(calls.length, 1);
-  assert.match(calls[0], /^\/recommendations\/meta\?ids=/);
+  assert.equal(calls.length, 4);
+  assert.ok(calls.every((path) => path.startsWith("/kp?kind=film&id=")));
   assert.equal(enriched[0].year, "2000");
   assert.ok(enriched[0].rating.kp > 0);
 
   await api.enrichSimilarRow("900");
-  assert.equal(calls.length, 1, "the second render is cache-only");
+  assert.equal(calls.length, 4, "the second render is cache-only");
 });
 
 test("personNames pulls directors and cast out of the staff payload in order", async () => {
@@ -411,18 +395,18 @@ test("film extras use resolver routes and preserve Kinopoisk person ids", async 
   const seen = [];
   sandbox.window.alphyBridge.resolverJson = async (path) => {
     seen.push(path);
-    if (path === "/recommendations/film?id=326") {
-      return {
+    if (path === "/kp?kind=film&id=326") {
+      return { v: 1, kind: "film", id: 326, status: "ok", data: {
         genres: [{ genre: "\u0434\u0440\u0430\u043c\u0430" }],
         countries: [{ country: "\u0421\u0428\u0410" }],
         ratingAgeLimits: "age16",
-      };
+      }};
     }
-    if (path === "/recommendations/staff?id=326") {
-      return [
+    if (path === "/kp?kind=staff&id=326") {
+      return { v: 1, kind: "staff", id: 326, status: "ok", data: [
         { staffId: 42, nameRu: "\u0420\u0435\u0436\u0438\u0441\u0441\u0451\u0440", professionKey: "DIRECTOR" },
         { staffId: 77, nameRu: "\u0410\u043a\u0442\u0451\u0440", professionKey: "ACTOR" },
-      ];
+      ]};
     }
     throw new Error(`unexpected path ${path}`);
   };
@@ -436,8 +420,8 @@ test("film extras use resolver routes and preserve Kinopoisk person ids", async 
     { id: "42", name: "\u0420\u0435\u0436\u0438\u0441\u0441\u0451\u0440" },
   ]);
   assert.deepEqual(new Set(seen), new Set([
-    "/recommendations/film?id=326",
-    "/recommendations/staff?id=326",
+    "/kp?kind=film&id=326",
+    "/kp?kind=staff&id=326",
   ]));
 });
 
@@ -455,78 +439,11 @@ test("resolver failure fails extras softly without breaking the watch page", asy
   assert.equal(calls, 2, "film and staff fail independently but softly");
 });
 
-// --- the browser key pool is kept for a day ----------------------------------
-// It was fetched from Vercel on every page load; the keys only change when an
-// admin rotates them.
-
-const jsonResponse = (body, status = 200) => new Response(JSON.stringify(body), {
-  status,
-  headers: { "content-type": "application/json" },
-});
-
-function poolServer({ poolKeys, answer }) {
+test("new visitors never fetch the Vercel key pool for metadata", async () => {
   const calls = [];
-  const fetchImpl = async (url, options = {}) => {
-    if (String(url) === "/api/client-key-pool") {
-      calls.push("pool");
-      return jsonResponse({ ok: true, pool: { keys: poolKeys.map((value) => ({ id: value, value })) } });
-    }
-    if (String(url).includes(".supabase.co/")) return new Response("{}", { status: 404 });
-    const key = options.headers?.["X-API-KEY"];
-    calls.push(key);
-    return answer(key);
-  };
-  return { calls, fetchImpl };
-}
-
-test("the key pool survives a page load, so the next visit does not ask Vercel for it", async () => {
-  const storage = new Map([["alphy.foryou.clientSlot.v1", "0"]]);
-  const film = () => jsonResponse({ kinopoiskId: 301 });
-  const first = poolServer({ poolKeys: ["k1"], answer: film });
-  const { api } = await loadForYou(storage, first.fetchImpl);
-  await api._test.directUnofficialGet("/api/v2.2/films/301");
-  assert.deepEqual(first.calls, ["pool", "k1"]);
-
-  const second = poolServer({ poolKeys: ["k1"], answer: film });
-  const next = await loadForYou(storage, second.fetchImpl);
-  await next.api._test.directUnofficialGet("/api/v2.2/films/301");
-  assert.deepEqual(second.calls, ["k1"], "a stored pool is used without a request");
-});
-
-test("a pool older than a day is fetched again", async () => {
-  const storage = new Map([
-    ["alphy.foryou.clientSlot.v1", "0"],
-    ["alphy.foryou.clientPool.v1", JSON.stringify({ savedAt: Date.now() - 25 * 3600e3, keys: [{ id: "old", value: "old" }] })],
-  ]);
-  const server = poolServer({ poolKeys: ["k1"], answer: () => jsonResponse({ kinopoiskId: 301 }) });
-  const { api } = await loadForYou(storage, server.fetchImpl);
-  await api._test.directUnofficialGet("/api/v2.2/films/301");
-  assert.deepEqual(server.calls, ["pool", "k1"]);
-});
-
-test("keys refused outright make the browser fetch a fresh pool once", async () => {
-  const storage = new Map([
-    ["alphy.foryou.clientSlot.v1", "0"],
-    ["alphy.foryou.clientPool.v1", JSON.stringify({ savedAt: Date.now(), keys: [{ id: "old", value: "old" }] })],
-  ]);
-  const server = poolServer({
-    poolKeys: ["new"],
-    answer: (key) => (key === "old" ? jsonResponse({ message: "invalid key" }, 401) : jsonResponse({ kinopoiskId: 301 })),
-  });
-  const { api } = await loadForYou(storage, server.fetchImpl);
-  const result = await api._test.directUnofficialGet("/api/v2.2/films/301");
-  assert.equal(result.kinopoiskId, 301);
-  assert.deepEqual(server.calls, ["old", "pool", "new"]);
-  assert.match(storage.get("alphy.foryou.clientPool.v1"), /"new"/);
-});
-
-test("spent quota is not a reason to fetch the pool again", async () => {
-  const storage = new Map([
-    ["alphy.foryou.clientSlot.v1", "0"],
-    ["alphy.foryou.clientPool.v1", JSON.stringify({ savedAt: Date.now(), keys: [{ id: "k1", value: "k1" }] })],
-  ]);
-  const server = poolServer({ poolKeys: ["k2"], answer: () => jsonResponse({ message: "quota" }, 402) });
-  const { api } = await loadForYou(storage, server.fetchImpl);
-  await assert.rejects(api._test.directUnofficialGet("/api/v2.2/films/301"));
-  assert.deepEqual(server.calls, ["k1"]);
+  const { api, sandbox } = await loadForYou(new Map(), async (url) => { calls.push(String(url)); return new Response("{}", { status: 404 }); });
+  sandbox.window.alphyBridge.resolverJson = async (path) => ({ v: 1, kind: "film", id: 301, status: "ok", freshUntil: new Date(Date.now()+3600000).toISOString(), data: { kinopoiskId: 301 } });
+  const film = await api._test.directUnofficialGet("/api/v2.2/films/301");
+  assert.equal(film.kinopoiskId, 301);
+  assert.ok(calls.every((url) => !url.includes("client-key-pool") && !url.includes("kinopoiskapiunofficial")));
 });

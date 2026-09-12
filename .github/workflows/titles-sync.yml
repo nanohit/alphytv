@@ -1,8 +1,8 @@
 name: Sync the title index with the source
 
 # Hourly: the newest pages of the source's listing, then the titles still
-# missing their player or Kinopoisk id, newest first. Once a day, at 03:05 UTC,
-# the whole listing, for older titles added further down. The search publisher
+# missing their player or Kinopoisk id, newest first. Every four hours,
+# the whole listing, for older additions and episode markers. The search publisher
 # (search-cdn.yml, at :41) ships whatever this wrote within the same hour.
 # See scripts/sync-titles.mjs; it paces itself at one request every two seconds.
 
@@ -47,5 +47,4 @@ jobs:
         run: |
           full=""
           if [ "$FULL_INPUT" = "true" ]; then full="--full"; fi
-          if [ "$EVENT" = "schedule" ] && [ "$(date -u +%H)" = "03" ]; then full="--full"; fi
-          node scripts/sync-titles.mjs $full --fill 300 --budget-min 45
+          node scripts/sync-titles.mjs --auto $full --fill 300 --budget-min 45

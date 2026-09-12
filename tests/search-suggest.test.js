@@ -360,7 +360,7 @@ test("a warm shard answers on the keystroke, with no timer and no empty frame", 
   const block = between(app, "function onSuggestInput", "function onSearchSubmit()");
   // The shard for a letter is in memory from the second keystroke onward, so
   // there is nothing to wait for and nothing to clear in the meantime.
-  assert.match(block, /const warm = shardInMemory\(/);
+  assert.match(block, /const warm = prefixRows.get\(prefix\) \|\| shardInMemory\(/);
   const warmPath = block.slice(block.indexOf("const warm ="), block.indexOf("// Cold shard"));
   assert.match(warmPath, /renderSuggest\(local, suggestRemote\)/);
   assert.doesNotMatch(warmPath, /setTimeout/);

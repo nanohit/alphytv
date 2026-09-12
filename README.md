@@ -9,8 +9,7 @@ Lightweight static MVP for the current playback flow:
 5. Use the static SOAP movie catalog (`/m/:id`) for direct HLS movie playback
    when a fresh `soap-movies.json` is shipped.
 6. Play Opravar and Zenith streams in Shaka; play SOAP movies in hls.js.
-7. Serve admin-curated homepage lists as one public JSON snapshot from Vercel
-   Blob CDN.
+7. Serve admin-curated homepage lists as one public JSON snapshot from jsDelivr.
 
 Vercel serves a small bootstrap document and the existing API functions. The
 versioned frontend payload is read from jsDelivr; video bytes still go directly
@@ -24,8 +23,8 @@ from each provider to the viewer.
   `cdn.jsdelivr.net/gh/nanohit/alphytv@<sha>/...` release path. Same-origin
   copies remain in the Vercel output only as a failure fallback.
 - `api/admin/*` - admin-only authentication and catalog writes.
-- `curated-config.json` - public Blob URL; visitors read the snapshot directly
-  from Blob CDN and do not invoke a Function or Deno.
+- `catalog-cache.js` - visitors read the baked homepage snapshot from jsDelivr.
+  Private Supabase documents store the editable source and encrypted key pool.
 - `soap-movies.json` - static SOAP movie catalog. Its HLS master URLs expire;
   run `npm run check:soap` before relying on the shipped catalog.
 - `worker/` - resolver source for PoiskKino, `kpId -> Zenith`, and Opravar
@@ -145,14 +144,16 @@ rotation, API usage, and the cross-egress validation procedure.
 
 ## Curated Lists
 
-The production project uses a public Vercel Blob store named `alphy-curated`.
-Only the admin endpoints use Functions; public homepage traffic fetches the
-stable `catalog/curated.json` Blob URL directly.
+Administrative documents use the private Supabase `alphy_documents` table.
+Public homepage traffic reads the baked `catalog-cdn` snapshot on jsDelivr.
+See `docs/SCALING_IMPLEMENTATION_2026-09-12.md` for migration and rollout.
 
 Required Vercel environment variables:
 
 ```text
-BLOB_READ_WRITE_TOKEN
+ALPHY_STATE_URL
+ALPHY_STATE_SERVICE_KEY
+ALPHY_KEY_POOL_MASTER_KEY
 ALPHY_ADMIN_USER
 ALPHY_ADMIN_PASSWORD
 ```

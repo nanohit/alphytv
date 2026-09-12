@@ -70,7 +70,7 @@ test("key pool preserves ids and creation time across admin updates", () => {
   assert.equal(next.keys[0].label, "New");
 });
 
-test("client pool publishes only enabled browser Unofficial keys", () => {
+test("legacy client pool is empty and enabled keys move to the private runtime", () => {
   const pool = normalizeKeyPool({
     runtimeToken: "c".repeat(43),
     keys: [
@@ -97,10 +97,9 @@ test("client pool publishes only enabled browser Unofficial keys", () => {
     ],
   });
 
-  assert.deepEqual(clientPool(pool).keys, [{
-    id: "browser-free",
-    value: "free-secret",
-  }]);
+  assert.deepEqual(clientPool(pool).keys, []);
   assert.equal(JSON.stringify(clientPool(pool)).includes("paid-secret"), false);
-  assert.equal(runtimePool(pool).keys.some((key) => key.id === "browser-free"), false);
+  // Previously browser-scoped keys are now spent only by the private broker.
+  assert.equal(runtimePool(pool).keys.some((key) => key.id === "browser-free"), true);
+  assert.equal(runtimePool(pool).keys.some((key) => key.id === "disabled-free"), false);
 });

@@ -20,7 +20,7 @@
 // The objects keep the provider's own shape (staff trimmed to the two
 // professions the site reads), so the browser's normalisers are unchanged.
 
-export const KINDS = ["film", "staff", "similars"];
+export const KINDS = ["film", "staff", "similars", "search"];
 
 // Objects are spread over three projects in three organisations: each has its
 // own free egress. 256 stable placement groups sit between a film and a
@@ -30,7 +30,9 @@ export const OBJECT_HOSTS = [
   "hcuhanruaclhiltpdegc",
   "matozzgmaranfemgxpzy",
 ];
-export const GROUP_HOSTS: number[] = Array.from({ length: 256 }, (_, group) => group % OBJECT_HOSTS.length);
+// This map is deliberately independent of ring length. Appending a host must
+// not relocate existing objects; migrate explicitly chosen groups instead.
+export const GROUP_HOSTS: number[] = Array.from({ length: 256 }, (_, group) => group % 3);
 export const BUCKET = "kp";
 
 export function placementGroup(id: string): number {
@@ -40,21 +42,28 @@ export function placementGroup(id: string): number {
 }
 
 export const hostFor = (id: string): string => OBJECT_HOSTS[GROUP_HOSTS[placementGroup(id)]];
-export const objectPath = (kind: string, id: string): string => `v1/${kind}/${id}.json`;
+export const replicaFor = (id: string): string => OBJECT_HOSTS[(GROUP_HOSTS[placementGroup(id)] + 1) % 3];
 
 const DAY_MS = 24 * 3600e3;
 // Not worse than the browser caches they replace: metadata a week, the lists a
-// month. A film the provider does not know is re-asked after a week.
-export const FRESH_MS: Record<string, number> = { film: 7 * DAY_MS, staff: 30 * DAY_MS, similars: 30 * DAY_MS };
-const MISSING_MS = 7 * DAY_MS;
+// month. A missing provider identity is retried after six hours.
+export const FRESH_MS: Record<string, number> = { film: 7 * DAY_MS, staff: 30 * DAY_MS, similars: 30 * DAY_MS, search: 6 * 3600e3 };
+// Immutable time slots, staggered by title: a delayed writer cannot overwrite
+// the next refresh, and the entire catalogue never expires at midnight.
+export function objectSlot(kind: string, id: string, now = Date.now()): number {
+  return Math.floor(now / FRESH_MS[kind] + placementGroup(id) / 256);
+}
+export const slotEnd = (kind: string, id: string, slot: number): number =>
+  (slot + 1 - placementGroup(id) / 256) * FRESH_MS[kind];
+export const objectPath = (kind: string, id: string, slot = objectSlot(kind, id)): string => `v2/${kind}/${id}/${slot}.json`;
+const MISSING_MS = 6 * 3600e3;
 const RETRY_MS = 60_000;
 const NO_BUDGET_RETRY_MS = 10 * 60_000;
-const LEASE_SECONDS = 30;
+// Covers the bounded key-pool, two upstream attempts and replica writes.
+const LEASE_SECONDS = 60;
 // Below the provider's 500 so racing reservations cannot tip a key over.
 export const DAILY_LIMIT = 480;
 const KEY_ATTEMPTS = 2;
-const WAIT_MS = 6000;
-const POLL_MS = 400;
 const ACTORS_KEPT = 40;
 
 export function upstreamPath(kind: string, id: string): string {
@@ -115,34 +124,40 @@ type Deps = {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   owner?: string;
+  token?: string;
 };
 
 export function createKpHandler(deps: Deps) {
   const now = deps.now || (() => Date.now());
-  const sleep = deps.sleep || ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   const owner = deps.owner || crypto.randomUUID();
   const isFresh = (until: string | null) => !!until && Date.parse(until) > now();
 
   async function serveStored(kind: string, id: string, host: string | null) {
     try {
-      const stored = await deps.getObject(host || hostFor(id), objectPath(kind, id));
-      if (stored?.v === 1) return reply(stored, 200, "public, max-age=300");
+      const stored = await deps.getObject(host || hostFor(id), objectPath(kind, id, objectSlot(kind, id, now())));
+      if (stored?.v === 1 && stored.kind === kind && String(stored.id) === id && isFresh(stored.freshUntil)) return reply(stored, 200, "public, max-age=300");
     } catch { /* fall through to the caller's error */ }
     return null;
   }
 
   async function finish(kind: string, id: string, version: number, fields: Record<string, unknown>) {
     try {
-      await deps.rpc("kp_complete", {
+      return await deps.rpc("kp_complete_v2", {
         p_kind: kind, p_id: Number(id), p_owner: owner, p_version: version,
         p_status: null, p_host: null, p_fresh_until: null, p_retry_at: null, p_bytes: null,
         ...fields,
       });
-    } catch { /* the lease simply expires */ }
+    } catch { return false; }
   }
 
-  async function fill(kind: string, id: string, version: number) {
-    const keys = await deps.keys();
+  async function fill(kind: string, id: string, version: number, query = "") {
+    const slot = objectSlot(kind, id, now());
+    let keys;
+    try { keys = await deps.keys(); }
+    catch {
+      await finish(kind, id, version, { p_retry_at: new Date(now() + RETRY_MS).toISOString() });
+      return reply({ error: "key_pool_unavailable" }, 503);
+    }
     if (!keys.length) {
       await finish(kind, id, version, { p_retry_at: new Date(now() + NO_BUDGET_RETRY_MS).toISOString() });
       return reply({ error: "no_keys" }, 503);
@@ -159,7 +174,7 @@ export function createKpHandler(deps: Deps) {
       }
       let answer;
       try {
-        answer = await deps.upstream(upstreamPath(kind, id), key.value);
+        answer = await deps.upstream(kind === "search" ? `/api/v2.1/films/search-by-keyword?keyword=${encodeURIComponent(query)}&page=1` : upstreamPath(kind, id), key.value);
       } catch {
         await finish(kind, id, version, { p_retry_at: new Date(now() + RETRY_MS).toISOString() });
         return reply({ error: "upstream_unreachable" }, 503);
@@ -180,19 +195,37 @@ export function createKpHandler(deps: Deps) {
         id: Number(id),
         status: missing ? "missing" : "ok",
         fetchedAt: new Date(now()).toISOString(),
-        freshUntil: new Date(now() + freshFor).toISOString(),
+        freshUntil: new Date(Math.min(now() + freshFor, slotEnd(kind, id, slot))).toISOString(),
+        ...(query ? { query } : {}),
         data: missing ? null : compactPayload(kind, answer.body),
       };
+      // A new title can acquire provider metadata later today. Negative results
+      // live in shared state/gateway for six hours, never in a month-long
+      // immutable staff/similars URL that could not be replaced on retry.
+      if (missing) {
+        object.freshUntil = new Date(now() + MISSING_MS).toISOString();
+        await finish(kind, id, version, { p_status: "missing", p_fresh_until: object.freshUntil, p_bytes: 0 });
+        return reply(object, 200);
+      }
+      // Never publish an answer into a slot that expired while upstream ran.
+      if (!isFresh(object.freshUntil)) {
+        await finish(kind, id, version, {});
+        return reply({ error: "slot_expired" }, 503);
+      }
       const body = JSON.stringify(object);
-      const host = hostFor(id);
-      try {
-        await deps.putObject(host, objectPath(kind, id), body, 3600);
-      } catch {
+      let host = hostFor(id);
+      const writes = await Promise.allSettled([host, replicaFor(id)].map(async (target) => {
+        await deps.putObject(target, objectPath(kind, id, slot), body, 31536000);
+        return target;
+      }));
+      const written = writes.find((result) => result.status === "fulfilled");
+      if (!written || written.status !== "fulfilled") {
         // The caller still gets its answer; the next miss after the back-off
         // will publish it.
         await finish(kind, id, version, { p_retry_at: new Date(now() + RETRY_MS).toISOString() });
         return reply(object, 200);
       }
+      host = written.value;
       await finish(kind, id, version, {
         p_status: object.status,
         p_host: host,
@@ -207,11 +240,19 @@ export function createKpHandler(deps: Deps) {
 
   return async function handle(req: Request): Promise<Response> {
     if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+    // Only the resolver and bounded prewarm jobs can spend shared API quota.
+    if (deps.token && req.headers.get("x-kp-token") !== deps.token) return reply({ error: "forbidden" }, 403);
     if (req.method !== "GET") return reply({ error: "method_not_allowed" }, 405);
     const url = new URL(req.url);
     const kind = url.searchParams.get("kind") || "";
-    const id = url.searchParams.get("id") || "";
-    if (!KINDS.includes(kind) || !/^[1-9]\d{0,9}$/.test(id)) return reply({ error: "bad_request" }, 400);
+    const query = (url.searchParams.get("q") || "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+    let id = url.searchParams.get("id") || "";
+    if (kind === "search") {
+      if (!query || query.length > 120) return reply({ error: "bad_request" }, 400);
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(query));
+      id = String(parseInt([...new Uint8Array(digest)].slice(0, 6).map((b) => b.toString(16).padStart(2, "0")).join(""), 16) + 1);
+    }
+    if (!KINDS.includes(kind) || !(kind === "search" ? /^[1-9]\d{0,14}$/ : /^[1-9]\d{0,9}$/).test(id)) return reply({ error: "bad_request" }, 400);
 
     let lease;
     try {
@@ -221,33 +262,23 @@ export function createKpHandler(deps: Deps) {
     } catch {
       return reply({ error: "state_unavailable" }, 503);
     }
-    if (lease?.acquired) return fill(kind, id, lease.version);
+    if (lease?.acquired) return fill(kind, id, lease.version, query);
+
+    if (lease?.status === "missing" && isFresh(lease.fresh_until)) {
+      return reply({ v: 1, kind, id: Number(id), status: "missing", data: null,
+        freshUntil: lease.fresh_until, ...(query ? { query } : {}) });
+    }
 
     // Someone else's answer is already published, or is being fetched now.
     if (lease && lease.status !== "pending" && isFresh(lease.fresh_until)) {
       const stored = await serveStored(kind, id, lease.host);
       if (stored) return stored;
     }
-    const until = now() + WAIT_MS;
-    while (now() < until) {
-      await sleep(POLL_MS);
-      let row;
-      try {
-        [row] = await deps.rpc("kp_read", { p_kind: kind, p_id: Number(id) });
-      } catch {
-        break;
-      }
-      if (!row || row.leased) continue;
-      if (row.status !== "pending" && isFresh(row.fresh_until)) {
-        const stored = await serveStored(kind, id, row.host);
-        if (stored) return stored;
-      }
-      break;
-    }
     if (lease?.retry_at && Date.parse(lease.retry_at) > now()) {
       return reply({ error: "backing_off", retryAt: lease.retry_at }, 503);
     }
-    return reply({ error: "busy" }, 503);
+    // The resolver coalesces waiters and retries; no idle Edge Function polls SQL.
+    return reply({ error: "busy", retryAfter: 1 }, 202);
   };
 }
 
@@ -263,14 +294,36 @@ if (typeof Deno !== "undefined") {
   hostKeys[self] = SERVICE_KEY;
 
   let keysPromise: Promise<Key[]> | null = null;
+  let keysAt = 0;
   const keys = () => {
-    keysPromise ||= Promise.all(String(Deno.env.get("KU_KEYS") ?? "")
-      .split(",").map((value) => value.trim()).filter(Boolean)
-      .map(async (value) => ({ id: await keyIdOf(value), value })));
+    if (keysPromise && Date.now() - keysAt < 5 * 60e3) return keysPromise;
+    const previous = keysPromise;
+    keysAt = Date.now();
+    keysPromise = (async () => {
+      const token = Deno.env.get("ALPHY_KEY_POOL_TOKEN");
+      let values: string[];
+      if (token) {
+        try {
+          const r = await fetch("https://alphy.tv/api/key-pool/runtime", {
+            headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000),
+          });
+          if (!r.ok) throw new Error("pool unavailable");
+          const payload = await r.json();
+          if (!Array.isArray(payload?.pool?.keys)) throw new Error("invalid pool");
+          values = payload.pool.keys.filter((entry: any) => entry.provider === "unofficial").map((entry: any) => entry.value);
+        } catch {
+          if (previous) return previous;
+          throw new Error("managed key pool unavailable");
+        }
+      } else values = String(Deno.env.get("KU_KEYS") ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+      return Promise.all([...new Set(values)].map(async (value) => ({ id: await keyIdOf(value), value })));
+    })();
+    keysPromise.catch(() => { keysAt = 0; });
     return keysPromise;
   };
 
   const handle = createKpHandler({
+    token: Deno.env.get("KP_BROKER_TOKEN") || "unconfigured-deny-all",
     keys,
     async rpc(name, args) {
       const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, {
@@ -292,12 +345,17 @@ if (typeof Deno !== "undefined") {
           Authorization: `Bearer ${key}`,
           "Content-Type": "application/json",
           "cache-control": `max-age=${maxAgeSeconds}`,
-          "x-upsert": "true",
+          "x-upsert": "false",
         },
         body,
         signal: AbortSignal.timeout(8000),
       });
-      if (!response.ok) throw new Error(`storage ${host} ${response.status}`);
+      if (!response.ok) {
+        const detail = await response.text();
+        // First successful writer wins within a slot. Every newer slot has its
+        // own URL, so neither lease expiry nor CDN staleness can regress it.
+        if (!/Duplicate|already exists|"statusCode":"409"/i.test(detail)) throw new Error(`storage ${host} ${response.status}`);
+      }
     },
     async getObject(host, path) {
       const response = await fetch(`https://${host}.supabase.co/storage/v1/object/public/${BUCKET}/${path}`, {

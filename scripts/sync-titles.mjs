@@ -9,8 +9,7 @@
 //  - the first pages of the listing, which is newest first (by year, then
 //    release), until three pages in a row bring nothing new — a new release is
 //    in search within the hour;
-//  - once a day, the whole listing, for the older titles the source adds
-//    further down — within a day;
+//  - every four hours, the whole listing, including episode revision markers;
 //  - then the titles still missing their player or Kinopoisk id, newest first.
 //
 // How it treats the source is unchanged from the crawler it replaces: one
@@ -73,6 +72,9 @@ export function catalogRow(item) {
     type: Number(item?.type) || null,
     slug: String(item?.slug || ""),
     rate_kp: Number(item?.rate?.kinopoisk) || null,
+    // Compact source revision; no additional fields are exposed in the UI.
+    source_revision: JSON.stringify([item?.seasonLast?.season ?? null, item?.episodeLast?.episode ?? null,
+      item?.finished ?? null, item?.quality ?? null, item?.status ?? null]),
   };
 }
 
@@ -119,11 +121,12 @@ async function titleView(slug) {
     await net.sleep(SPACING_MS);
     payload = (await ask("1")) ?? payload;
   }
-  return payload?.view ?? {};
+  if (!payload?.view || typeof payload.view !== "object" || !Object.keys(payload.view).length) throw new SoftError("empty title view");
+  return payload.view;
 }
 
 export function fillRow(id, view) {
-  // "" rather than null: asked, and there is none — so it is not asked again.
+  // "" rather than null records a confirmed absence; the due queue retries it.
   const raw = String(view?.kpId ?? "");
   const kp = /^\d+$/.test(raw) && raw !== "0" ? raw : "";
   const embed = Number(String(view?.video?.embedUrl || "").match(/\/(\d+)/)?.[1]) || null;
@@ -134,6 +137,12 @@ export function fillRow(id, view) {
     origin_name: String(view?.originName || ""),
     is_series: !!(view?.season || view?.seasonLast),
   };
+}
+
+export async function fullScanDue() {
+  const state = await net.titles("/sync-state");
+  const last = Date.parse(state?.last_full_at);
+  return !Number.isFinite(last) || net.now() - last >= 4 * 3600e3;
 }
 
 export async function fillPending({ limit = 300, deadline = Infinity } = {}) {
@@ -179,6 +188,17 @@ export async function fillPending({ limit = 300, deadline = Infinity } = {}) {
   return stats;
 }
 
+export async function buildFallback({ deadline = Infinity, maxCalls = 25 } = {}) {
+  let built = 0;
+  for (let i = 0; i < maxCalls && net.now() < deadline; i += 1) {
+    const result = await net.titles("/build?max=6", {});
+    built += result.built?.length || 0;
+    if (result.failed?.length) throw new Error(`fallback build failed: ${result.failed.join(",")}`);
+    if (!result.remaining || !result.built?.length) return { built, remaining: result.remaining || 0 };
+  }
+  throw new Error("fallback build did not drain before budget");
+}
+
 function argument(name, fallback) {
   const at = process.argv.indexOf(`--${name}`);
   return at >= 0 ? process.argv[at + 1] : fallback;
@@ -186,14 +206,19 @@ function argument(name, fallback) {
 
 async function main() {
   if (!net.token) throw new Error("PUBLISH_TOKEN is required");
-  const full = process.argv.includes("--full");
+  const full = process.argv.includes("--full") || (process.argv.includes("--auto") && await fullScanDue());
   const deadline = net.now() + Number(argument("budget-min", "45")) * 60e3;
   const catalog = await syncCatalog({ full, deadline });
+  if (full && catalog.reachedEnd) await net.titles("/sync-state", {});
   console.log(`catalogue: ${catalog.pages} pages, ${catalog.inserted} new, ${catalog.updated} changed` +
     ` (source lists ${catalog.total}${full ? `, full read ${catalog.reachedEnd ? "complete" : "cut short"}` : ""})`);
   const fill = await fillPending({ limit: Number(argument("fill", "300")), deadline });
   console.log(`fill: ${fill.filled} resolved, ${fill.failed} failed of ${fill.asked} asked` +
     (fill.stoppedBy ? `; stopped: ${fill.stoppedBy}` : ""));
+  // Separate budget so a full catalogue read cannot starve the fallback build.
+  console.log("fallback:", await buildFallback({ deadline: net.now() + 5 * 60e3 }));
+  if (full && !catalog.reachedEnd) throw new Error("full source scan incomplete");
+  if (fill.stoppedBy && fill.stoppedBy !== "budget") throw new Error(`fill stopped: ${fill.stoppedBy}`);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {

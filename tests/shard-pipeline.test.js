@@ -56,8 +56,11 @@ test("enrichment never regresses to null", async () => {
   // rows out of its own D1 copy, and /resolve, writing straight to Postgres. A
   // title a viewer resolved was reset to null the next time the crawler
   // republished the row it still had as unresolved.
-  for (const column of ["embed_id", "kp", "origin_name", "is_series"]) {
+  for (const column of ["embed_id", "is_series"]) {
     assert.match(fn, new RegExp(`new\\.${column}\\s*:= coalesce\\(new\\.${column}, old\\.${column}\\)`));
+  }
+  for (const column of ["kp", "origin_name"]) {
+    assert.ok(fn.includes(`coalesce(nullif(new.${column}, ''), old.${column}, new.${column})`));
   }
   // Only on update — there is no OLD to fall back to on an insert.
   assert.match(fn, /if tg_op = 'UPDATE' then/);

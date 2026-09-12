@@ -185,7 +185,7 @@
     const denoActive = key.scopes.resolver || key.scopes.recommendations;
     if (!denoActive && !key.scopes.browser) return { text: "только хранение", mode: "off" };
     if (!denoActive && key.scopes.browser) {
-      return { text: "браузер · квота через «Проверить»", mode: "idle" };
+      return { text: "общий кэш · квота через «Проверить»", mode: "idle" };
     }
     if (!metric?.requests) return { text: "ещё не использовался", mode: "idle" };
     const average = metric.averageLatencyMs || Math.round((metric.totalLatencyMs || 0) / metric.requests);
@@ -279,7 +279,7 @@
           key.scopes.recommendations = checked;
           markDirty();
         }, { disabled: key.provider === "poiskkino" }),
-        checkbox("браузер (public)", key.scopes.browser, (checked) => {
+        checkbox("общий кэш метаданных", key.scopes.browser, (checked) => {
           key.scopes.browser = checked;
           markDirty();
         }, { disabled: key.provider === "poiskkino" }),

@@ -14,6 +14,10 @@ on:
   schedule:
     - cron: "41 * * * *"
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Sync the title index with the source"]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: write
@@ -24,6 +28,7 @@ concurrency:
 
 jobs:
   publish:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

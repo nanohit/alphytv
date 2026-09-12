@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { makeSandbox, sleep } from "./helpers/app-sandbox.js";
 import {
-  buildData, buildIndex, mergeDelta, needsRebase, net, codepoint,
+  buildData, buildIndex, mergeDelta, needsRebase, net, codepoint, partitionRows,
 } from "../scripts/publish-search-cdn.mjs";
 
 // The search index moved from Supabase Storage to jsDelivr: a tiny pointer on
@@ -40,6 +40,30 @@ async function boot(files) {
 const POINTER = "https://xoathqkggcuyoyutxwri.supabase.co/storage/v1/object/public/index/pointer.json";
 const cdn = (commit, file) => `https://cdn.jsdelivr.net/gh/nanohit/alphytv@${commit}/${file}`;
 const P = "43f"; // п
+
+test("prefix partitions preserve matching at any word in either language", async () => {
+  const rows = [
+    ["Пираты Карибского моря", 2003, "pirates", 0, 1, "4374", "Pirates of the Caribbean"],
+    ["Пи", 1998, "pi", 0, 2, "1", "Pi"],
+    ["Пираты. Пиратский фильм", 2026, "p", 0, 3, "2", ""],
+  ];
+  const parts = partitionRows(rows, "п");
+  assert.equal(parts.get("пир").length, 2, "multiple matching words never duplicate the title");
+  assert.equal(partitionRows(rows, "к").get("кар")[0][2], "pirates");
+  assert.equal(partitionRows(rows, "c").get("car")[0][2], "pirates");
+});
+
+test("a cold long prefix downloads its small partition, never the giant letter", async () => {
+  const entry = [`b/${P}.1111111111111111.json`, C1, 20000, null, null, "i/3333333333333333.json"];
+  const { app, asked } = await boot({
+    [POINTER]: { v: 1, c: C2, f: "i/0123456789abcdef.json" },
+    [cdn(C2, "i/0123456789abcdef.json")]: { v: 1, l: { [P]: entry } },
+    [cdn(C2, "i/3333333333333333.json")]: { пир: ["p/4444444444444444.json", C1, 1] },
+    [cdn(C1, "p/4444444444444444.json")]: [row("Пираты", 2003, "piraty")],
+  });
+  assert.equal((await app.loadSearchRows("пираты"))[0][2], "piraty");
+  assert.ok(asked.every((url) => !url.includes("/b/") && !url.includes("/index/v3/")));
+});
 
 test("a delta replaces titles by slug, drops the ones that left, and adds the new", async () => {
   const { app } = await boot({});

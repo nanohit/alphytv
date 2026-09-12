@@ -1,5 +1,7 @@
 # Vercel serves the static frontend plus /api/resolve-zona. That control-plane
 # function imports worker/src, but video bytes never cross Vercel.
+.env*
+supabase/.temp/
 resolver-deno/
 docs/
 node_modules/
