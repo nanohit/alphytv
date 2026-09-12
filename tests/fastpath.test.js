@@ -36,7 +36,7 @@ test("verified LiftW mapping wins over cached Collaps and Zona", async () => {
   const seed = new Map([
     ["alphy.cache.zona:301", ZONA],
     ["alphy.cache.clpsprobe:301", PROBE],
-    ["alphy.cache.liftwbykp.v1:301", LIFT],
+    ["alphy.cache.liftwbykp.v2:301", LIFT],
   ]);
   const bridge = await bootedBridge(seed);
   const source = await bridge.resolveKpPlaybackSource("301");
@@ -48,7 +48,7 @@ test("mid-watch Zenith title keeps its player despite a warmed probe", async () 
   const seed = new Map([
     ["alphy.cache.zona:301", ZONA],
     ["alphy.cache.clpsprobe:301", PROBE],
-    ["alphy.cache.liftwbykp.v1:301", LIFT],
+    ["alphy.cache.liftwbykp.v2:301", LIFT],
     ["alphy.history", JSON.stringify([{
       key: "kp:301", kind: "kp", target: { kind: "kp", kpId: "301" }, title: "Матрица",
       position: 1200, duration: 8000, progress: 0.15, updatedAt: Date.now(),

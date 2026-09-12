@@ -1,0 +1,173 @@
+{
+  "denoPreview": [
+    {
+      "path": "/kp?kind=film&id=301",
+      "pass": 0,
+      "status": 200,
+      "ms": 3630,
+      "kind": "film",
+      "fields": [
+        "kinopoiskId",
+        "kinopoiskHDId",
+        "imdbId",
+        "nameRu",
+        "nameEn",
+        "nameOriginal",
+        "posterUrl",
+        "posterUrlPreview",
+        "coverUrl",
+        "logoUrl",
+        "reviewsCount",
+        "ratingGoodReview",
+        "ratingGoodReviewVoteCount",
+        "ratingKinopoisk",
+        "ratingKinopoiskVoteCount"
+      ]
+    },
+    {
+      "path": "/kp?kind=film&id=301",
+      "pass": 1,
+      "status": 200,
+      "ms": 308,
+      "kind": "film",
+      "fields": [
+        "kinopoiskId",
+        "kinopoiskHDId",
+        "imdbId",
+        "nameRu",
+        "nameEn",
+        "nameOriginal",
+        "posterUrl",
+        "posterUrlPreview",
+        "coverUrl",
+        "logoUrl",
+        "reviewsCount",
+        "ratingGoodReview",
+        "ratingGoodReviewVoteCount",
+        "ratingKinopoisk",
+        "ratingKinopoiskVoteCount"
+      ]
+    },
+    {
+      "path": "/kp?kind=staff&id=301",
+      "pass": 0,
+      "status": 200,
+      "ms": 1713,
+      "kind": "staff",
+      "fields": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14"
+      ],
+      "count": 42
+    },
+    {
+      "path": "/kp?kind=staff&id=301",
+      "pass": 1,
+      "status": 200,
+      "ms": 98,
+      "kind": "staff",
+      "fields": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14"
+      ],
+      "count": 42
+    },
+    {
+      "path": "/kp?kind=similars&id=301",
+      "pass": 0,
+      "status": 200,
+      "ms": 1420,
+      "kind": "similars",
+      "fields": [
+        "total",
+        "items"
+      ],
+      "count": 25
+    },
+    {
+      "path": "/kp?kind=similars&id=301",
+      "pass": 1,
+      "status": 200,
+      "ms": 118,
+      "kind": "similars",
+      "fields": [
+        "total",
+        "items"
+      ],
+      "count": 25
+    },
+    {
+      "path": "/kp?kind=search&q=%D0%BC%D0%B0%D1%82%D1%80%D0%B8%D1%86%D0%B0",
+      "pass": 0,
+      "status": 200,
+      "ms": 1627,
+      "kind": "search",
+      "fields": [
+        "keyword",
+        "pagesCount",
+        "films",
+        "searchFilmsCountResult"
+      ],
+      "count": 20
+    },
+    {
+      "path": "/kp?kind=search&q=%D0%BC%D0%B0%D1%82%D1%80%D0%B8%D1%86%D0%B0",
+      "pass": 1,
+      "status": 200,
+      "ms": 211,
+      "kind": "search",
+      "fields": [
+        "keyword",
+        "pagesCount",
+        "films",
+        "searchFilmsCountResult"
+      ],
+      "count": 20
+    },
+    {
+      "unauthenticatedBroker": 403
+    }
+  ],
+  "warmBurst": {
+    "at": "2026-09-12T21:48:59.553Z",
+    "requests": 80,
+    "concurrency": 8,
+    "statuses": {
+      "200": 80
+    },
+    "latencyMs": {
+      "p50": 170,
+      "p95": 1011,
+      "max": 1262
+    },
+    "quotaBefore": 117,
+    "quotaAfter": 117,
+    "additionalQuota": 0
+  }
+}

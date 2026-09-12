@@ -6,6 +6,33 @@ import { makeSandbox, sleep } from "./helpers/app-sandbox.js";
 const PREFIX = "alphy.cache.";
 const wrap = (value) => JSON.stringify({ v: value, exp: Date.now() + 3600e3 });
 
+test("late Lift identity bypasses a stale HTTP answer and an old month-long miss", async () => {
+  const ctx = makeSandbox({ storageSeed: new Map([
+    [`${PREFIX}liftwkpof.v1:1143`, JSON.stringify({ v: "", exp: Date.now() + 30 * 86400e3 })],
+  ]) });
+  ctx.run(); await sleep(80);
+  const asked = [];
+  ctx.sandbox.fetch = async (url, init) => {
+    asked.push(String(url));
+    // Model the old relay's six-hour HTTP cache: only a revalidation discovers
+    // the identity attached since the last visit.
+    return { ok: true, status: 200, json: async () => ({ info: { id: init.cache === "no-cache" ? 838 : null } }) };
+  };
+  const get = ctx.sandbox.window.alphyBridge._test.liftwKpIdFor;
+  assert.equal(await get("1143"), "838");
+  assert.equal(await get("1143"), "838");
+  assert.equal(asked.length, 1, "a confirmed identity stays in the local cache");
+});
+
+test("a missing Lift identity is retried within six hours", async () => {
+  const ctx = makeSandbox(); ctx.run(); await sleep(80);
+  ctx.sandbox.fetch = async () => ({ ok: true, status: 200, json: async () => ({ info: {} }) });
+  const before = Date.now();
+  assert.equal(await ctx.sandbox.window.alphyBridge._test.liftwKpIdFor("1143"), "");
+  const miss = JSON.parse(ctx.storage.get(`${PREFIX}liftwkpof.v2:1143`));
+  assert.ok(miss.exp - before <= 6 * 3600e3 + 1000);
+});
+
 const hit = (id, title, year, extra = {}) => ({
   id: String(id),
   title,
@@ -30,7 +57,7 @@ function seedBridge({ searches = {}, kpOf = {} } = {}) {
     seed.set(`${PREFIX}liftwsearch.v1:${query.toLowerCase().replace(/ё/g, "е")}`, wrap(items));
   }
   for (const [liftId, kpId] of Object.entries(kpOf)) {
-    seed.set(`${PREFIX}liftwkpof.v1:${liftId}`, wrap(kpId));
+    seed.set(`${PREFIX}liftwkpof.v2:${liftId}`, wrap(kpId));
   }
   return seed;
 }
@@ -52,7 +79,7 @@ test("a LiftW candidate is accepted only after its own /info confirms the Kinopo
 
   assert.equal(await helpers.findLiftwByKpId("1234", { title: "Дюна", year: 2021, isSeries: false }), "22");
   // The pairing is an identity and is cached, so a retry never re-runs the fan-out.
-  assert.equal(JSON.parse(ctx.storage.get(`${PREFIX}liftwbykp.v1:1234`)).v, "22");
+  assert.equal(JSON.parse(ctx.storage.get(`${PREFIX}liftwbykp.v2:1234`)).v, "22");
 });
 
 test("a title match alone is never accepted as a Kinopoisk match", async () => {
@@ -65,7 +92,7 @@ test("a title match alone is never accepted as a Kinopoisk match", async () => {
   // reports the requested Kinopoisk id, so the bridge returns nothing rather than
   // handing playback a plausible-looking wrong film.
   assert.equal(await helpers.findLiftwByKpId("1234", { title: "Дюна", year: 2021, isSeries: false }), "");
-  const cached = JSON.parse(ctx.storage.get(`${PREFIX}liftwbykp.v1:1234`));
+  const cached = JSON.parse(ctx.storage.get(`${PREFIX}liftwbykp.v2:1234`));
   assert.equal(cached.v, "", "the miss is cached so a retry costs nothing");
 });
 
@@ -105,7 +132,12 @@ test("the confirmation hop goes through the relay, and a failed hop confirms not
   assert.doesNotMatch(block, /api\.liftw\.ws/);
   // A relay failure must read as "not confirmed" — never as a confirmation,
   // which is what would let a title match alone pass for a kpId match.
-  assert.match(block, /catch\s*\{\s*kpId = ""/);
+  const { ctx, helpers } = await boot(new Map());
+  ctx.sandbox.fetch = async () => { throw new Error("relay unavailable"); };
+  const before = Date.now();
+  assert.equal(await helpers.liftwKpIdFor("1143"), "");
+  const cached = JSON.parse(ctx.storage.get(`${PREFIX}liftwkpof.v2:1143`));
+  assert.ok(cached.exp - before <= 61000, "a transient failure is retried in a minute");
 });
 
 test("LiftW is tried before HDRezka when the Kinopoisk chain is exhausted", async () => {

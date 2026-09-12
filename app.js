@@ -68,8 +68,8 @@
   const letterboxdOutOfTen = (score) => (Number(score) * 2).toFixed(1);
   const LETTERBOXD_COOLDOWN_MS = 5 * 60e3;
   const LIFTW_TITLE_CACHE_NS = "liftwtitle.v1";
-  const LIFTW_KP_OF_CACHE_NS = "liftwkpof.v1";
-  const LIFTW_BY_KP_CACHE_NS = "liftwbykp.v1";
+  const LIFTW_KP_OF_CACHE_NS = "liftwkpof.v2";
+  const LIFTW_BY_KP_CACHE_NS = "liftwbykp.v2";
   // The player is reached directly, not through the relay: lift3.ws serves the
   // same embed with `Access-Control-Allow-Origin: *`, so the HTML and then the
   // video come straight to the browser and no stream ever crosses our servers.
@@ -134,7 +134,7 @@
     // A LiftW id <-> Kinopoisk id pairing is an identity, not content: it cannot
     // go stale. A miss can (the catalogue grows), so it expires much sooner.
     liftwkp: 30 * 24 * 3600e3,
-    liftwkpmiss: 24 * 3600e3,
+    liftwkpmiss: 6 * 3600e3,
     // A Letterboxd score moves in the second decimal over months, not hours.
     // A miss is almost always a series — which Letterboxd, being a film site,
     // will never carry — so it is worth remembering too, just not as long.
@@ -2061,7 +2061,9 @@ parent.postMessage({
       const url = new URL(endpoint);
       for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value);
       try {
-        const response = await fetchWithTimeout(url.href, {}, 9000);
+        // The parsed playlist already has a five-hour local TTL. Revalidate
+        // info when that expires, including relays still serving old headers.
+        const response = await fetchWithTimeout(url.href, params.mode === "info" ? { cache: "no-cache" } : {}, 9000);
         if (!response.ok) throw new Error(`liftw relay ${response.status}`);
         const payload = await response.json();
         if (payload?.error) throw new Error(String(payload.error));
@@ -2461,15 +2463,15 @@ parent.postMessage({
     const key = String(positiveInt(liftId) || "");
     if (!key) return "";
     const warm = cacheGet(LIFTW_TITLE_CACHE_NS, key);
-    if (warm?.meta) return String(warm.meta.kpId || "");
+    if (warm?.meta?.kpId) return String(warm.meta.kpId);
     const cached = cacheGet(LIFTW_KP_OF_CACHE_NS, key);
     if (typeof cached === "string") return cached;
-    let kpId = "";
+    let kpId = "", failed = false;
     try {
       const info = await liftwRelay({ mode: "info", id: key }, `info:${key}`);
       kpId = String(positiveInt(info?.info?.id) || "");
-    } catch { kpId = ""; }
-    cacheSet(LIFTW_KP_OF_CACHE_NS, key, kpId, TTL.liftwkp);
+    } catch { failed = true; }
+    cacheSet(LIFTW_KP_OF_CACHE_NS, key, kpId, failed ? 60e3 : kpId ? TTL.liftwkp : TTL.liftwkpmiss);
     return kpId;
   }
 
@@ -10960,6 +10962,7 @@ addEventListener('message', async (event) => {
       liftwRuntimeMinutes,
       liftwCandidateScore,
       findLiftwByKpId,
+      liftwKpIdFor,
       letterboxdEndpointOrder,
       letterboxdRating,
       letterboxdBatch,
