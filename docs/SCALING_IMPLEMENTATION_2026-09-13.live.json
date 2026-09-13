@@ -217,6 +217,16 @@
       "externalCandidates": 311,
       "fillAttempts": 40,
       "limit": 40
+    },
+    "githubPrewarm": {
+      "run": 34734740038,
+      "status": "success",
+      "seeds": 51,
+      "externalCandidates": 316,
+      "fillAttempts": 120,
+      "limit": 120,
+      "retries": 0,
+      "deferred": 0
     }
   },
   "catalogChecks": {
@@ -227,5 +237,17 @@
     "runtimePoolRevision": 3,
     "runtimePoolKeyCount": 11,
     "publicPoolKeyCount": 0
+  },
+  "finalRelease": {
+    "commit": "63fc09b683a84d1fdd6f922ebc8ef8b7f6d75e39",
+    "site": "https://alphy.tv",
+    "assetRevisionVerified": true,
+    "denoFilmStaffSimilarsStatuses": [
+      200,
+      200,
+      200
+    ],
+    "fullTestsPassed": 366,
+    "cfCrawlerChanged": false
   }
 }
