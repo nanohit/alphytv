@@ -72,9 +72,19 @@ try {
   assert.ok(next.some((r) => r.id === 1));
   checks.push("a changed source revision requeues a previously complete title");
 
+  await query(`set search_path = ${schema};
+    insert into titles(id,name,slug,first_seen_at) values (2,'Recent','recent',now()),(3,'Legacy','legacy',null);
+    select titles_fill('[{"id":2,"kp":"","embed_id":null},{"id":3,"kp":"","embed_id":null}]'::jsonb)`);
+  const windows = await query(`select id, round(extract(epoch from next_check_at-last_checked_at)/3600)::int as hours
+    from ${schema}.titles where id in (2,3) order by id`);
+  assert.deepEqual(windows, [{ id: 2, hours: 4 }, { id: 3, hours: 24 }]);
+  await query(`set search_path = ${schema}; update ${schema}.titles set next_check_at=now()-interval '1 minute' where id=2`);
+  assert.ok((await query(`select * from ${schema}.titles_pending(6)`)).some((r) => r.id === 2));
+  checks.push("new incomplete titles retry in four hours and receive urgent slots; legacy backlog stays on daily checks");
+
   // A large old retry backlog must leave slots for new titles and changes.
-  await query(`set search_path = ${schema}; insert into titles(id,name,slug,last_checked_at,next_check_at)
-    select n,'Old '||n,'old-'||n,now()-interval '2 days',now()-interval '1 day' from generate_series(100,199) n;
+  await query(`set search_path = ${schema}; insert into titles(id,name,slug,last_checked_at,next_check_at,first_seen_at)
+    select n,'Old '||n,'old-'||n,now()-interval '2 days',now()-interval '1 day',null from generate_series(100,199) n;
     insert into titles(id,name,slug) select n,'New '||n,'new-'||n from generate_series(200,219) n`);
   const batch = await query(`select * from ${schema}.titles_pending(12)`);
   assert.equal(batch.length, 12);

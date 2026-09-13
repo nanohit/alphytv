@@ -1,6 +1,6 @@
 {
-  "checkedAt": "2026-09-13T02:54:37.610Z",
-  "testProject": "matozzgmaranfemgxpzy",
+  "checkedAt": "2026-09-13T03:12:37.500Z",
+  "testProject": "hcuhanruaclhiltpdegc",
   "isolatedSchemaRemoved": true,
   "checks": [
     "all SQL definitions compile",
@@ -10,6 +10,7 @@
     "two concurrent catalog writes: one wins, one revision conflict",
     "an empty later response preserves known KP, original name and player",
     "a changed source revision requeues a previously complete title",
+    "new incomplete titles retry in four hours and receive urgent slots; legacy backlog stays on daily checks",
     "retry backlog, fresh titles and source changes all receive slots without duplicates"
   ]
 }

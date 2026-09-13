@@ -169,5 +169,63 @@
     "quotaBefore": 117,
     "quotaAfter": 117,
     "additionalQuota": 0
+  },
+  "previewPrefix": {
+    "query": "пираты",
+    "rows": 131,
+    "coldTotalMs": 1281,
+    "decodedResponseBytes": {
+      "pointer": 116,
+      "index": 15656,
+      "manifest": 14242,
+      "prefixPart": 14777
+    },
+    "wholeLetterRequested": false,
+    "supabaseV3Requested": false,
+    "note": "Real client functions in a VM and real HTTP; one network sample, not device p95 or compressed wire size."
+  },
+  "backgroundJobs": {
+    "sync": {
+      "run": 34734529684,
+      "status": "success",
+      "resumedAtPage": 750,
+      "pages": 71,
+      "insertedInTail": 3,
+      "changedInTail": 6279,
+      "sourceTotal": 81982,
+      "fullScanComplete": true,
+      "fillResolved": 30,
+      "fillFailed": 0,
+      "fallbackBuilt": 0,
+      "fallbackPending": 58,
+      "note": "Fallback shards wait at least one hour; this pending count is not the jsDelivr publication queue."
+    },
+    "search": {
+      "run": 34734532570,
+      "status": "success",
+      "uniqueFilesWarmed": 1067,
+      "failures": 0
+    },
+    "automaticSearchAfterSync": {
+      "run": 34734787421,
+      "status": "success",
+      "uniqueFilesWarmed": 322,
+      "failures": 0
+    },
+    "localPrewarmAfterKeySnapshot": {
+      "seeds": 51,
+      "externalCandidates": 311,
+      "fillAttempts": 40,
+      "limit": 40
+    }
+  },
+  "catalogChecks": {
+    "catalogRevision": 295,
+    "lists": 12,
+    "items": 184,
+    "cdnItemsWithBakedLetterboxd": 101,
+    "runtimePoolRevision": 3,
+    "runtimePoolKeyCount": 11,
+    "publicPoolKeyCount": 0
   }
 }

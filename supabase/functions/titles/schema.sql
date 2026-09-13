@@ -60,6 +60,10 @@ alter table titles add column if not exists shard_keys text[];
 
 -- Ingestion state is not part of the public seven-field search row.
 alter table titles add column if not exists source_revision text;
+-- Existing backlog keeps NULL; only discoveries after this migration receive
+-- a timestamp. Do not turn the whole old catalogue into urgent fresh work.
+alter table titles add column if not exists first_seen_at timestamptz;
+alter table titles alter column first_seen_at set default now();
 alter table titles add column if not exists last_checked_at timestamptz;
 alter table titles add column if not exists next_check_at timestamptz;
 alter table titles add column if not exists source_changed boolean not null default false;
@@ -320,12 +324,14 @@ begin
          last_checked_at = now(), fill_tries = 0, source_changed = false,
          next_check_at = case when coalesce(r.embed_id, t.embed_id) is null
            or coalesce(nullif(r.kp, ''), nullif(t.kp, '')) is null
-           then now() + interval '24 hours' else null end
+           then now() + case when t.first_seen_at > now() - interval '48 hours'
+             then interval '4 hours' else interval '24 hours' end else null end
     from jsonb_to_recordset(p_rows) as r(id integer, kp text, embed_id integer, origin_name text, is_series boolean, failed boolean)
    where t.id = r.id and not coalesce(r.failed, false);
   get diagnostics n = row_count;
   update titles t set fill_tries = least(t.fill_tries::integer + 1, 32767), last_checked_at = now(),
-    next_check_at = now() + case when t.fill_tries < 3 then interval '1 hour' else interval '24 hours' end
+    next_check_at = now() + case when t.fill_tries < 3 then interval '1 hour'
+      when t.first_seen_at > now() - interval '48 hours' then interval '4 hours' else interval '24 hours' end
     from jsonb_to_recordset(p_rows) as r(id integer, failed boolean)
    where t.id = r.id and coalesce(r.failed, false);
   get diagnostics m = row_count;
@@ -344,7 +350,8 @@ create or replace function titles_pending(p_limit integer default 300)
 returns table(id integer, slug text)
 language sql security definer set search_path = public as $fn$
   with urgent as (
-    select t.id, t.slug from titles t where t.next_check_at <= now() and t.source_changed and coalesce(t.slug, '') <> ''
+    select t.id, t.slug from titles t where t.next_check_at <= now()
+      and (t.source_changed or t.first_seen_at > now() - interval '48 hours') and coalesce(t.slug, '') <> ''
     order by t.next_check_at, t.id desc limit greatest(1, least(p_limit, 1000) / 3)
   ), first_read as (
     select t.id, t.slug from titles t
