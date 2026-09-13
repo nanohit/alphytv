@@ -46,6 +46,46 @@ create table if not exists public.kp_key_state (
 );
 alter table public.kp_key_state enable row level security;
 
+-- Server-only working copy; the encrypted administrative registry remains the
+-- source of truth. No viewer role may read provider credentials from this row.
+create table if not exists public.kp_key_snapshot (
+  id boolean primary key default true check (id),
+  revision bigint not null default -1,
+  keys jsonb not null default '[]'::jsonb,
+  refresh_after timestamptz not null default '-infinity'
+);
+alter table public.kp_key_snapshot enable row level security;
+revoke all on public.kp_key_snapshot from public, anon, authenticated;
+insert into public.kp_key_snapshot(id) values(true) on conflict do nothing;
+
+create or replace function public.kp_key_snapshot_read() returns jsonb
+language plpgsql security definer set search_path = public as $fn$
+declare s public.kp_key_snapshot%rowtype; claimed boolean;
+begin
+  update public.kp_key_snapshot set refresh_after = now() + interval '30 seconds'
+    where id and refresh_after <= now() returning * into s;
+  claimed := found;
+  if not claimed then select * into s from public.kp_key_snapshot where id; end if;
+  return jsonb_build_object('revision', s.revision, 'keys', s.keys, 'refresh', claimed);
+end;
+$fn$;
+
+create or replace function public.kp_key_snapshot_write(p_revision bigint, p_keys jsonb) returns jsonb
+language plpgsql security definer set search_path = public as $fn$
+declare s public.kp_key_snapshot%rowtype;
+begin
+  if p_revision < 0 or jsonb_typeof(p_keys) <> 'array' or jsonb_array_length(p_keys) > 80 or octet_length(p_keys::text) > 65536 then
+    raise exception 'invalid key snapshot';
+  end if;
+  update public.kp_key_snapshot set revision=p_revision, keys=p_keys, refresh_after=now()+interval '5 minutes'
+    where id and revision <= p_revision;
+  select * into s from public.kp_key_snapshot where id;
+  return jsonb_build_object('revision', s.revision, 'keys', s.keys);
+end;
+$fn$;
+revoke all on function public.kp_key_snapshot_read(), public.kp_key_snapshot_write(bigint,jsonb) from public, anon, authenticated;
+grant execute on function public.kp_key_snapshot_read(), public.kp_key_snapshot_write(bigint,jsonb) to service_role;
+
 -- Take the right to fill one object. Succeeds only when it actually needs
 -- filling (never fetched, missing its freshness, or past a failure's back-off)
 -- and nobody else holds a live lease on it.

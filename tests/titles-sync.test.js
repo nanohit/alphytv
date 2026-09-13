@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { catalogRow, fillPending, fillRow, fullScanDue, net, syncCatalog, SoftError, SPACING_MS, UA } from "../scripts/sync-titles.mjs";
+import { catalogRow, fillPending, fillRow, fullScanDue, net, syncCatalog, runSync, SoftError, SPACING_MS, UA } from "../scripts/sync-titles.mjs";
 
 // The hourly job that replaces the Cloudflare crawler's frozen catalogue. These
 // pin how it treats the source — one request at a time, paced, stopping at the
@@ -51,6 +51,30 @@ test("the full read stops where the listing repeats its last page", async () => 
   assert.equal(stats.reachedEnd, true);
   assert.equal(calls.source.length, 3, "one extra page shows the repeat, and no more");
   assert.deepEqual(calls.titles.map((call) => call.route), ["/catalog", "/catalog"]);
+});
+
+test("a partial full scan saves progress and leaves time to fill new titles", async () => {
+  const calls = fake({ pages: Array.from({ length: 200 }, (_, i) => [item(1000 - i)]),
+    pending: [{ id: 1, slug: "film" }], views: { "film|": { view: { kpId: 301, video: { embedUrl: "https://x/embed/movie/77" } } } } });
+  const original = net.titles;
+  let checkpoint = { last_full_at: null, next_full_page: 1, full_started_at: "2026-09-12T21:51:35+00:00" };
+  net.titles = async (route, body) => {
+    if (route === "/sync-state") { if (body) checkpoint = body; return checkpoint; }
+    if (route.startsWith("/build")) return { built: [], remaining: 0 };
+    return original(route, body);
+  };
+  const result = await runSync({ budgetMin: 1, fillLimit: 1 });
+  assert.equal(result.catalog.reachedEnd, false);
+  assert.equal(result.fill.filled, 1, "catalogue scanning cannot consume the fill budget");
+  assert.ok(checkpoint.next_full_page > 1);
+  assert.ok(checkpoint.full_started_at);
+  assert.equal(checkpoint.full_started_at, "2026-09-12T21:51:35.000Z", "PostgREST timestamps are normalized for the checkpoint API");
+  const resume = checkpoint.next_full_page;
+  const next = fake({ pages: Array.from({ length: 200 }, (_, i) => [item(1000 - i)]) });
+  const resumed = await syncCatalog({ full: true, startPage: resume, deadline: 5000 });
+  assert.equal(Number(new URL(next.source[0]).searchParams.get("page")), resume);
+  assert.ok(resumed.nextPage > resume);
+  assert.ok(calls.titles.some((x) => x.route === "/fill"));
 });
 
 test("the hourly read stops after three pages in a row that change nothing", async () => {

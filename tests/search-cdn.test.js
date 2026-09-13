@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { makeSandbox, sleep } from "./helpers/app-sandbox.js";
 import {
-  buildData, buildIndex, mergeDelta, needsRebase, net, codepoint, partitionRows,
+  buildData, buildIndex, mergeDelta, needsRebase, net, codepoint, partitionRows, warmAndPoint, resumePublication,
 } from "../scripts/publish-search-cdn.mjs";
 
 // The search index moved from Supabase Storage to jsDelivr: a tiny pointer on
@@ -252,4 +252,30 @@ test("the search publisher workflow commits data before the index that names it"
   assert.ok(data > 0 && index > data && pointer > index);
   assert.match(workflow, /SEARCH_PUBLISH_TOKEN/);
   assert.doesNotMatch(workflow, /force/i, "history is appended, never rewritten: old commits stay readable");
+});
+
+test("a failed CDN warm resumes the same release before a new snapshot can replace it", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "search-resume-"));
+  const oldGet = net.get, oldPost = net.post;
+  try {
+    const samePart = Array.from({ length: 2001 }, (_, i) => ["Коко", 2017, `koko-${i}`, 0, i + 1, "", "Coco"]);
+    fakeTitles({ letters: ["к", "c"], bases: { к: samePart, c: samePart } });
+    await buildData(dir, { log: () => {} });
+    const index = await buildIndex(dir, C1);
+    let pointed = 0, published = null;
+    net.post = async (url, value) => { pointed += 1; published = value; return { ok: true }; };
+    await assert.rejects(warmAndPoint(dir, C2, C1, {
+      fetcher: async () => new Response("", { status: 503 }), log: () => {},
+    }), /not on jsDelivr/);
+    assert.equal(pointed, 0, "failed files are never announced");
+    net.get = async () => published;
+    const asked = [];
+    const options = { fetcher: async (url) => { asked.push(url); return new Response("{}"); }, log: () => {} };
+    assert.equal(await resumePublication(dir, C2, C1, options), true);
+    assert.equal(pointed, 1);
+    assert.equal(published.f, index);
+    assert.equal(asked.length, new Set(asked).size);
+    assert.equal(asked.filter((url) => url.includes("/p/")).length, 1, "identical Russian/original-title partitions are warmed once");
+    assert.equal(await resumePublication(dir, C2, C1, { fetcher: () => assert.fail("already published"), log: () => {} }), false);
+  } finally { net.get = oldGet; net.post = oldPost; await rm(dir, { recursive: true, force: true }); }
 });

@@ -282,6 +282,7 @@ export async function buildIndex(dir, commit) {
   const file = `i/${hash16(body)}.json`;
   await writeFileOnce(dir, file, body);
   state.index = file;
+  state.dataCommit = commit;
   state.indexes = [...(state.indexes || []).filter((name) => name !== file), file].slice(-KEEP_INDEXES);
   await writeFile(path.join(dir, "state.json"), `${JSON.stringify(state, null, 1)}\n`);
   return file;
@@ -289,7 +290,7 @@ export async function buildIndex(dir, commit) {
 
 // Each new file is requested once through jsDelivr before any browser is told
 // about it, so the first visitor after a publish does not pay the trip to GitHub.
-export async function warmAndPoint(dir, commit, dataCommit) {
+export async function warmAndPoint(dir, commit, dataCommit, { fetcher = fetch, log = console.log } = {}) {
   const state = await readState(dir);
   const urls = [`${CDN}${commit}/${state.index}`];
   const index = await readJson(dir, state.index);
@@ -300,23 +301,41 @@ export async function warmAndPoint(dir, commit, dataCommit) {
     if (manifest) urls.push(`${CDN}${commit}/${manifest}`);
     for (const part of Object.values(entry.parts || {})) if (part[1] === dataCommit) urls.push(`${CDN}${part[1]}/${part[0]}`);
   }
+  const uniqueUrls = [...new Set(urls)];
   let failed = 0;
-  for (let at = 0; at < urls.length; at += 8) {
-    await Promise.all(urls.slice(at, at + 8).map(async (url) => {
+  log(`warming ${uniqueUrls.length} unique files`);
+  for (let at = 0; at < uniqueUrls.length; at += 8) {
+    await Promise.all(uniqueUrls.slice(at, at + 8).map(async (url) => {
       try {
-        const response = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+        const response = await fetcher(url, { signal: AbortSignal.timeout(60_000) });
         if (!response.ok) failed += 1;
         await response.arrayBuffer();
       } catch {
         failed += 1;
       }
     }));
+    if ((at + 8) % 256 === 0) log(`warmed ${Math.min(at + 8, uniqueUrls.length)}/${uniqueUrls.length}; failures ${failed}`);
   }
   // A file jsDelivr could not serve must not be announced.
-  if (failed) throw new Error(`${failed} of ${urls.length} files are not on jsDelivr yet`);
+  if (failed) throw new Error(`${failed} of ${uniqueUrls.length} files are not on jsDelivr yet`);
   const result = await net.post(`${TITLES_URL}/pointer`, { c: commit, f: state.index });
-  console.log(`warmed ${urls.length} files; pointer -> ${commit.slice(0, 12)} ${state.index}`);
+  log(`warmed ${uniqueUrls.length} files; pointer -> ${commit.slice(0, 12)} ${state.index}`);
   return result;
+}
+
+// A failed warm happens after the data branch was pushed. Finish that release
+// before building another one, including when the source has not changed.
+export async function resumePublication(dir, commit, dataCommit, options) {
+  const state = await readState(dir);
+  if (!state.index) return false;
+  const pointerUrl = new URL("/storage/v1/object/public/index/pointer.json", TITLES_URL);
+  pointerUrl.searchParams.set("publish_check", String(net.now()));
+  let pointer = null;
+  try { pointer = await net.get(pointerUrl.href); }
+  catch (error) { if (!/\s404$/.test(error.message)) throw error; }
+  if (pointer?.c === commit && pointer?.f === state.index) return false;
+  await warmAndPoint(dir, commit, state.dataCommit || dataCommit, options);
+  return true;
 }
 
 function argument(name) {
@@ -331,6 +350,7 @@ async function main() {
   if (step === "data") await buildData(dir);
   else if (step === "index") console.log(await buildIndex(dir, argument("commit")));
   else if (step === "pointer") await warmAndPoint(dir, argument("commit"), argument("data-commit"));
+  else if (step === "resume") await resumePublication(dir, argument("commit"), argument("data-commit"));
   else throw new Error("step must be data, index or pointer");
 }
 

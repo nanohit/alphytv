@@ -15,6 +15,14 @@ on:
         description: "Read the whole listing, not just the newest pages"
         type: boolean
         default: false
+      budget_min:
+        description: "Run budget in minutes (1–45)"
+        type: number
+        default: 45
+      fill_limit:
+        description: "Maximum title-detail checks (1–300)"
+        type: number
+        default: 300
 
 permissions:
   contents: read
@@ -44,7 +52,9 @@ jobs:
           PUBLISH_TOKEN: ${{ secrets.SEARCH_PUBLISH_TOKEN }}
           FULL_INPUT: ${{ inputs.full }}
           EVENT: ${{ github.event_name }}
+          BUDGET_MIN: ${{ inputs.budget_min || 45 }}
+          FILL_LIMIT: ${{ inputs.fill_limit || 300 }}
         run: |
           full=""
           if [ "$FULL_INPUT" = "true" ]; then full="--full"; fi
-          node scripts/sync-titles.mjs --auto $full --fill 300 --budget-min 45
+          node scripts/sync-titles.mjs --auto $full --fill "$FILL_LIMIT" --budget-min "$BUDGET_MIN"

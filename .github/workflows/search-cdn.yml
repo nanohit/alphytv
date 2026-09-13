@@ -53,13 +53,24 @@ jobs:
         run: |
           remote="https://x-access-token:${TOKEN}@github.com/${REPO}.git"
           if git ls-remote --exit-code --heads "$remote" search-cdn >/dev/null; then
-            git clone -q --depth 1 --branch search-cdn "$remote" data
+            git clone -q --depth 2 --branch search-cdn "$remote" data
           else
             git init -q -b search-cdn data
             git -C data remote add origin "$remote"
           fi
           git -C data config user.name "github-actions[bot]"
           git -C data config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Finish any interrupted publication before reading new data
+        env:
+          PUBLISH_TOKEN: ${{ secrets.SEARCH_PUBLISH_TOKEN }}
+        run: |
+          if git -C data rev-parse --verify HEAD >/dev/null 2>&1; then
+            index_commit=$(git -C data rev-parse HEAD)
+            data_commit=$(git -C data rev-parse HEAD^ 2>/dev/null || git -C data rev-parse HEAD)
+            node app/scripts/publish-search-cdn.mjs resume --dir data \
+              --commit "$index_commit" --data-commit "$data_commit"
+          fi
 
       - name: Write the changed data files
         env:

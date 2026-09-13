@@ -27,6 +27,16 @@ try {
   await query(`set search_path = ${schema};\n${definitions.join("\n")}`);
   checks.push("all SQL definitions compile");
 
+  const refreshers = await Promise.all(Array.from({ length: 8 }, () => query(`select ${schema}.kp_key_snapshot_read() as result`)));
+  assert.equal(refreshers.filter((r) => r[0].result.refresh).length, 1);
+  await query(`select ${schema}.kp_key_snapshot_write(4, '[]'::jsonb)`);
+  const [{ snapshot }] = await query(`select ${schema}.kp_key_snapshot_write(3, '[{"id":"test","value":"test"}]'::jsonb) as snapshot`);
+  assert.deepEqual(snapshot, { revision: 4, keys: [] });
+  const [permissions] = await query(`select has_function_privilege('anon','${schema}.kp_key_snapshot_read()','EXECUTE') as anon,
+    has_function_privilege('authenticated','${schema}.kp_key_snapshot_read()','EXECUTE') as authenticated`);
+  assert.deepEqual(permissions, { anon: false, authenticated: false });
+  checks.push("one shared key refresher; old snapshots cannot restore removed keys; viewer roles have no access");
+
   const reservations = await Promise.all(Array.from({ length: 20 }, () => query(
     `select ${schema}.kp_reserve_key(array['key-a','key-b'], current_date, 3) as key`)));
   assert.equal(reservations.filter((r) => r[0].key).length, 6);

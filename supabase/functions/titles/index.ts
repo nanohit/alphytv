@@ -78,14 +78,24 @@ async function publish(route: string, url: URL, req: Request) {
   if (route === "/sync-state") {
     const endpoint = `${Deno.env.get("SUPABASE_URL")}/rest/v1/titles_sync_state`;
     if (req.method === "GET") {
-      const r = await fetch(`${endpoint}?id=eq.lift&select=last_full_at`, { headers: HEADERS });
+      const r = await fetch(`${endpoint}?id=eq.lift&select=last_full_at,next_full_page,full_started_at`, { headers: HEADERS });
       if (!r.ok) return json({ error: "state unavailable" }, 502);
       return json((await r.json())[0] || { last_full_at: null });
     }
     if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+    const body = await req.json().catch(() => null);
+    if (!body || typeof body !== "object") return json({ error: "bad state" }, 400);
+    const completed = body.completed === true || !Object.hasOwn(body, "next_full_page");
+    const page = Number(body.next_full_page);
+    if (!completed && (!Number.isInteger(page) || page < 1 || page > 100000 || !ISO_RE.test(String(body.full_started_at || "")))) {
+      return json({ error: "bad checkpoint" }, 400);
+    }
+    const state = completed
+      ? { id: "lift", last_full_at: ISO_RE.test(String(body.full_started_at || "")) ? body.full_started_at : new Date().toISOString(), next_full_page: 1, full_started_at: null }
+      : { id: "lift", next_full_page: page, full_started_at: body.full_started_at };
     const r = await fetch(`${endpoint}?on_conflict=id`, { method: "POST",
       headers: { ...HEADERS, Prefer: "resolution=merge-duplicates" },
-      body: JSON.stringify({ id: "lift", last_full_at: new Date().toISOString() }) });
+      body: JSON.stringify(state) });
     return r.ok ? json({ ok: true }) : json({ error: "state unavailable" }, 502);
   }
   // The catalogue sync job (scripts/sync-titles.mjs): a page of the source's

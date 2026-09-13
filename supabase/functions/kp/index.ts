@@ -20,6 +20,8 @@
 // The objects keep the provider's own shape (staff trimmed to the two
 // professions the site reads), so the browser's normalisers are unchanged.
 
+import { createKeyLoader } from "./key-pool.ts";
+
 export const KINDS = ["film", "staff", "similars", "search"];
 
 // Objects are spread over three projects in three organisations: each has its
@@ -293,48 +295,41 @@ if (typeof Deno !== "undefined") {
   try { hostKeys = JSON.parse(Deno.env.get("KP_HOST_KEYS") ?? "{}"); } catch { hostKeys = {}; }
   hostKeys[self] = SERVICE_KEY;
 
-  let keysPromise: Promise<Key[]> | null = null;
-  let keysAt = 0;
-  const keys = () => {
-    if (keysPromise && Date.now() - keysAt < 5 * 60e3) return keysPromise;
-    const previous = keysPromise;
-    keysAt = Date.now();
-    keysPromise = (async () => {
-      const token = Deno.env.get("ALPHY_KEY_POOL_TOKEN");
-      let values: string[];
-      if (token) {
-        try {
-          const r = await fetch("https://alphy.tv/api/key-pool/runtime", {
-            headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000),
-          });
-          if (!r.ok) throw new Error("pool unavailable");
-          const payload = await r.json();
-          if (!Array.isArray(payload?.pool?.keys)) throw new Error("invalid pool");
-          values = payload.pool.keys.filter((entry: any) => entry.provider === "unofficial").map((entry: any) => entry.value);
-        } catch {
-          if (previous) return previous;
-          throw new Error("managed key pool unavailable");
-        }
-      } else values = String(Deno.env.get("KU_KEYS") ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-      return Promise.all([...new Set(values)].map(async (value) => ({ id: await keyIdOf(value), value })));
-    })();
-    keysPromise.catch(() => { keysAt = 0; });
-    return keysPromise;
+  const rpc = async (name: string, args: Record<string, unknown>) => {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, {
+      method: "POST", headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify(args), signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) throw new Error(`rpc ${name} ${response.status}`);
+    return response.status === 204 ? null : response.json();
   };
+  const keys = createKeyLoader({
+    rpc,
+    background: (promise) => {
+      const runtime = (globalThis as any).EdgeRuntime;
+      if (runtime?.waitUntil) runtime.waitUntil(promise);
+    },
+    async loadManaged() {
+      const token = Deno.env.get("ALPHY_KEY_POOL_TOKEN");
+      let values: string[], revision = 0;
+      if (token) {
+        const r = await fetch("https://alphy.tv/api/key-pool/runtime", {
+          headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000),
+        });
+        if (!r.ok) throw new Error("managed pool unavailable");
+        const payload = await r.json();
+        if (!Array.isArray(payload?.pool?.keys) || !Number.isInteger(payload.pool.revision)) throw new Error("invalid managed pool");
+        revision = payload.pool.revision;
+        values = payload.pool.keys.filter((entry: any) => entry.provider === "unofficial").map((entry: any) => entry.value);
+      } else values = String(Deno.env.get("KU_KEYS") ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+      return { revision, keys: await Promise.all([...new Set(values)].map(async (value) => ({ id: await keyIdOf(value), value }))) };
+    },
+  });
 
   const handle = createKpHandler({
     token: Deno.env.get("KP_BROKER_TOKEN") || "unconfigured-deny-all",
     keys,
-    async rpc(name, args) {
-      const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, {
-        method: "POST",
-        headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify(args),
-        signal: AbortSignal.timeout(5000),
-      });
-      if (!response.ok) throw new Error(`rpc ${name} ${response.status}`);
-      return response.status === 204 ? null : response.json();
-    },
+    rpc,
     async putObject(host, path, body, maxAgeSeconds) {
       const key = hostKeys[host];
       if (!key) throw new Error(`no key for ${host}`);

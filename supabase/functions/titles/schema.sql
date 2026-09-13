@@ -67,6 +67,8 @@ create index if not exists titles_next_check on titles (next_check_at, id) where
 create table if not exists public.titles_sync_state (
   id text primary key check (id = 'lift'), last_full_at timestamptz
 );
+alter table public.titles_sync_state add column if not exists next_full_page integer not null default 1;
+alter table public.titles_sync_state add column if not exists full_started_at timestamptz;
 alter table public.titles_sync_state enable row level security;
 revoke all on public.titles_sync_state from anon, authenticated;
 

@@ -16,6 +16,10 @@
 - `/api/client-key-pool` returns an empty compatibility envelope. The browser
   reads shared Storage objects and asks Deno `/kp` for misses. Deno coalesces
   requests before the private Supabase broker, which owns the shared quota.
+- The broker keeps one private working KU snapshot in its own PostgreSQL project.
+  Viewer roles cannot access it. A single background refresher updates it from
+  the encrypted administrative registry through the authenticated runtime endpoint;
+  revision checks prevent an older refresh from restoring removed keys.
 
 ## One-time Deno link
 
