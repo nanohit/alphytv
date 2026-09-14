@@ -10234,6 +10234,20 @@ addEventListener('message', async (event) => {
     return { key: cdnEntryKey(entry), rows: applySearchDelta(base, delta) };
   }
 
+  // A part is cut from its letter's base when the base is rebuilt, so the
+  // letter's delta goes on top: every upsert and removal takes its slug out, and
+  // only the upserts with a word under this prefix come back in — the same rule
+  // the publisher files a row by.
+  function applyPrefixDelta(part, delta, prefix) {
+    const upserts = Array.isArray(delta?.u) ? delta.u : [];
+    const removes = Array.isArray(delta?.r) ? delta.r : [];
+    if (!upserts.length && !removes.length) return part;
+    const replaced = new Set([...removes, ...upserts.map((row) => row[2])]);
+    const filed = (row) => [row[0], row[6]].some((value) => suggestFold(value).split(" ")
+      .some((word) => [...word].length >= 3 && [...word].slice(0, 3).join("") === prefix));
+    return part.filter((row) => !replaced.has(row[2])).concat(upserts.filter(filed));
+  }
+
   const prefixRows = new Map();
   const prefixLoads = new Map();
   async function loadSearchRows(query) {
@@ -10252,8 +10266,12 @@ addEventListener('message', async (event) => {
       const pending = (async () => {
         const manifest = await immutableCdnFile(index.commit, entry[5], 5000);
         const part = manifest[prefix];
-        const rows = part ? await immutableCdnFile(part[1], part[0], 8000) : [];
-        if (!Array.isArray(rows)) throw new Error("bad prefix shard");
+        const [partRows, delta] = await Promise.all([
+          part ? immutableCdnFile(part[1], part[0], 8000) : [],
+          entry[3] ? immutableCdnFile(entry[4], entry[3], 8000) : null,
+        ]);
+        if (!Array.isArray(partRows)) throw new Error("bad prefix shard");
+        const rows = applyPrefixDelta(partRows, delta, prefix);
         prefixRows.set(prefix, rows);
         if (prefixRows.size > 32) prefixRows.delete(prefixRows.keys().next().value);
         return rows;

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { makeSandbox, sleep } from "./helpers/app-sandbox.js";
@@ -63,6 +63,28 @@ test("a cold long prefix downloads its small partition, never the giant letter",
   });
   assert.equal((await app.loadSearchRows("пираты"))[0][2], "piraty");
   assert.ok(asked.every((url) => !url.includes("/b/") && !url.includes("/index/v3/")));
+});
+
+test("the letter's delta is laid over a part by the rule the part was cut by", async () => {
+  const entry = [`b/${P}.1111111111111111.json`, C1, 20000, `d/${P}.2222222222222222.json`, C2, "i/3333333333333333.json"];
+  const renamed = ["Пекло", 2026, "was-pirate", 0, 1, "", "Hell"];
+  const { app, asked } = await boot({
+    [POINTER]: { v: 1, c: C2, f: "i/0123456789abcdef.json" },
+    [cdn(C2, "i/0123456789abcdef.json")]: { v: 1, l: { [P]: entry } },
+    [cdn(C2, "i/3333333333333333.json")]: { пир: ["p/4444444444444444.json", C1, 3] },
+    [cdn(C1, "p/4444444444444444.json")]: [
+      row("Пираты", 2003, "piraty"), row("Пирамида", 2014, "gone"), ["Старое имя", 1, "was-pirate", 0, 1, "", "Пир"],
+    ],
+    [cdn(C2, `d/${P}.2222222222222222.json`)]: {
+      u: [row("Пираты", 2003, "piraty", "4374"), ["The Pier", 2026, "pier", 0, 1, "", "Пирс"], renamed],
+      r: ["gone"],
+    },
+  });
+  const rows = plain(await app.loadSearchRows("пир"));
+  assert.deepEqual(rows.map((r) => r[2]).sort(), ["pier", "piraty"],
+    "a removal leaves, an original-title word files a new row, a renamed row leaves the prefix");
+  assert.equal(rows.find((r) => r[2] === "piraty")[5], "4374", "the delta's version of a title wins");
+  assert.ok(asked.every((url) => !url.includes("/b/")), "still without the giant letter");
 });
 
 test("a delta replaces titles by slug, drops the ones that left, and adds the new", async () => {
@@ -247,11 +269,101 @@ test("a delta that outgrows its letter triggers a rebuild, and the old files lea
 test("the search publisher workflow commits data before the index that names it", async () => {
   const workflow = await readFile(new URL("../.github/workflows/search-cdn.yml", import.meta.url), "utf8");
   const data = workflow.indexOf("publish-search-cdn.mjs data");
+  const partsPush = workflow.indexOf("HEAD:search-cdn-parts");
   const index = workflow.indexOf("publish-search-cdn.mjs index");
   const pointer = workflow.indexOf("publish-search-cdn.mjs pointer");
-  assert.ok(data > 0 && index > data && pointer > index);
+  assert.ok(data > 0 && partsPush > data && index > partsPush && pointer > index);
+  assert.match(workflow, /--parts-dir parts/);
+  assert.match(workflow, /--parts-commit "\$parts_commit"/);
   assert.match(workflow, /SEARCH_PUBLISH_TOKEN/);
   assert.doesNotMatch(workflow, /force/i, "history is appended, never rewritten: old commits stay readable");
+});
+
+// jsDelivr answers 403 "Package size exceeded" for files of a commit whose tree
+// is over 50 MB. Bases alone are 35 MB and parts another 32, so parts get a
+// tree of their own, and they are cut when the base is — not on every delta,
+// which once added 1,650 files to a single hourly publish.
+const bigLetter = (count, extra = []) => Array.from({ length: count }, (_, i) => [`Коко ${i}`, 2017, `koko-${i}`, 0, i + 1, "", i % 2 ? "Coco" : ""]).concat(extra);
+
+test("parts are cut from the base into their own tree, and a delta alone leaves them untouched", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "search-data-"));
+  const partsDir = await mkdtemp(path.join(os.tmpdir(), "search-parts-"));
+  const P3 = "c".repeat(40);
+  const oldPost = net.post;
+  try {
+    fakeTitles({ letters: ["к"], bases: { к: bigLetter(2001) } });
+    const first = await buildData(dir, { partsDir, log: () => {} });
+    assert.ok(first.partsWritten > 0);
+    assert.deepEqual((await readdir(dir)).sort(), ["b", "state.json"], "no part in the data tree");
+    assert.ok((await readdir(path.join(partsDir, "p"))).length > 0);
+    await buildIndex(dir, C1, C2);
+    const state = JSON.parse(await readFile(path.join(dir, "state.json"), "utf8"));
+    assert.equal(state.layout, 2);
+    assert.equal(state.partsCommit, C2);
+    assert.ok(Object.values(state.letters[codepoint("к")].parts).every((part) => part[1] === C2), "parts are pinned to the parts commit");
+    assert.equal(state.letters[codepoint("к")].bc, C1);
+
+    const at = new Date(Date.parse(state.cursor.after_at) + 60e3).toISOString();
+    fakeTitles({ letters: ["к"], bases: {}, changes: [["Коко 1", 2017, "koko-1", 0, 2, "301", "Coco", ["к", "c"], at, 50]] });
+    const partsBefore = await readdir(path.join(partsDir, "p"));
+    const second = await buildData(dir, { partsDir, log: () => {} });
+    assert.equal(second.rebased, 0);
+    assert.equal(second.partsWritten, 0, "a changed title touches the delta file alone");
+    assert.deepEqual(await readdir(path.join(partsDir, "p")), partsBefore);
+    await buildIndex(dir, P3, "");
+    const next = JSON.parse(await readFile(path.join(dir, "state.json"), "utf8"));
+    assert.equal(next.partsCommit, null, "nothing new in the parts tree, nothing of it to warm");
+    assert.equal(next.letters[codepoint("к")].dc, P3);
+
+    const warmed = [];
+    net.post = async () => ({ ok: true });
+    await warmAndPoint(dir, "d".repeat(40), P3, { fetcher: async (url) => { warmed.push(url); return new Response("{}"); }, log: () => {} });
+    assert.ok(!warmed.some((url) => url.includes("/p/")), "parts already warmed are not fetched again");
+    assert.ok(warmed.some((url) => url.includes("/d/")));
+  } finally {
+    net.post = oldPost;
+    await rm(dir, { recursive: true, force: true });
+    await rm(partsDir, { recursive: true, force: true });
+  }
+});
+
+test("a layout-1 release is re-pinned whole, and its parts leave the data tree", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "search-data-"));
+  const partsDir = await mkdtemp(path.join(os.tmpdir(), "search-parts-"));
+  try {
+    fakeTitles({ letters: ["к", "л"], bases: { к: bigLetter(2001), л: [row("Лес", 2001, "les")] } });
+    await buildData(dir, { log: () => {} });
+    await buildIndex(dir, C1);
+    const old = JSON.parse(await readFile(path.join(dir, "state.json"), "utf8"));
+    delete old.layout;
+    await writeFile(path.join(dir, "state.json"), JSON.stringify(old));
+    assert.ok((await readdir(path.join(dir, "p"))).length > 0, "layout 1 kept parts beside the bases");
+    assert.equal(await resumePublication(dir, C2, C1, { fetcher: () => assert.fail("a layout-1 release is not resumed"), log: () => {} }), false);
+
+    fakeTitles({ letters: ["к", "л"], bases: {} });
+    const summary = await buildData(dir, { partsDir, log: () => {} });
+    assert.equal(summary.migrated, true);
+    assert.equal(summary.rebased, 0, "no base is read again");
+    const state = JSON.parse(await readFile(path.join(dir, "state.json"), "utf8"));
+    assert.ok(Object.values(state.letters).every((entry) => entry.bc === "pending"), "every base is pinned anew");
+    assert.ok(Object.values(state.letters[codepoint("к")].parts).every((part) => part[1] === "pending"));
+    assert.deepEqual(await readdir(path.join(dir, "p")), [], "the data tree sheds its parts");
+    assert.ok((await readdir(path.join(partsDir, "p"))).length > 0);
+    await assert.rejects(buildIndex(dir, C2, ""), /parts commit/, "pending parts cannot be pinned to no commit");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    await rm(partsDir, { recursive: true, force: true });
+  }
+});
+
+test("a tree jsDelivr would refuse fails the run instead of the release", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "search-data-"));
+  try {
+    fakeTitles({ letters: ["к"], bases: { к: bigLetter(50) } });
+    await assert.rejects(buildData(dir, { limitBytes: 100, log: () => {} }), /over 50 MB/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("a failed CDN warm resumes the same release before a new snapshot can replace it", async () => {
@@ -264,9 +376,12 @@ test("a failed CDN warm resumes the same release before a new snapshot can repla
     const index = await buildIndex(dir, C1);
     let pointed = 0, published = null;
     net.post = async (url, value) => { pointed += 1; published = value; return { ok: true }; };
+    const tried = [];
     await assert.rejects(warmAndPoint(dir, C2, C1, {
-      fetcher: async () => new Response("", { status: 503 }), log: () => {},
-    }), /not on jsDelivr/);
+      fetcher: async (url) => { tried.push(url); return new Response("Package size exceeded", { status: 403 }); },
+      log: () => {}, sleep: async () => {},
+    }), /not on jsDelivr yet; first failure: 403 Package size exceeded/);
+    assert.equal(tried.length, 3 * new Set(tried).size, "every failed file is tried three times, not more");
     assert.equal(pointed, 0, "failed files are never announced");
     net.get = async () => published;
     const asked = [];

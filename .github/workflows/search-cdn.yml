@@ -32,7 +32,8 @@ jobs:
     # those rows without hiding the sync failure itself. Cancelled runs stay out.
     if: github.event_name != 'workflow_run' || contains(fromJSON('["success","failure"]'), github.event.workflow_run.conclusion)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A layout change re-pins every file once: about 8,000 to warm.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -47,21 +48,27 @@ jobs:
         with:
           node-version: 24
 
-      - name: Check out the data branch, or start it
+      # Two branches, because jsDelivr refuses a commit whose tree is over 50 MB:
+      # `search-cdn` holds bases, deltas and indexes; `search-cdn-parts` the
+      # prefix parts of the big letters.
+      - name: Check out the data branches, or start them
         shell: bash
         env:
           REPO: ${{ github.repository }}
           TOKEN: ${{ github.token }}
         run: |
           remote="https://x-access-token:${TOKEN}@github.com/${REPO}.git"
-          if git ls-remote --exit-code --heads "$remote" search-cdn >/dev/null; then
-            git clone -q --depth 2 --branch search-cdn "$remote" data
-          else
-            git init -q -b search-cdn data
-            git -C data remote add origin "$remote"
-          fi
-          git -C data config user.name "github-actions[bot]"
-          git -C data config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for pair in "search-cdn data" "search-cdn-parts parts"; do
+            set -- $pair
+            if git ls-remote --exit-code --heads "$remote" "$1" >/dev/null; then
+              git clone -q --depth 2 --branch "$1" "$remote" "$2"
+            else
+              git init -q -b "$1" "$2"
+              git -C "$2" remote add origin "$remote"
+            fi
+            git -C "$2" config user.name "github-actions[bot]"
+            git -C "$2" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          done
 
       - name: Finish any interrupted publication before reading new data
         env:
@@ -77,15 +84,21 @@ jobs:
       - name: Write the changed data files
         env:
           PUBLISH_TOKEN: ${{ secrets.SEARCH_PUBLISH_TOKEN }}
-        run: node app/scripts/publish-search-cdn.mjs data --dir data
+        run: node app/scripts/publish-search-cdn.mjs data --dir data --parts-dir parts
 
-      # Data first, then the index that names the data commit, then the pointer
-      # that names the index commit — each only once the thing it names exists.
+      # Parts and data first, then the index that names their commits, then the
+      # pointer that names the index commit — each only once the thing it names exists.
       - name: Commit, index, warm and point
         shell: bash
         env:
           PUBLISH_TOKEN: ${{ secrets.SEARCH_PUBLISH_TOKEN }}
         run: |
+          git -C parts add -A
+          if ! git -C parts diff --cached --quiet; then
+            git -C parts commit -q -m "Search parts $(date -u +%Y-%m-%dT%H:%MZ)"
+            git -C parts push -q origin HEAD:search-cdn-parts
+          fi
+          parts_commit=$(git -C parts rev-parse --verify -q HEAD || true)
           cd data
           git add -A
           if git diff --cached --quiet; then
@@ -94,7 +107,7 @@ jobs:
           fi
           git commit -q -m "Search data $(date -u +%Y-%m-%dT%H:%MZ)"
           data_commit=$(git rev-parse HEAD)
-          node ../app/scripts/publish-search-cdn.mjs index --dir . --commit "$data_commit"
+          node ../app/scripts/publish-search-cdn.mjs index --dir . --commit "$data_commit" --parts-commit "$parts_commit"
           git add -A
           git commit -q -m "Search index $(date -u +%Y-%m-%dT%H:%MZ)"
           git push -q origin HEAD:search-cdn

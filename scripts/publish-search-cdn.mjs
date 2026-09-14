@@ -13,8 +13,8 @@
 // branch, in three steps, because an index can only name the commit its files
 // are in once that commit exists:
 //
-//   node publish-search-cdn.mjs data    --dir <checkout>
-//   node publish-search-cdn.mjs index   --dir <checkout> --commit <data commit>
+//   node publish-search-cdn.mjs data    --dir <checkout> --parts-dir <parts checkout>
+//   node publish-search-cdn.mjs index   --dir <checkout> --commit <data commit> --parts-commit <parts commit>
 //   node publish-search-cdn.mjs pointer --dir <checkout> --commit <index commit> --data-commit <data commit>
 //
 // Files never change once written, so a browser keeps a letter it already has
@@ -22,8 +22,15 @@
 // past a tenth of it (at least 200 rows), or once it is a week old; otherwise
 // a changed title costs every returning visitor a few hundred bytes, not the
 // whole letter again.
+//
+// The prefix parts of a big letter are cut from its base when the base is
+// rebuilt, and the browser lays the letter's delta over them. They live on a
+// branch of their own, `search-cdn-parts`: jsDelivr refuses every file of a
+// commit whose tree is over 50 MB, and bases plus parts are about 70. While the
+// parts were rewritten from base + delta on every run, one publish added 1,650
+// files and some of them answered 403 "Package size exceeded".
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -54,6 +61,13 @@ export function partitionRows(rows, letter) {
 const REBASE_AGE_MS = 7 * DAY_MS;
 const AGE_REBASES_PER_RUN = 10;
 const KEEP_INDEXES = 4;
+// 2: parts on their own branch, cut from the base only. A state from before is
+// re-pinned whole on its next run.
+export const LAYOUT = 2;
+// jsDelivr's limit is 50 MB a commit; the margin is for a catalogue that grows.
+export const PACKAGE_LIMIT_BYTES = 45 * 1024 * 1024;
+const WARM_CONCURRENCY = 16;
+const WARM_RETRY_MS = [10_000, 30_000];
 
 export const hash16 = (text) => createHash("sha256").update(text).digest("hex").slice(0, 16);
 export const codepoint = (letter) => letter.codePointAt(0).toString(16);
@@ -150,9 +164,24 @@ async function writeFileOnce(dir, name, body) {
   }
 }
 
-export async function buildData(dir, { log = console.log } = {}) {
+// What a commit of this tree would weigh, as jsDelivr counts it.
+async function treeBytes(root) {
+  let total = 0;
+  for (const folder of ["b", "d", "i", "p"]) {
+    let names = [];
+    try { names = await readdir(path.join(root, folder)); } catch { names = []; }
+    for (const name of names) total += (await stat(path.join(root, folder, name))).size;
+  }
+  return total;
+}
+
+export async function buildData(dir, { partsDir = dir, limitBytes = PACKAGE_LIMIT_BYTES, log = console.log } = {}) {
   const state = await readState(dir);
   const now = net.now();
+  // A release from before layout 2 named parts in this tree, and bases and
+  // deltas in commits jsDelivr may refuse. Every file is pinned again, to
+  // commits it can serve; the file names stay, so browsers keep their copies.
+  const migrate = Object.keys(state.letters || {}).length > 0 && state.layout !== LAYOUT;
   const { letters } = await net.get(`${TITLES_URL}/letters`, { auth: true });
   const wanted = [...new Set(letters.filter(single))];
 
@@ -186,9 +215,11 @@ export async function buildData(dir, { log = console.log } = {}) {
   let rebased = 0;
   let written = 0;
   let earliestBase = null;
+  let partsWritten = 0;
   for (const plan of plans) {
     let entry = plan.entry;
     let delta = plan.delta;
+    let baseRows = null;
     if (plan.rebase) {
       const startedAt = net.now();
       const rows = await net.get(`${TITLES_URL}?i=${encodeURIComponent(plan.letter)}`);
@@ -201,14 +232,17 @@ export async function buildData(dir, { log = console.log } = {}) {
       entry = {
         letter: plan.letter,
         b: file,
-        bc: plan.entry?.b === file ? plan.entry.bc : "pending",
+        bc: plan.entry?.b === file && !migrate ? plan.entry.bc : "pending",
         n: rows.length,
         s,
         rebased: new Date(startedAt).toISOString(),
       };
+      baseRows = rows;
       // What changed while the base was being read is shipped on top of it.
       delta = mergeDelta(null, plan.letter, s, changes, removed);
       rebased += 1;
+    } else if (migrate) {
+      entry = { ...entry, bc: "pending" };
     }
     let d = null;
     let dc = null;
@@ -216,21 +250,23 @@ export async function buildData(dir, { log = console.log } = {}) {
       const body = JSON.stringify(delta);
       d = `d/${plan.cp}.${hash16(body)}.json`;
       if (await writeFileOnce(dir, d, body)) written += 1;
-      dc = plan.entry?.d === d ? plan.entry.dc : "pending";
+      dc = plan.entry?.d === d && !migrate ? plan.entry.dc : "pending";
     }
-    let parts = null;
-    if (entry.n >= PREFIX_THRESHOLD) {
-      const base = await readJson(dir, entry.b);
-      const replaced = new Set([...delta.r, ...delta.u.map((row) => row[2])]);
-      const rows = base.filter((row) => !replaced.has(row[2])).concat(delta.u);
+    // Parts follow the base, not the delta: between rebuilds a changed title
+    // touches the delta file alone, however many prefixes it is filed under.
+    const wantParts = entry.n >= PREFIX_THRESHOLD;
+    let parts = plan.rebase || migrate ? null : plan.entry?.parts || null;
+    if (wantParts && !parts) {
       parts = {};
-      for (const [prefix, values] of partitionRows(rows, plan.letter)) {
+      for (const [prefix, values] of partitionRows(baseRows || await readJson(dir, entry.b), plan.letter)) {
         const body = JSON.stringify(values);
         const file = `p/${hash16(body)}.json`;
-        if (await writeFileOnce(dir, file, body)) written += 1;
+        if (await writeFileOnce(partsDir, file, body)) partsWritten += 1;
         const old = plan.entry?.parts?.[prefix];
-        parts[prefix] = [file, old?.[0] === file ? old[1] : "pending", values.length];
+        parts[prefix] = [file, old?.[0] === file && !migrate ? old[1] : "pending", values.length];
       }
+    } else if (!wantParts) {
+      parts = null;
     }
     next[plan.cp] = { letter: entry.letter, b: entry.b, bc: entry.bc, n: entry.n, s: entry.s, rebased: entry.rebased, d, dc, parts };
   }
@@ -240,37 +276,60 @@ export async function buildData(dir, { log = console.log } = {}) {
   // read an older index keeps working.
   const referenced = new Set(Object.values(next).flatMap((entry) => [entry.b, entry.d, ...Object.values(entry.parts || {}).map((p) => p[0])]).filter(Boolean));
   const keepIndexes = new Set((state.indexes || []).slice(-KEEP_INDEXES));
-  for (const folder of ["b", "d", "i", "p"]) {
-    let names = [];
-    try { names = await readdir(path.join(dir, folder)); } catch { names = []; }
-    for (const name of names) {
-      const file = `${folder}/${name}`;
-      if (folder === "i" ? !keepIndexes.has(file) : !referenced.has(file)) await rm(path.join(dir, file));
+  const trees = partsDir === dir ? [[dir, ["b", "d", "i", "p"]]] : [[dir, ["b", "d", "i", "p"]], [partsDir, ["p"]]];
+  for (const [root, folders] of trees) {
+    for (const folder of folders) {
+      let names = [];
+      try { names = await readdir(path.join(root, folder)); } catch { names = []; }
+      for (const name of names) {
+        const file = `${folder}/${name}`;
+        // A separate parts tree means no part belongs in the data tree.
+        const keep = folder === "i" ? keepIndexes.has(file)
+          : folder === "p" && root !== partsDir ? false
+            : referenced.has(file);
+        if (!keep) await rm(path.join(root, file));
+      }
     }
+  }
+  const sizes = [];
+  for (const [root] of trees) {
+    const bytes = await treeBytes(root);
+    sizes.push(`${path.basename(root)} ${(bytes / 1048576).toFixed(1)} MB`);
+    // Better a failed run than a release jsDelivr answers with 403 file by file.
+    if (bytes > limitBytes) throw new Error(`${root} would commit ${(bytes / 1048576).toFixed(1)} MB; jsDelivr refuses a commit over 50 MB`);
   }
   const last = changes[changes.length - 1];
   state.cursor = last
     ? { after_at: last[8], after_id: last[9] }
     : cursor || { after_at: earliestBase || new Date(now - BASE_MARGIN_MS).toISOString(), after_id: 0 };
+  state.layout = LAYOUT;
   state.letters = next;
   state.updated = new Date(now).toISOString();
   await writeFile(path.join(dir, "state.json"), `${JSON.stringify(state, null, 1)}\n`);
   const deltas = Object.values(next).filter((entry) => entry.d).length;
-  log(`letters ${wanted.length}, rebased ${rebased}, deltas ${deltas}, new files ${written}, changes read ${changes.length}`);
-  return { rebased, written, letters: wanted.length, deltas, changes: changes.length };
+  log(`letters ${wanted.length}, rebased ${rebased}${migrate ? " (layout migration)" : ""}, deltas ${deltas}, new files ${written}, new parts ${partsWritten}, changes read ${changes.length}; ${sizes.join(", ")}`);
+  return { rebased, written, partsWritten, migrated: migrate, letters: wanted.length, deltas, changes: changes.length };
 }
 
-export async function buildIndex(dir, commit) {
+// `partsCommit` is the head of the parts branch; with no separate parts tree it
+// is the data commit itself.
+export async function buildIndex(dir, commit, partsCommit = commit) {
   if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error("index needs the data commit");
   const state = await readState(dir);
   const l = {};
+  let freshParts = false;
   for (const cp of Object.keys(state.letters).sort()) {
     const entry = state.letters[cp];
     if (entry.bc === "pending") entry.bc = commit;
     if (entry.dc === "pending") entry.dc = commit;
     l[cp] = [entry.b, entry.bc, entry.n, entry.d, entry.dc];
     if (entry.parts) {
-      for (const part of Object.values(entry.parts)) if (part[1] === "pending") part[1] = commit;
+      for (const part of Object.values(entry.parts)) {
+        if (part[1] !== "pending") continue;
+        if (!/^[0-9a-f]{40}$/.test(partsCommit)) throw new Error("index needs the parts commit");
+        part[1] = partsCommit;
+        freshParts = true;
+      }
       const partBody = JSON.stringify(entry.parts);
       const partFile = `i/${hash16(partBody)}.json`;
       await writeFileOnce(dir, partFile, partBody);
@@ -283,6 +342,8 @@ export async function buildIndex(dir, commit) {
   await writeFileOnce(dir, file, body);
   state.index = file;
   state.dataCommit = commit;
+  // Which parts this release added, so only those are warmed.
+  state.partsCommit = freshParts ? partsCommit : null;
   state.indexes = [...(state.indexes || []).filter((name) => name !== file), file].slice(-KEEP_INDEXES);
   await writeFile(path.join(dir, "state.json"), `${JSON.stringify(state, null, 1)}\n`);
   return file;
@@ -290,7 +351,9 @@ export async function buildIndex(dir, commit) {
 
 // Each new file is requested once through jsDelivr before any browser is told
 // about it, so the first visitor after a publish does not pay the trip to GitHub.
-export async function warmAndPoint(dir, commit, dataCommit, { fetcher = fetch, log = console.log } = {}) {
+export async function warmAndPoint(dir, commit, dataCommit, {
+  fetcher = fetch, log = console.log, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
   const state = await readState(dir);
   const urls = [`${CDN}${commit}/${state.index}`];
   const index = await readJson(dir, state.index);
@@ -299,27 +362,45 @@ export async function warmAndPoint(dir, commit, dataCommit, { fetcher = fetch, l
     if (entry.d && entry.dc === dataCommit) urls.push(`${CDN}${entry.dc}/${entry.d}`);
     const manifest = index.l[codepoint(entry.letter)]?.[5];
     if (manifest) urls.push(`${CDN}${commit}/${manifest}`);
-    for (const part of Object.values(entry.parts || {})) if (part[1] === dataCommit) urls.push(`${CDN}${part[1]}/${part[0]}`);
+    for (const part of Object.values(entry.parts || {})) {
+      if (state.partsCommit && part[1] === state.partsCommit) urls.push(`${CDN}${part[1]}/${part[0]}`);
+    }
   }
-  const uniqueUrls = [...new Set(urls)];
-  let failed = 0;
-  log(`warming ${uniqueUrls.length} unique files`);
-  for (let at = 0; at < uniqueUrls.length; at += 8) {
-    await Promise.all(uniqueUrls.slice(at, at + 8).map(async (url) => {
-      try {
-        const response = await fetcher(url, { signal: AbortSignal.timeout(60_000) });
-        if (!response.ok) failed += 1;
-        await response.arrayBuffer();
-      } catch {
-        failed += 1;
-      }
-    }));
-    if ((at + 8) % 256 === 0) log(`warmed ${Math.min(at + 8, uniqueUrls.length)}/${uniqueUrls.length}; failures ${failed}`);
+  const total = new Set(urls).size;
+  let pending = [...new Set(urls)];
+  let reason = "";
+  log(`warming ${total} unique files`);
+  // A miss is retried twice: jsDelivr's first trip to GitHub for a new commit
+  // sometimes times out, and a file that failed once is usually there a minute later.
+  for (let pass = 0; pending.length && pass <= WARM_RETRY_MS.length; pass += 1) {
+    if (pass) {
+      log(`retrying ${pending.length} files after ${WARM_RETRY_MS[pass - 1] / 1000}s; first failure: ${reason}`);
+      await sleep(WARM_RETRY_MS[pass - 1]);
+    }
+    const failed = [];
+    for (let at = 0; at < pending.length; at += WARM_CONCURRENCY) {
+      await Promise.all(pending.slice(at, at + WARM_CONCURRENCY).map(async (url) => {
+        try {
+          const response = await fetcher(url, { signal: AbortSignal.timeout(60_000) });
+          const body = await response.text();
+          if (!response.ok) {
+            failed.push(url);
+            reason ||= `${response.status} ${body.slice(0, 90)} (${url})`;
+          }
+        } catch (error) {
+          failed.push(url);
+          reason ||= `${error.name || error.message} (${url})`;
+        }
+      }));
+      const done = at + WARM_CONCURRENCY;
+      if (done % 512 === 0) log(`pass ${pass + 1}: ${Math.min(done, pending.length)}/${pending.length}; failures ${failed.length}`);
+    }
+    pending = failed;
   }
   // A file jsDelivr could not serve must not be announced.
-  if (failed) throw new Error(`${failed} of ${uniqueUrls.length} files are not on jsDelivr yet`);
+  if (pending.length) throw new Error(`${pending.length} of ${total} files are not on jsDelivr yet; first failure: ${reason}`);
   const result = await net.post(`${TITLES_URL}/pointer`, { c: commit, f: state.index });
-  log(`warmed ${uniqueUrls.length} files; pointer -> ${commit.slice(0, 12)} ${state.index}`);
+  log(`warmed ${total} files; pointer -> ${commit.slice(0, 12)} ${state.index}`);
   return result;
 }
 
@@ -327,7 +408,9 @@ export async function warmAndPoint(dir, commit, dataCommit, { fetcher = fetch, l
 // before building another one, including when the source has not changed.
 export async function resumePublication(dir, commit, dataCommit, options) {
   const state = await readState(dir);
-  if (!state.index) return false;
+  // A layout-1 release is not finished but replaced: its commits are over
+  // jsDelivr's limit, and the data step pins everything anew.
+  if (!state.index || state.layout !== LAYOUT) return false;
   const pointerUrl = new URL("/storage/v1/object/public/index/pointer.json", TITLES_URL);
   pointerUrl.searchParams.set("publish_check", String(net.now()));
   let pointer = null;
@@ -347,8 +430,13 @@ async function main() {
   const step = process.argv[2];
   const dir = path.resolve(argument("dir") || ".");
   if (!net.token) throw new Error("PUBLISH_TOKEN is required");
-  if (step === "data") await buildData(dir);
-  else if (step === "index") console.log(await buildIndex(dir, argument("commit")));
+  const partsDir = argument("parts-dir") ? path.resolve(argument("parts-dir")) : dir;
+  if (step === "data") await buildData(dir, { partsDir });
+  else if (step === "index") {
+    // Given but empty means the parts branch has no commit: pending parts then fail loudly.
+    const partsCommit = process.argv.includes("--parts-commit") ? argument("parts-commit") : argument("commit");
+    console.log(await buildIndex(dir, argument("commit"), partsCommit));
+  }
   else if (step === "pointer") await warmAndPoint(dir, argument("commit"), argument("data-commit"));
   else if (step === "resume") await resumePublication(dir, argument("commit"), argument("data-commit"));
   else throw new Error("step must be data, index or pointer");
