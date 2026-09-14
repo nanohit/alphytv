@@ -93,6 +93,11 @@ jobs:
         env:
           PUBLISH_TOKEN: ${{ secrets.SEARCH_PUBLISH_TOKEN }}
         run: |
+          # Vercel reads vercel.json from the pushed commit, not from main, so
+          # without this every data commit was built as a preview deployment.
+          for dir in data parts; do
+            [ -f "$dir/vercel.json" ] || echo '{"git":{"deploymentEnabled":false}}' > "$dir/vercel.json"
+          done
           git -C parts add -A
           if ! git -C parts diff --cached --quiet; then
             git -C parts commit -q -m "Search parts $(date -u +%Y-%m-%dT%H:%MZ)"
