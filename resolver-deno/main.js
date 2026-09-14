@@ -614,7 +614,13 @@ Deno.serve({ port: listenPort }, async (request, info) => {
     return keyPoolStatusResponse(request, { reload: true });
   }
 
-  await Promise.all([refreshKeyPool(false), loadKeyMetrics()]);
+  // Only /search, /movie and /recommendations spend provider keys. The rest
+  // start the refresh without waiting for it: on a fresh instance that wait is a
+  // round trip to Vercel and Supabase in front of its first resolve, and again
+  // in front of one request every five minutes.
+  const keysReady = Promise.all([refreshKeyPool(false), loadKeyMetrics()]);
+  if (url.pathname === "/search" || url.pathname === "/movie" || url.pathname.startsWith("/recommendations/")) await keysReady;
+  else keysReady.catch(() => {});
   if (request.method === "GET" && url.pathname === "/resolve-zona") {
     return handleResolveZonaCached(request, url);
   }
