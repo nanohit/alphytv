@@ -7,6 +7,7 @@ import { catalogRow, fillPending, fillRow, fullScanDue, net, syncCatalog, runSyn
 // pin how it treats the source — one request at a time, paced, stopping at the
 // first 429 — and that it recognises the end of a listing that never ends.
 
+const requestTitles = net.titles;
 const item = (id, year = 2026) => ({ id, name: `Тайтл ${id}`, year, type: 1, slug: `t-${id}`, rate: { kinopoisk: 7.1 } });
 
 function fake({ pages = [], total = 0, writes = () => ({ inserted: 0, updated: 0 }), views = {}, pending = [] } = {}) {
@@ -147,4 +148,31 @@ test("a delayed scheduled run still detects an overdue full scan", async () => {
   assert.equal(await fullScanDue(), false);
   net.titles = async () => ({ last_full_at: null });
   assert.equal(await fullScanDue(), true);
+});
+
+
+test("empty optional season preserves the real series card instead of stopping the run", async () => {
+  const calls = fake({ views: {
+    "nepriznanie|": { view: { id: 116625, kpId: "1294079", type: 3, originName: "Disclaimer" } },
+    "nepriznanie|1": { view: {} },
+  }, pending: [{ id: 116625, slug: "nepriznanie" }] });
+  const stats = await fillPending();
+  assert.equal(stats.filled, 1); assert.equal(stats.failed, 0); assert.equal(stats.stoppedBy, "");
+  const row = calls.titles.find(c => c.route === "/fill").body[0];
+  assert.equal(row.kp, "1294079"); assert.equal(row.origin_name, "Disclaimer");
+  assert.equal(row.is_series, true); assert.equal(row.embed_id, null);
+});
+
+
+test("transient catalogue gateway failures retry, but non-idempotent fill is never replayed", async (t) => {
+  net.sleep = async () => {};
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => ++calls === 1
+    ? new Response("temporary", { status: 502 })
+    : new Response(JSON.stringify({ inserted: 1 }), { status: 200 }));
+  assert.equal((await requestTitles("/catalog", [{ id: 1 }])).inserted, 1);
+  assert.equal(calls, 2);
+  calls = 0;
+  await assert.rejects(requestTitles("/fill", [{ id: 1, failed: true }]), /502/);
+  assert.equal(calls, 1);
 });

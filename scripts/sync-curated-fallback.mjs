@@ -1,13 +1,21 @@
 import { mkdir, writeFile } from "node:fs/promises";
 
-const blobUrl =
+const snapshotUrl =
   process.env.ALPHY_CATALOG_SNAPSHOT_URL ||
   "https://alphy.tv/api/catalog-snapshot";
 
-const response = await fetch(`${blobUrl}?snapshot=${Date.now()}`, {
-  cache: "no-store",
-});
-if (!response.ok) throw new Error(`Catalog download failed: ${response.status}`);
+let response;
+for (let attempt = 0; attempt < 3; attempt += 1) {
+  try {
+    response = await fetch(`${snapshotUrl}?snapshot=${Date.now()}`, {
+      cache: "no-store", signal: AbortSignal.timeout(20000),
+    });
+    if (response.ok || ![502, 503, 504].includes(response.status)) break;
+    await response.arrayBuffer();
+  } catch (error) { if (attempt === 2) throw error; }
+  if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 2000 * (attempt + 1)));
+}
+if (!response?.ok) throw new Error(`Catalog download failed: ${response?.status}`);
 
 const catalog = await response.json();
 if (!Array.isArray(catalog?.lists) || !Number.isInteger(Number(catalog?.revision))) {

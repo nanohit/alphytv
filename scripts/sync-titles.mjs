@@ -53,14 +53,32 @@ export const net = {
     return response.json();
   },
   async titles(route, body) {
-    const response = await fetch(`${TITLES_URL}${route}`, {
+    // Reads and catalogue upserts can safely repeat after an ambiguous timeout.
+    // /fill increments failure counters and /build mutates a queue: do not
+    // automatically replay those writes.
+    const attempts = body === undefined || route === "/catalog" || route === "/sync-state" ? 3 : 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+    let response;
+    try { response = await fetch(`${TITLES_URL}${route}`, {
       method: body === undefined ? "GET" : "POST",
       headers: { "x-publish-token": net.token, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(60_000),
-    });
-    if (!response.ok) throw new Error(`titles ${route} ${response.status} ${(await response.text()).slice(0, 200)}`);
+    }); } catch (error) {
+      if (attempt + 1 === attempts) throw error;
+      console.log(`titles retry ${attempt + 1}: ${route} network error`);
+      await net.sleep(2000 * (attempt + 1)); continue;
+    }
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 200);
+      if ([502, 503, 504].includes(response.status) && attempt + 1 < attempts) {
+        console.log(`titles retry ${attempt + 1}: ${route} ${response.status}`);
+        await net.sleep(2000 * (attempt + 1)); continue;
+      }
+      throw new Error(`titles ${route} ${response.status} ${detail}`);
+    }
     return response.json();
+    }
   },
 };
 
@@ -115,7 +133,7 @@ export async function syncCatalog({ full = false, deadline = Infinity, startPage
   return stats;
 }
 
-async function titleView(slug) {
+export async function titleView(slug) {
   const ask = (season) => net.source(`${VIEW}?${new URLSearchParams({
     slug, findBy: "init", all: "false", season, _format: "json",
   })}`, { soft: true });
@@ -123,7 +141,12 @@ async function titleView(slug) {
   // A series answers video:null until a season is named.
   if (!payload?.view?.video) {
     await net.sleep(SPACING_MS);
-    payload = (await ask("1")) ?? payload;
+    const season = await ask("1");
+    // Some series have metadata but no first-season page yet. Keep the valid
+    // initial response; an empty optional season is not an upstream outage.
+    if (season?.view && Object.keys(season.view).length) {
+      payload = { view: { ...payload?.view, ...season.view } };
+    }
   }
   if (!payload?.view || typeof payload.view !== "object" || !Object.keys(payload.view).length) throw new SoftError("empty title view");
   return payload.view;
@@ -139,7 +162,7 @@ export function fillRow(id, view) {
     kp,
     embed_id: embed,
     origin_name: String(view?.originName || ""),
-    is_series: !!(view?.season || view?.seasonLast),
+    is_series: !!(view?.season || view?.seasonLast) || [3, 4, 5].includes(Number(view?.type)),
   };
 }
 
@@ -178,6 +201,7 @@ export async function fillPending({ limit = 300, deadline = Infinity } = {}) {
         }
         batch.push({ id: row.id, failed: true });
         stats.failed += 1;
+        console.log(`fill failed: id=${row.id} slug=${row.slug} reason=${error.message}`);
         // Scattered bad rows are normal; a run of them means the source is unhappy.
         if (++softStreak >= SOFT_STREAK_LIMIT) {
           stats.stoppedBy = "five failures in a row";

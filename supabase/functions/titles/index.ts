@@ -366,7 +366,10 @@ Deno.serve(async (req) => {
       // A series answers with video:null until a season is named — the episodes
       // hold the player, not the title. Without this retry every series in the
       // index looked like a title with no player and simply refused to open.
-      if (!view.video) view = (await ask("1")) ?? view;
+      if (!view.video) {
+        const season = await ask("1");
+        if (season && Object.keys(season).length) view = { ...view, ...season };
+      }
       const embed = Number(String(view.video?.embedUrl || "").match(/\/(\d+)/)?.[1]) || null;
       const raw = String(view.kpId ?? "");
       const kp = /^\d+$/.test(raw) && raw !== "0" ? raw : "";
@@ -375,7 +378,7 @@ Deno.serve(async (req) => {
       // series flag has to go with it: the crawler only set it on rows it
       // reached, so without this a title stays marked as a film forever even
       // after we have just proved otherwise by resolving its season.
-      const isSeries = !!view.season || !!view.seasonLast;
+      const isSeries = !!view.season || !!view.seasonLast || [3, 4, 5].includes(Number(view.type));
       await fetch(`${REST}?id=eq.${id}`, {
         method: "PATCH", headers: { ...HEADERS, Prefer: "return=minimal" },
         body: JSON.stringify({

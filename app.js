@@ -1758,7 +1758,15 @@
     // Warming the broker does not await this, and a sandbox that never reports
     // ready would otherwise surface as an unhandled rejection. Callers that do
     // await it still see the failure; this only silences the floating copy.
-    ready.catch(() => {});
+    ready.catch(() => {
+      // A slow/blocked first iframe must not poison every later attempt in
+      // this tab. The next user action may create a fresh broker.
+      if (liftwMediaBridge?.iframe === iframe) liftwMediaBridge = null;
+      clearTimeout(readyTimer);
+      window.removeEventListener("message", onMessage);
+      iframe.remove();
+      for (const id of pending.keys()) finish(id, new Error("LiftW media sandbox unavailable"));
+    });
 
     const finish = (id, error, value) => {
       const job = pending.get(id);
@@ -2041,6 +2049,42 @@ parent.postMessage({
     return pending;
   }
 
+  // Start one backup only when the primary is slow or fails. Fast requests
+  // keep their original cost; the losing fetch/iframe is cancelled.
+  function hedgedRequest(primary, backup, delayMs = 1800) {
+    return new Promise((resolve, reject) => {
+      const controllers = [new AbortController(), new AbortController()];
+      let done = false, startedBackup = false, failures = 0, lastError;
+      const finish = (value, index) => {
+        if (done) return;
+        done = true; clearTimeout(timer); controllers[1 - index].abort(); resolve(value);
+      };
+      const failed = (error, index) => {
+        if (done) return;
+        failures += 1; lastError = error;
+        if (index === 0) startBackup();
+        if (failures === 2) { done = true; clearTimeout(timer); reject(lastError); }
+      };
+      const startBackup = () => {
+        if (done || startedBackup) return;
+        startedBackup = true;
+        Promise.resolve().then(() => backup(controllers[1].signal)).then((v) => finish(v, 1), (e) => failed(e, 1));
+      };
+      const timer = setTimeout(startBackup, delayMs);
+      Promise.resolve().then(() => primary(controllers[0].signal)).then((v) => finish(v, 0), (e) => failed(e, 0));
+    });
+  }
+
+  async function liftwRequest(operation, signal, timeoutMs) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    const timer = setTimeout(abort, timeoutMs);
+    try { return await operation(controller.signal); }
+    finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
+  }
+
   // Same ring shape the Letterboxd lookup uses: a stable starting point per key
   // so a repeated query keeps hitting the same (warm) shard, with the rest as
   // failover. A shard that errors cools off rather than being retried per call.
@@ -2058,28 +2102,38 @@ parent.postMessage({
     const now = Date.now();
     const order = liftwEndpointOrder(key);
     const ready = order.filter((endpoint) => (liftwCooldown.get(endpoint) || 0) <= now);
-    let lastError = null;
-    // Every shard cooling at once must not mean "no LiftW": try them anyway
-    // rather than reporting a failure the user cannot act on.
-    for (const endpoint of (ready.length ? ready : order)) {
+    const endpoints = ready.length ? ready : order;
+    const ask = async (endpoint, signal) => {
       const url = new URL(endpoint);
       for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value);
       try {
-        // The parsed playlist already has a five-hour local TTL. Revalidate
-        // info when that expires, including relays still serving old headers.
-        const response = await fetchWithTimeout(url.href, params.mode === "info" ? { cache: "no-cache" } : {}, 9000);
-        if (!response.ok) throw new Error(`liftw relay ${response.status}`);
-        const payload = await response.json();
-        if (payload?.error) throw new Error(String(payload.error));
+        const payload = await liftwRequest(async (requestSignal) => {
+          const response = await fetch(url.href, { signal: requestSignal,
+            ...(params.mode === "info" ? { cache: "no-cache" } : {}) });
+          if (!response.ok) throw new Error(`liftw relay ${response.status}`);
+          const data = await response.json();
+          if (data?.error) throw new Error(String(data.error));
+          return data;
+        }, signal, 9000);
         liftwCooldown.delete(endpoint);
         return payload;
       } catch (error) {
-        lastError = error;
-        liftwCooldown.set(endpoint, Date.now() + LIFTW_COOLDOWN_MS);
-        log("liftw-relay-warn", `${new URL(endpoint).hostname}: ${error.message}`);
+        if (!signal?.aborted) {
+          liftwCooldown.set(endpoint, Date.now() + LIFTW_COOLDOWN_MS);
+          log("liftw-relay-warn", `${new URL(endpoint).hostname}: ${error.message}`);
+        }
+        throw error;
       }
-    }
-    throw lastError || new Error("LiftW недоступен");
+    };
+    if (endpoints.length === 1) return ask(endpoints[0]);
+    return hedgedRequest((signal) => ask(endpoints[0], signal), async (signal) => {
+      let lastError;
+      for (const endpoint of endpoints.slice(1)) {
+        if (signal.aborted) throw new Error("LiftW request cancelled");
+        try { return await ask(endpoint, signal); } catch (error) { lastError = error; }
+      }
+      throw lastError || new Error("LiftW недоступен");
+    });
   }
 
   async function fetchLiftwTitle(id) {
@@ -2153,34 +2207,36 @@ parent.postMessage({
     return url.href;
   }
 
-  // Whichever host answers first wins. A host that is blocked or refuses this
-  // address must cost one failed request, not the title.
+  // A slow null-origin fetch must not consume two nine-second timeouts
+  // before the working server relay gets a chance to answer.
   async function fetchLiftwEmbed(candidates) {
-    let lastError = null;
-    for (const url of candidates) {
-      const viaRelay = LIFTW_ENDPOINTS.some((endpoint) => url.startsWith(endpoint));
-      try {
-        // Our own relay is fetched plainly; a third-party host still goes
-        // through the null-origin sandbox so it never learns who is watching.
-        const html = viaRelay
-          ? await (await fetchWithTimeout(url, {}, 12000)).text()
-          : await fetchThirdPartyText(url, {
-            preferSandbox: true,
-            directFallback: false,
-            label: "liftw-embed",
-            timeoutMs: 9000,
-            sandboxTimeoutMs: 9000,
-          });
-        // A blocked host can answer with something that is not the player at
-        // all, so the payload has to be recognised before it counts as success.
-        if (/makePlayer\s*\(/.test(String(html || ""))) return html;
-        throw new Error("ответ без makePlayer");
-      } catch (error) {
-        lastError = error;
-        log("liftw-embed-warn", `${new URL(url).hostname}: ${error.message}`);
+    const direct = candidates.filter((url) => !LIFTW_ENDPOINTS.some((endpoint) => url.startsWith(endpoint)));
+    const relays = candidates.filter((url) => LIFTW_ENDPOINTS.some((endpoint) => url.startsWith(endpoint)));
+    const read = async (urls, viaRelay, signal) => {
+      let lastError;
+      for (const url of urls) {
+        if (signal?.aborted) throw new Error("LiftW request cancelled");
+        try {
+          const html = viaRelay
+            ? await liftwRequest(async (requestSignal) => {
+              const response = await fetch(url, { signal: requestSignal });
+              if (!response.ok) throw new Error(`LiftW embed ${response.status}`);
+              return response.text();
+            }, signal, 12000)
+            : await fetchThirdPartyText(url, { preferSandbox: true, directFallback: false,
+              label: "liftw-embed", timeoutMs: 9000, sandboxTimeoutMs: 9000, signal });
+          if (/makePlayer\s*\(/.test(String(html || ""))) return html;
+          throw new Error("ответ без makePlayer");
+        } catch (error) {
+          lastError = error;
+          if (!signal?.aborted) log("liftw-embed-warn", `${new URL(url).hostname}: ${error.message}`);
+        }
       }
-    }
-    throw lastError || new Error("LiftW не отдал плеер");
+      throw lastError || new Error("LiftW не отдал плеер");
+    };
+    if (!direct.length) return read(relays, true);
+    if (!relays.length) return read(direct, false);
+    return hedgedRequest((signal) => read(direct, false, signal), (signal) => read(relays, true, signal));
   }
 
   // A movie's `cc` is a JSON array of {url,name} sitting unquoted in the same
@@ -8429,7 +8485,7 @@ ${discovery}
     if (options.directOnly) return directFetchText(url, timeoutMs);
     if (preferSandbox) {
       try {
-        return await sandboxFetchText(url, options.label, sandboxTimeoutMs);
+        return await sandboxFetchText(url, options.label, sandboxTimeoutMs, options.signal);
       } catch (error) {
         if (options.directFallback === false) throw error;
         log("fetch-warn", "sandbox fetch failed; trying direct CORS", { url, message: error.message });
@@ -8496,7 +8552,7 @@ ${discovery}
     });
   }
 
-  function sandboxFetchText(url, label, timeoutMs) {
+  function sandboxFetchText(url, label, timeoutMs, signal) {
     if (!isOpaqueFetchUrl(url)) return Promise.reject(new Error(`Sandbox fetch blocked for ${url}`));
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     return new Promise((resolve, reject) => {
@@ -8504,8 +8560,12 @@ ${discovery}
       iframe.sandbox = "allow-scripts";
       iframe.referrerPolicy = "no-referrer";
       iframe.style.cssText = "position:absolute;width:1px;height:1px;left:-9999px;top:-9999px;border:0";
+      let settled = false;
+      const cancelled = () => cleanup(new Error("Sandbox fetch cancelled"));
       const timer = setTimeout(() => cleanup(new Error(`Sandbox fetch timeout for ${url}`)), timeoutMs || 30000);
       const cleanup = (error, value) => {
+        if (settled) return;
+        settled = true; signal?.removeEventListener("abort", cancelled);
         clearTimeout(timer);
         window.removeEventListener("message", onMessage);
         iframe.remove();
@@ -8521,6 +8581,8 @@ ${discovery}
         if (!data.ok) { cleanup(new Error(data.error || `Sandbox fetch failed for ${url}`)); return; }
         cleanup(null, data.text);
       };
+      signal?.addEventListener("abort", cancelled, { once: true });
+      if (signal?.aborted) { cancelled(); return; }
       window.addEventListener("message", onMessage);
       iframe.addEventListener("load", () => iframe.contentWindow.postMessage({ alphyFetch: true, id, url }, "*"), { once: true });
       iframe.srcdoc = `<!doctype html><meta charset="utf-8"><script>
@@ -10378,12 +10440,44 @@ addEventListener('message', async (event) => {
       origin.textContent = entry.originName;
       row.appendChild(origin);
     }
-    row.addEventListener("mousedown", (event) => {
-      // mousedown, not click: the input's blur would close the list first.
-      event.preventDefault();
-      chooseSuggest(entry);
-    });
+    bindSuggestActivation(row, () => chooseSuggest(entry));
+    const warm = () => {
+      const id = entry.liftId || (entry.target?.kind === "lift" ? entry.target.liftId : null);
+      if (id) prefetchLiftwTitle(id);
+    };
+    row.addEventListener("pointerenter", warm, { passive: true });
+    row.addEventListener("focus", warm);
+    row.addEventListener("pointerdown", warm, { passive: true });
     return row;
+  }
+
+  function bindSuggestActivation(row, choose) {
+    let down = null, chosen = false, cancelledPointer = false;
+    const activate = () => { if (!chosen) { chosen = true; choose(); } };
+    row.addEventListener("pointerdown", (event) => {
+      if (event.isPrimary === false || event.button > 0) return;
+      // Keep the input focused until pointerup; iOS may otherwise remove the
+      // blurred suggestion before its synthesized mouse/click events arrive.
+      event.preventDefault();
+      cancelledPointer = false;
+      down = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    });
+    row.addEventListener("pointerup", (event) => {
+      if (!down || down.id !== event.pointerId) return;
+      const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y);
+      down = null;
+      cancelledPointer = moved > 12;
+      if (!cancelledPointer) { event.preventDefault(); activate(); }
+    });
+    row.addEventListener("pointercancel", () => { down = null; cancelledPointer = true; });
+    row.addEventListener("mousedown", (event) => {
+      if (!window.PointerEvent && event.button === 0) { event.preventDefault(); activate(); }
+    });
+    // Keyboard/assistive activation and legacy browsers retain normal buttons.
+    row.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (!cancelledPointer || event.detail === 0) activate();
+    });
   }
 
   function chooseSuggest(entry) {
@@ -10409,6 +10503,7 @@ addEventListener('message', async (event) => {
   // does not resolve from Russia at all.
   async function openIndexSuggestion(entry) {
     let liftId = entry.liftId;
+    let kpId = entry.kpId || "", isSeries = entry.isSeries;
     if (!liftId) {
       showPlayerLoading();
       try {
@@ -10417,6 +10512,8 @@ addEventListener('message', async (event) => {
         );
         const payload = await response.json();
         liftId = payload?.embed_id || null;
+        kpId = validHistoryKpId(payload?.kp, kpId);
+        if (typeof payload?.is_series === "boolean") isSeries = payload.is_series;
         if (!liftId) throw new Error(payload?.error || "нет плеера");
       } catch (error) {
         showError(new Error(`Не удалось открыть: ${error.message}`));
@@ -10424,10 +10521,10 @@ addEventListener('message', async (event) => {
       }
     }
     const target = liftwTarget(liftId);
-    if (entry.kpId) target.kpId = entry.kpId;
+    if (kpId) target.kpId = kpId;
     openCuratedItem({
       title: entry.title, year: entry.year, poster: "",
-      isSeries: entry.isSeries, kpId: entry.kpId || "", target,
+      isSeries, kpId, target,
     });
   }
 
@@ -10951,6 +11048,10 @@ addEventListener('message', async (event) => {
       resolveRecommendationTarget,
       normalizeLiftwSearchPayload,
       liftwEmbedCandidates,
+      hedgedRequest,
+      fetchLiftwEmbed,
+      bindSuggestActivation,
+      liftwMediaBroker,
       liftwMeta,
       liftwTextTracks,
       liftwTarget,
