@@ -115,6 +115,23 @@ test("a letter is read from jsDelivr: pointer, index, base and delta, and never 
   assert.equal(plain(app.matchShard(rows, "пекло"))[0].slug, "peklo");
 });
 
+test("a file jsDelivr cannot serve is read from the same commit on rawcdn.githack, not from Supabase", async () => {
+  const githack = (commit, file) => `https://rawcdn.githack.com/nanohit/alphytv/${commit}/${file}`;
+  const index = { v: 1, l: { [P]: [`b/${P}.1111111111111111.json`, C1, 1, null, null] } };
+  const { app, asked } = await boot({
+    [POINTER]: { v: 1, c: C2, f: "i/0123456789abcdef.json" },
+    [cdn(C2, "i/0123456789abcdef.json")]: index,
+    // The base is missing on jsDelivr (404 from the fake), present on githack.
+    [githack(C1, `b/${P}.1111111111111111.json`)]: [row("Пираты", 2003, "piraty")],
+  });
+  const rows = plain(await app.loadShard("п"));
+  assert.equal(rows[0][2], "piraty");
+  assert.ok(asked.includes(cdn(C1, `b/${P}.1111111111111111.json`)), "jsDelivr is asked first");
+  assert.ok(asked.includes(githack(C1, `b/${P}.1111111111111111.json`)));
+  assert.ok(!asked.includes(githack(C2, "i/0123456789abcdef.json")), "a file jsDelivr served is not asked again elsewhere");
+  assert.ok(!asked.some((url) => url.includes("/index/v3/")), "Supabase is not needed while the reserve answers");
+});
+
 test("when the pointer cannot be read, the Supabase shard serves as before", async () => {
   const supabaseShard = `https://xoathqkggcuyoyutxwri.supabase.co/storage/v1/object/public/index/v3/${P}.json`;
   const { app, asked } = await boot({ [supabaseShard]: [row("Пираты", 2003, "piraty")] });

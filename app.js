@@ -9936,6 +9936,11 @@ addEventListener('message', async (event) => {
   // remain the fallback whenever this path cannot answer.
   const SEARCH_POINTER_URL = "https://xoathqkggcuyoyutxwri.supabase.co/storage/v1/object/public/index/pointer.json";
   const SEARCH_CDN_BASE = "https://cdn.jsdelivr.net/gh/nanohit/alphytv@";
+  // The same commit through rawcdn.githack, asked only once jsDelivr has failed
+  // for a file — for instance the 403 it gives a commit over 50 MB. Content-
+  // addressed and commit-pinned, so either host returns the same bytes.
+  const SEARCH_CDN_RESERVE = "https://rawcdn.githack.com/nanohit/alphytv/";
+  const SEARCH_CDN_FIRST_TIMEOUT_MS = 4000;
   // A long-open tab asks for a newer index at least this often while it is used.
   const SEARCH_POINTER_REFRESH_MS = 30 * 60e3;
   const SUGGEST_DEBOUNCE_MS = 260;
@@ -10192,7 +10197,15 @@ addEventListener('message', async (event) => {
       cdnFileMemory.set(key, stored.value);
       return stored.value;
     }
-    const value = await cdnJson(`${SEARCH_CDN_BASE}${commit}/${file}`, timeoutMs);
+    let value;
+    try {
+      // Headers from a warmed jsDelivr file take well under a second; waiting the
+      // whole budget for them would only delay the reserve.
+      value = await cdnJson(`${SEARCH_CDN_BASE}${commit}/${file}`, Math.min(timeoutMs, SEARCH_CDN_FIRST_TIMEOUT_MS));
+    } catch (error) {
+      log("search-cdn-reserve", { file, message: error.message });
+      value = await cdnJson(`${SEARCH_CDN_RESERVE}${commit}/${file}`, timeoutMs);
+    }
     cdnFileMemory.set(key, value);
     writeShard(key, { at: Date.now(), value });
     return value;
