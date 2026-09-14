@@ -67,7 +67,8 @@
   // loses nothing; one decimal is all a 0-5 score with two decimals can carry.
   const letterboxdOutOfTen = (score) => (Number(score) * 2).toFixed(1);
   const LETTERBOXD_COOLDOWN_MS = 5 * 60e3;
-  const LIFTW_TITLE_CACHE_NS = "liftwtitle.v1";
+  // v2: v1 could hold a relay's copy of the player page, whose media 410 in the browser.
+  const LIFTW_TITLE_CACHE_NS = "liftwtitle.v2";
   const LIFTW_KP_OF_CACHE_NS = "liftwkpof.v2";
   const LIFTW_BY_KP_CACHE_NS = "liftwbykp.v2";
   // The player is reached directly, not through the relay: lift3.ws serves the
@@ -2020,7 +2021,9 @@ parent.postMessage({
     }
     const pending = fetchLiftwTitle(key)
       .then((parsed) => {
-        cacheSet(LIFTW_TITLE_CACHE_NS, key, parsed, TTL.liftwtitle);
+        // A relay copy's media URLs belong to the relay; keeping it would make
+        // every open for five hours start with a 410.
+        if (!parsed.viaRelay) cacheSet(LIFTW_TITLE_CACHE_NS, key, parsed, TTL.liftwtitle);
         return parsed;
       })
       .finally(() => liftwTitleInflight.delete(key));
@@ -2141,7 +2144,7 @@ parent.postMessage({
     const candidates = liftwEmbedCandidates(info?.iframe_uri);
     if (!candidates.length) throw new Error("LiftW не выдал ссылку на плеер");
 
-    const html = await fetchLiftwEmbed(candidates);
+    const { html, viaRelay } = await fetchLiftwEmbed(candidates);
     const parsed = parseZenithEmbed(html);
     const seasons = parsed.playlist?.seasons || [];
     if (!seasons.length && !bestLiftwSource(parsed.sources)) {
@@ -2155,6 +2158,7 @@ parent.postMessage({
       textTracks: liftwTextTracks(html),
       meta: liftwMeta(info),
       playlist: { current: parsed.playlist?.current || null, seasons },
+      viaRelay,
     };
   }
 
@@ -2207,36 +2211,47 @@ parent.postMessage({
     return url.href;
   }
 
-  // A slow null-origin fetch must not consume two nine-second timeouts
-  // before the working server relay gets a chance to answer.
+  // The player page is minted for whoever fetches it: its media URLs carry a
+  // hash of that address and user agent (hi/hu), and the CDN answers 410 to
+  // anyone else. Measured on one title: the browser's own copy served the init
+  // segment 200, the relay's copy 410. So the relay is never raced against the
+  // direct fetch — winning that race after 1.8 s made a slow first connection
+  // end in a page that could not play, cached for five hours. It is asked only
+  // once the direct attempts have failed, for the playlist and metadata, and
+  // the caller is told the media will not play from it.
   async function fetchLiftwEmbed(candidates) {
     const direct = candidates.filter((url) => !LIFTW_ENDPOINTS.some((endpoint) => url.startsWith(endpoint)));
     const relays = candidates.filter((url) => LIFTW_ENDPOINTS.some((endpoint) => url.startsWith(endpoint)));
-    const read = async (urls, viaRelay, signal) => {
-      let lastError;
-      for (const url of urls) {
-        if (signal?.aborted) throw new Error("LiftW request cancelled");
-        try {
-          const html = viaRelay
-            ? await liftwRequest(async (requestSignal) => {
-              const response = await fetch(url, { signal: requestSignal });
-              if (!response.ok) throw new Error(`LiftW embed ${response.status}`);
-              return response.text();
-            }, signal, 12000)
-            : await fetchThirdPartyText(url, { preferSandbox: true, directFallback: false,
-              label: "liftw-embed", timeoutMs: 9000, sandboxTimeoutMs: 9000, signal });
-          if (/makePlayer\s*\(/.test(String(html || ""))) return html;
-          throw new Error("ответ без makePlayer");
-        } catch (error) {
-          lastError = error;
-          if (!signal?.aborted) log("liftw-embed-warn", `${new URL(url).hostname}: ${error.message}`);
-        }
+    const hasPlayer = (html) => /makePlayer\s*\(/.test(String(html || ""));
+    let lastError;
+    for (const url of direct) {
+      try {
+        const html = await fetchThirdPartyText(url, { preferSandbox: true, directFallback: false,
+          label: "liftw-embed", timeoutMs: 9000, sandboxTimeoutMs: 9000 });
+        if (hasPlayer(html)) return { html, viaRelay: false };
+        throw new Error("ответ без makePlayer");
+      } catch (error) {
+        lastError = error;
+        log("liftw-embed-warn", `${new URL(url).hostname}: ${error.message}`);
+        // The bare path is the same host: after a timeout it would only wait again.
+        if (/timeout/i.test(error.message)) break;
       }
-      throw lastError || new Error("LiftW не отдал плеер");
-    };
-    if (!direct.length) return read(relays, true);
-    if (!relays.length) return read(direct, false);
-    return hedgedRequest((signal) => read(direct, false, signal), (signal) => read(relays, true, signal));
+    }
+    for (const url of relays) {
+      try {
+        const html = await liftwRequest(async (signal) => {
+          const response = await fetch(url, { signal });
+          if (!response.ok) throw new Error(`LiftW embed ${response.status}`);
+          return response.text();
+        }, undefined, 12000);
+        if (hasPlayer(html)) return { html, viaRelay: true };
+        throw new Error("ответ без makePlayer");
+      } catch (error) {
+        lastError = error;
+        log("liftw-embed-warn", `${new URL(url).hostname}: ${error.message}`);
+      }
+    }
+    throw lastError || new Error("LiftW не отдал плеер");
   }
 
   // A movie's `cc` is a JSON array of {url,name} sitting unquoted in the same
