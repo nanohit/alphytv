@@ -425,11 +425,22 @@
     showDialog();
     load();
   });
-  el.close?.addEventListener("click", closeDialog);
+  // Closing or reloading drops rows that were never saved, and said nothing:
+  // a key added and then "Обновить" never reached the server (2026-09-14).
+  const discardUnsaved = () => !state.dirty || window.confirm("Есть несохранённые изменения. Выбросить их?");
+  el.close?.addEventListener("click", () => {
+    if (!discardUnsaved()) return;
+    state.dirty = false;
+    closeDialog();
+  });
   el.add?.addEventListener("click", addKey);
   el.testAll?.addEventListener("click", testAll);
   el.reveal?.addEventListener("click", () => { state.revealAll = !state.revealAll; render(); });
-  el.reload?.addEventListener("click", load);
+  el.reload?.addEventListener("click", () => {
+    if (!discardUnsaved()) return;
+    state.dirty = false;
+    load();
+  });
   el.save?.addEventListener("click", save);
   el.dialog?.addEventListener("cancel", (event) => {
     if (!state.dirty) return;

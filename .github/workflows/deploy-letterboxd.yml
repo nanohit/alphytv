@@ -26,6 +26,8 @@ jobs:
             token_secret: SUPABASE_ACCESS_TOKEN_CUY
           - project: hrtnvhafwzimjstvegno
             token_secret: SUPABASE_ACCESS_TOKEN_HRT
+          - project: pvwrwsnzqaldyuvlttlv
+            token_secret: SUPABASE_ACCESS_TOKEN_PVW
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
