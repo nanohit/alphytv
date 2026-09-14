@@ -37,6 +37,7 @@
     "https://gzwynsvcydynqidwxjru.supabase.co/functions/v1/liftw",
     "https://cuyofxgofmhdugauoqzt.supabase.co/functions/v1/liftw",
     "https://hrtnvhafwzimjstvegno.supabase.co/functions/v1/liftw",
+    "https://pvwrwsnzqaldyuvlttlv.supabase.co/functions/v1/liftw",
   ];
   const LIFTW_COOLDOWN_MS = 5 * 60e3;
   // Letterboxd publishes no API and sends no CORS header, so the lookup runs on
@@ -49,6 +50,7 @@
     "https://gzwynsvcydynqidwxjru.supabase.co/functions/v1/letterboxd",
     "https://cuyofxgofmhdugauoqzt.supabase.co/functions/v1/letterboxd",
     "https://hrtnvhafwzimjstvegno.supabase.co/functions/v1/letterboxd",
+    "https://pvwrwsnzqaldyuvlttlv.supabase.co/functions/v1/letterboxd",
   ];
   const LETTERBOXD_CACHE_NS = "letterboxd.v1";
   const LETTERBOXD_REVIEWS_NS = "letterboxd.reviews.v1";
@@ -2339,12 +2341,23 @@ parent.postMessage({
   const letterboxdInflight = new Map();
   const letterboxdAsked = new Map();
 
+  // Each project keeps its own table of ratings, so a film's project must not
+  // move when the ring grows. The first four split ids by hash % 4; a project
+  // added later takes only the ids with hash % n === n - 1 — its fair share —
+  // and every other film stays on the table that already holds its rating.
+  // scripts/bake-curated-letterboxd.mjs repeats this; a test keeps them equal.
+  function letterboxdShardIndex(hash, count) {
+    let index = hash % Math.min(count, 4);
+    for (let n = 5; n <= count; n += 1) if (hash % n === n - 1) index = n - 1;
+    return index;
+  }
+
   // Deterministic first pick, then the rest of the ring. Keeping a film pinned
   // to one project is what makes the function's own Cache-Control worth having.
   function letterboxdEndpointOrder(imdbId) {
     let hash = 0;
     for (const char of String(imdbId)) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0;
-    const start = hash % LETTERBOXD_ENDPOINTS.length;
+    const start = letterboxdShardIndex(hash, LETTERBOXD_ENDPOINTS.length);
     return LETTERBOXD_ENDPOINTS.map((_, index) =>
       LETTERBOXD_ENDPOINTS[(start + index) % LETTERBOXD_ENDPOINTS.length]);
   }
@@ -11115,6 +11128,7 @@ addEventListener('message', async (event) => {
       findLiftwByKpId,
       liftwKpIdFor,
       letterboxdEndpointOrder,
+      letterboxdShardIndex,
       letterboxdRating,
       letterboxdBatch,
       letterboxdReviews,

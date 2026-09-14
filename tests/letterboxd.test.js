@@ -31,7 +31,7 @@ const ok = (body) => ({ ok: true, status: 200, headers: { get: () => "" }, json:
 test("a film always goes to the same project, and the ring is the failover order", async () => {
   const { helpers } = await boot();
   const endpoints = helpers.LETTERBOXD_ENDPOINTS;
-  assert.equal(endpoints.length, 4);
+  assert.equal(endpoints.length, 5);
   assert.ok(endpoints.every((url) => /^https:\/\/[a-z]+\.supabase\.co\/functions\/v1\/letterboxd$/.test(url)));
 
   // Deterministic: the same id always starts at the same project.
@@ -45,7 +45,22 @@ test("a film always goes to the same project, and the ring is the failover order
   // And the load actually spreads rather than pinning everything to one.
   const starts = new Set();
   for (let i = 1000; i < 1200; i += 1) starts.add(helpers.letterboxdEndpointOrder(`tt${i}0000`)[0]);
-  assert.equal(starts.size, 4, "ids should reach all four managed projects");
+  assert.equal(starts.size, 5, "ids should reach every managed project");
+});
+
+test("a fifth project takes a fifth of the films and moves nobody else", async () => {
+  const { helpers } = await boot();
+  const shard = (hash, count) => helpers.letterboxdShardIndex(hash, count);
+  let moved = 0, toNew = 0;
+  const total = 20000;
+  for (let hash = 7; hash < 7 + total; hash += 1) {
+    const before = shard(hash, 4), after = shard(hash, 5);
+    assert.equal(before, hash % 4, "the first four keep the placement they always had");
+    if (after !== before) { moved += 1; assert.equal(after, 4, "a film only ever moves to the new project"); }
+    if (after === 4) toNew += 1;
+  }
+  assert.equal(moved, toNew);
+  assert.ok(Math.abs(toNew / total - 0.2) < 0.01, `new project share ${toNew / total}`);
 });
 
 test("every serving shard is managed by the deploy matrix", async () => {
@@ -342,7 +357,7 @@ test("rows rendered together share one request per shard, not one per row", asyn
   }
   const expected = [...perShard.values()].reduce((sum, n) => sum + Math.ceil(n / 60), 0);
   assert.equal(asked.length, expected, `${asked.length} requests for twelve rows`);
-  assert.ok(asked.length <= 4);
+  assert.ok(asked.length <= helpers.LETTERBOXD_ENDPOINTS.length, "at most one request per shard");
   const sent = asked.flatMap(idsOf);
   assert.equal(sent.length, 120, "no film may be asked twice");
   assert.equal(new Set(sent).size, 120, "and none may be left out");

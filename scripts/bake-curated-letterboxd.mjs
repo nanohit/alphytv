@@ -29,6 +29,7 @@ export const LETTERBOXD_ENDPOINTS = [
   "https://gzwynsvcydynqidwxjru.supabase.co/functions/v1/letterboxd",
   "https://cuyofxgofmhdugauoqzt.supabase.co/functions/v1/letterboxd",
   "https://hrtnvhafwzimjstvegno.supabase.co/functions/v1/letterboxd",
+  "https://pvwrwsnzqaldyuvlttlv.supabase.co/functions/v1/letterboxd",
 ];
 const BATCH_MAX = 60;
 const IMDB_RE = /^tt\d{6,10}$/;
@@ -36,7 +37,10 @@ const IMDB_RE = /^tt\d{6,10}$/;
 export function endpointFor(imdb) {
   let hash = 0;
   for (const char of String(imdb)) hash = (Math.imul(hash, 31) + char.charCodeAt(0)) >>> 0;
-  return LETTERBOXD_ENDPOINTS[hash % LETTERBOXD_ENDPOINTS.length];
+  let index = hash % Math.min(LETTERBOXD_ENDPOINTS.length, 4);
+  // Same rule as letterboxdShardIndex in app.js: a later project takes only its share.
+  for (let n = 5; n <= LETTERBOXD_ENDPOINTS.length; n += 1) if (hash % n === n - 1) index = n - 1;
+  return LETTERBOXD_ENDPOINTS[index];
 }
 
 // Same key the identity layer and build-imdb-map.mjs use.

@@ -31,6 +31,7 @@ const PROJECTS = [
   "gzwynsvcydynqidwxjru",
   "cuyofxgofmhdugauoqzt",
   "hrtnvhafwzimjstvegno",
+  "pvwrwsnzqaldyuvlttlv",
 ];
 
 // Cold isolates are where a different NAT address would show up, if it ever
