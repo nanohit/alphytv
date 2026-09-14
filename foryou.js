@@ -261,10 +261,13 @@
   // could not answer — then the caller carries on exactly as before.
   const sharedInflight = new Map();
   const sharedCooldown = new Map();
-  async function sharedUnofficialGet(path) {
+  // `card`: the caller paints a card in a row — «Похожее», search results — and
+  // is content with last week's copy. Only a film's own page asks for a fresher
+  // one, so a row of eighteen does not send eighteen films back to the provider.
+  async function sharedUnofficialGet(path, { card = false } = {}) {
     const target = sharedTarget(path);
     if (!target) return undefined;
-    const key = JSON.stringify(target);
+    const key = JSON.stringify(target) + (card ? "|card" : "");
     if (sharedInflight.has(key)) return sharedInflight.get(key);
     const pending = (async () => {
       if (target.kind === "search" && globalThis.crypto?.subtle && typeof TextEncoder !== "undefined") {
@@ -281,6 +284,12 @@
           const value = await sharedJson(kpObjectUrl(target.kind, target.id, { replica }), 2500);
           if (matches(value)) stored = value;
           if (matches(value) && Date.parse(value.freshUntil) > Date.now()) return unwrapShared(value);
+        }
+      }
+      if (card && !stored && target.id) {
+        for (const replica of [false, true]) {
+          const value = await sharedJson(kpObjectUrl(target.kind, target.id, { replica, previous: true }), 2000);
+          if (matches(value) && value.status === "ok") return unwrapShared(value);
         }
       }
       if (budgetLeft() > 0 && (sharedCooldown.get(key) || 0) <= Date.now()) {
@@ -327,9 +336,9 @@
   }
 
   // Kept under its exported name for callers; keys never leave the server.
-  async function directUnofficialGet(path) {
+  async function directUnofficialGet(path, options = {}) {
     if (!directUnofficialUrl(path)) throw new Error("unsupported unofficial path");
-    const shared = await sharedUnofficialGet(path);
+    const shared = await sharedUnofficialGet(path, options);
     if (shared !== undefined) return shared;
     if (budgetLeft() <= 0) throw budgetError();
     const error = new Error("shared metadata temporarily unavailable");
@@ -578,7 +587,7 @@
     // distinct title is fetched once for all visitors, preserving the full row.
     await promisePool(missing.map((id) => async () => {
       try {
-        const film = await directUnofficialGet(`/api/v2.2/films/${encodeURIComponent(id)}`);
+        const film = await directUnofficialGet(`/api/v2.2/films/${encodeURIComponent(id)}`, { card: true });
         const meta = normalizeFilmMeta(film);
         lsSet(`${META_PREFIX}${id}`, meta, META_TTL);
         result.set(id, meta);
@@ -1005,7 +1014,7 @@
       buildSeeds, scoreCandidates, normTitle, recencyWeight, engagementWeight,
       toCuratedItem, hiddenIds, rankSimilars, affinityIndex, personNames, personRefs,
       directUnofficialUrl, directUnofficialGet,
-      sharedTarget, sharedUnofficialGet, kpObjectUrl, kpPlacementGroup, apiGet,
+      sharedTarget, sharedUnofficialGet, kpObjectUrl, kpPlacementGroup, apiGet, fetchMetaBatch,
     },
   };
 })();

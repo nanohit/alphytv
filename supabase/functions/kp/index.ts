@@ -58,6 +58,27 @@ export function objectSlot(kind: string, id: string, now = Date.now()): number {
 export const slotEnd = (kind: string, id: string, slot: number): number =>
   (slot + 1 - placementGroup(id) / 256) * FRESH_MS[kind];
 export const objectPath = (kind: string, id: string, slot = objectSlot(kind, id)): string => `v2/${kind}/${id}/${slot}.json`;
+
+// A film's card is refetched weekly only while it can still change: a release
+// of this year or last, or a series still coming out. 86% of the catalogue is
+// older, and its rating and description barely move in a month — its card is
+// carried into the new weekly slot as it is, without spending quota, until the
+// fetch it came from is RENEW_MS old.
+export const RENEW_MS = 60 * DAY_MS;
+const SERIES_TYPES = new Set(["TV_SERIES", "MINI_SERIES", "TV_SHOW"]);
+export function lastingFilm(data: any, fetchedAt: number, now: number): boolean {
+  if (!data || typeof data !== "object" || !(now - fetchedAt < RENEW_MS)) return false;
+  const thisYear = new Date(now).getUTCFullYear();
+  // A card without a year (Number(null) is 0) is treated as new.
+  const year = Number(data.year);
+  if (!Number.isInteger(year) || year < 1880 || year >= thisYear - 1) return false;
+  // `serial` is false on mini-series; the type is what tells a series apart.
+  if ((SERIES_TYPES.has(data.type) || data.serial === true) && data.completed !== true) {
+    const end = Number(data.endYear);
+    if (!(Number.isInteger(end) && end > 0 && end < thisYear - 1)) return false;
+  }
+  return true;
+}
 const MISSING_MS = 6 * 3600e3;
 const RETRY_MS = 60_000;
 const NO_BUDGET_RETRY_MS = 10 * 60_000;
@@ -152,8 +173,60 @@ export function createKpHandler(deps: Deps) {
     } catch { return false; }
   }
 
-  async function fill(kind: string, id: string, version: number, query = "") {
+  // Both replicas, then the caller's answer. A slot's first writer wins, and
+  // every newer slot has its own URL, so a late writer cannot regress one.
+  async function publish(kind: string, id: string, version: number, slot: number, object: Record<string, unknown>) {
+    const body = JSON.stringify(object);
+    let host = hostFor(id);
+    const writes = await Promise.allSettled([host, replicaFor(id)].map(async (target) => {
+      await deps.putObject(target, objectPath(kind, id, slot), body, 31536000);
+      return target;
+    }));
+    const written = writes.find((result) => result.status === "fulfilled");
+    if (!written || written.status !== "fulfilled") {
+      // The caller still gets its answer; the next miss after the back-off
+      // will publish it.
+      await finish(kind, id, version, { p_retry_at: new Date(now() + RETRY_MS).toISOString() });
+      return reply(object, 200);
+    }
+    host = written.value;
+    await finish(kind, id, version, {
+      p_status: String(object.status),
+      p_host: host,
+      p_fresh_until: object.freshUntil,
+      p_bytes: body.length,
+    });
+    return reply(object, 200, "public, max-age=300");
+  }
+
+  // The card this film last published, if it may simply move into `slot`.
+  // The lease row says where and until when it was published, so this is one
+  // read, and a film with no usable card goes straight on to the provider.
+  async function carriedFilm(id: string, slot: number, last: any) {
+    if (last?.status !== "ok" || !last.fresh_until) return null;
+    const previousSlot = objectSlot("film", id, Date.parse(last.fresh_until) - 1);
+    if (!(previousSlot < slot)) return null;
+    for (const host of [...new Set([last.host || hostFor(id), hostFor(id), replicaFor(id)])]) {
+      let previous;
+      try { previous = await deps.getObject(host, objectPath("film", id, previousSlot)); } catch { previous = null; }
+      if (previous?.v !== 1 || previous.kind !== "film" || String(previous.id) !== id || previous.status !== "ok") continue;
+      if (!lastingFilm(previous.data, Date.parse(previous.fetchedAt), now())) return null;
+      return {
+        ...previous,
+        // fetchedAt stays the provider's: it is what the sixty days count from.
+        freshUntil: new Date(slotEnd("film", id, slot)).toISOString(),
+        renewedAt: new Date(now()).toISOString(),
+      };
+    }
+    return null;
+  }
+
+  async function fill(kind: string, id: string, version: number, query = "", last: any = null) {
     const slot = objectSlot(kind, id, now());
+    if (kind === "film") {
+      const carried = await carriedFilm(id, slot, last);
+      if (carried) return publish(kind, id, version, slot, carried);
+    }
     let keys;
     try { keys = await deps.keys(); }
     catch {
@@ -214,27 +287,7 @@ export function createKpHandler(deps: Deps) {
         await finish(kind, id, version, {});
         return reply({ error: "slot_expired" }, 503);
       }
-      const body = JSON.stringify(object);
-      let host = hostFor(id);
-      const writes = await Promise.allSettled([host, replicaFor(id)].map(async (target) => {
-        await deps.putObject(target, objectPath(kind, id, slot), body, 31536000);
-        return target;
-      }));
-      const written = writes.find((result) => result.status === "fulfilled");
-      if (!written || written.status !== "fulfilled") {
-        // The caller still gets its answer; the next miss after the back-off
-        // will publish it.
-        await finish(kind, id, version, { p_retry_at: new Date(now() + RETRY_MS).toISOString() });
-        return reply(object, 200);
-      }
-      host = written.value;
-      await finish(kind, id, version, {
-        p_status: object.status,
-        p_host: host,
-        p_fresh_until: object.freshUntil,
-        p_bytes: body.length,
-      });
-      return reply(object, 200, "public, max-age=300");
+      return publish(kind, id, version, slot, object);
     }
     await finish(kind, id, version, { p_retry_at: new Date(now() + RETRY_MS).toISOString() });
     return reply({ error: "keys_refused" }, 503);
@@ -264,7 +317,7 @@ export function createKpHandler(deps: Deps) {
     } catch {
       return reply({ error: "state_unavailable" }, 503);
     }
-    if (lease?.acquired) return fill(kind, id, lease.version, query);
+    if (lease?.acquired) return fill(kind, id, lease.version, query, lease);
 
     if (lease?.status === "missing" && isFresh(lease.fresh_until)) {
       return reply({ v: 1, kind, id: Number(id), status: "missing", data: null,

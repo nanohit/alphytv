@@ -322,3 +322,118 @@ test("a film the provider does not know fails like the provider's own 404", asyn
   await assert.rejects(api.apiGet("/api/v2.2/films/404404"), (error) => error.status === 404);
   assert.equal(calls.length, 1, "nobody asks the provider again");
 });
+
+// --- carrying an old film's card forward ------------------------------------
+// 86% of the catalogue predates last year; its card barely moves, so it is
+// moved into each new weekly slot as it is, spending no key, for sixty days
+// from the provider fetch it came from. New releases and running series are
+// still fetched every week.
+const DAY = 24 * 3600e3;
+const START = Date.parse("2026-09-11T12:00:00Z");
+const upstreamFilm = (body) => (path) => ({ status: 200, body: { kinopoiskId: Number(path.split("/").pop()), ...body } });
+
+test("an old film's card moves into the new week without spending a key", async () => {
+  const w = world({ upstream: upstreamFilm({ year: 1999, type: "FILM" }) });
+  const first = await w.ask("film", "301");
+  w.advance(8 * DAY);
+  const second = await w.ask("film", "301");
+  assert.equal(second.status, 200);
+  assert.equal(w.upstreamCalls.length, 1, "no provider call");
+  assert.equal([...w.keyDays.values()].reduce((a, b) => a + b, 0), 1, "and no key reserved for it");
+  assert.equal(second.body.fetchedAt, first.body.fetchedAt, "the age still counts from the provider fetch");
+  assert.ok(Date.parse(second.body.freshUntil) > START + 8 * DAY);
+  const path = objectPath("film", "301", objectSlot("film", "301", START + 8 * DAY));
+  assert.deepEqual(w.objects.get(`${hostFor("301")}/${path}`), second.body, "published where the browser looks this week");
+});
+
+test("a carried card is fetched again once its provider fetch is sixty days old", async () => {
+  const w = world({ upstream: upstreamFilm({ year: 1999, type: "FILM" }) });
+  for (let week = 0; week <= 10; week += 1) {
+    assert.equal((await w.ask("film", "301")).status, 200, `week ${week}`);
+    w.advance(7 * DAY);
+  }
+  assert.equal(w.upstreamCalls.length, 2, "day 0, then the first week past sixty days");
+});
+
+test("new releases and running series are still fetched every week", async () => {
+  for (const body of [
+    { year: 2026, type: "FILM" },
+    { year: 2025, type: "FILM" },
+    { year: 2010, type: "TV_SERIES", completed: false, endYear: null },
+    { year: 2012, type: "TV_SERIES", completed: false, endYear: 2025 },
+  ]) {
+    const w = world({ upstream: upstreamFilm(body) });
+    await w.ask("film", "77");
+    w.advance(8 * DAY);
+    await w.ask("film", "77");
+    assert.equal(w.upstreamCalls.length, 2, JSON.stringify(body));
+  }
+});
+
+test("a finished series is carried like a film; a card that is gone is simply fetched", async () => {
+  const series = world({ upstream: upstreamFilm({ year: 2019, type: "MINI_SERIES", serial: false, completed: true }) });
+  await series.ask("film", "1294079");
+  series.advance(8 * DAY);
+  await series.ask("film", "1294079");
+  assert.equal(series.upstreamCalls.length, 1);
+
+  const w = world({ upstream: upstreamFilm({ year: 1999, type: "FILM" }) });
+  await w.ask("film", "301");
+  w.objects.clear();
+  w.advance(8 * DAY);
+  assert.equal((await w.ask("film", "301")).status, 200);
+  assert.equal(w.upstreamCalls.length, 2);
+});
+
+test("only a film's card is carried; cast and similar films keep their month", async () => {
+  const w = world({ upstream: () => ({ status: 200, body: { total: 1, items: [{ filmId: 1 }] } }) });
+  await w.ask("similars", "301");
+  w.advance(31 * DAY);
+  await w.ask("similars", "301");
+  assert.equal(w.upstreamCalls.length, 2);
+});
+
+test("which cards last: old films and finished series, never this or last year's", async () => {
+  const { lastingFilm } = await import("../supabase/functions/kp/index.ts");
+  const now = Date.parse("2026-09-15T00:00:00Z");
+  const fresh = now - DAY;
+  assert.equal(lastingFilm({ year: 2024, type: "FILM" }, fresh, now), true);
+  assert.equal(lastingFilm({ year: 2025, type: "FILM" }, fresh, now), false);
+  assert.equal(lastingFilm({ year: null, type: "FILM" }, fresh, now), false, "an unknown year is treated as new");
+  assert.equal(lastingFilm({ year: 2015, type: "TV_SERIES", completed: false, endYear: 2019 }, fresh, now), true);
+  assert.equal(lastingFilm({ year: 2015, type: "TV_SHOW", completed: false }, fresh, now), false);
+  assert.equal(lastingFilm({ year: 2015, type: "FILM" }, now - 61 * DAY, now), false);
+  assert.equal(lastingFilm(null, fresh, now), false);
+});
+
+test("a card in a row takes last week's copy; only the film's own page asks for a fresh one", async () => {
+  const calls = [];
+  const api = await loadForYou(async (url) => {
+    calls.push(String(url));
+    const href = String(url);
+    if (href.includes("resolver.test/kp")) return json(wrapped("film", "501", { kinopoiskId: 501, year: 2026, rating: { kp: 8 } }));
+    if (!href.includes("/storage/")) throw new Error(`unexpected ${href}`);
+    // Only the previous weekly slot holds a copy.
+    return href === api.kpObjectUrl("film", "501", { previous: true }) || href === api.kpObjectUrl("film", "501", { replica: true, previous: true })
+      ? json(wrapped("film", "501", { kinopoiskId: 501, year: 2026, ratingKinopoisk: 7.5 }, { fresh: false }))
+      : json({}, 400);
+  });
+  const cards = await api.fetchMetaBatch(["501"]);
+  assert.ok(cards.get("501"), "the row card is painted from last week's copy");
+  assert.ok(!calls.some((url) => url.includes("resolver.test")), "and asks nobody to refresh it");
+
+  const page = await api.apiGet("/api/v2.2/films/501");
+  assert.equal(page.rating.kp, 8, "the film's page gets the refreshed card");
+  assert.ok(calls.some((url) => url.includes("resolver.test/kp?kind=film&id=501")));
+});
+
+test("a card with no copy at all is still filled", async () => {
+  const calls = [];
+  const api = await loadForYou(async (url) => {
+    calls.push(String(url));
+    if (String(url).includes("/storage/")) return json({}, 400);
+    return json(wrapped("film", "502", { kinopoiskId: 502, year: 1990 }));
+  });
+  assert.ok((await api.fetchMetaBatch(["502"])).get("502"));
+  assert.equal(calls.filter((url) => url.includes("resolver.test/kp?kind=film&id=502")).length, 1);
+});
