@@ -30940,7 +30940,7 @@
   "456": {
    "letter": "і",
    "b": "b/456.cefde8f70210d137.json",
-   "bc": "pending",
+   "bc": "44172fba721a6a499e5c2ffde7e10c2fdc3ec91f",
    "n": 6,
    "s": "2026-09-18T16:41:28.198Z",
    "rebased": "2026-09-18T16:43:28.198Z",
@@ -30984,7 +30984,7 @@
   "f8": {
    "letter": "ø",
    "b": "b/f8.a493f61c1a8aade8.json",
-   "bc": "pending",
+   "bc": "44172fba721a6a499e5c2ffde7e10c2fdc3ec91f",
    "n": 5,
    "s": "2026-09-18T16:41:26.717Z",
    "rebased": "2026-09-18T16:43:26.717Z",
@@ -30995,7 +30995,7 @@
   "44c": {
    "letter": "ь",
    "b": "b/44c.23bdf1a34b9ecc3b.json",
-   "bc": "pending",
+   "bc": "44172fba721a6a499e5c2ffde7e10c2fdc3ec91f",
    "n": 2,
    "s": "2026-09-18T16:41:27.223Z",
    "rebased": "2026-09-18T16:43:27.223Z",
@@ -31006,7 +31006,7 @@
   "49b": {
    "letter": "қ",
    "b": "b/49b.ee228381dc66d135.json",
-   "bc": "pending",
+   "bc": "44172fba721a6a499e5c2ffde7e10c2fdc3ec91f",
    "n": 14,
    "s": "2026-09-18T16:41:27.698Z",
    "rebased": "2026-09-18T16:43:27.698Z",
@@ -31017,7 +31017,7 @@
   "15f": {
    "letter": "ş",
    "b": "b/15f.e8a5e1d0662bea72.json",
-   "bc": "pending",
+   "bc": "44172fba721a6a499e5c2ffde7e10c2fdc3ec91f",
    "n": 6,
    "s": "2026-09-18T16:41:28.713Z",
    "rebased": "2026-09-18T16:43:28.713Z",
@@ -31050,7 +31050,7 @@
   "fe": {
    "letter": "þ",
    "b": "b/fe.eb596ada4b76f150.json",
-   "bc": "pending",
+   "bc": "44172fba721a6a499e5c2ffde7e10c2fdc3ec91f",
    "n": 4,
    "s": "2026-09-18T16:41:30.365Z",
    "rebased": "2026-09-18T16:43:30.365Z",
@@ -43699,15 +43699,15 @@
   "after_at": "2026-09-18T13:12:53.892Z",
   "after_id": 46001
  },
- "index": "i/15d92de4fcfc0265.json",
+ "index": "i/8c2e234ec836791a.json",
  "indexes": [
-  "i/fc6858f1134f9116.json",
   "i/d0647d72ae1bdf49.json",
   "i/51efc9b48549e98f.json",
-  "i/15d92de4fcfc0265.json"
+  "i/15d92de4fcfc0265.json",
+  "i/8c2e234ec836791a.json"
  ],
  "updated": "2026-09-18T16:43:22.123Z",
- "dataCommit": "22669d23e50d1c644e019fa9b0a593489575ac50",
+ "dataCommit": "44172fba721a6a499e5c2ffde7e10c2fdc3ec91f",
  "layout": 2,
  "partsCommit": null
 }
