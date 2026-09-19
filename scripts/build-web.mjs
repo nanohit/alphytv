@@ -8,6 +8,7 @@ const placeholder = "__ALPHY_ASSET_REV__";
 const staticAssets = [
   "app-shell.html",
   "styles.css",
+  "favicon.ico",
   "Logo.png",
   "identity.js",
   "foryou.js",
